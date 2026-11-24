@@ -228,12 +228,14 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
 }
 
 fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
+    let named = vault.is_some();
     let root = match vault {
         Some(v) => v,
         None => std::env::current_dir()?,
     };
     // brain writes an id into every note under its vault, so a folder holding far more than notes
-    // is refused.
+    // is refused. A git repository is refused only as the folder init happens to run in: a notes
+    // folder synced with git is a vault once its owner names it.
     let same = |a: &Path, b: &Path| {
         a.canonicalize()
             .ok()
@@ -241,7 +243,7 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     };
     let what = if std::env::home_dir().is_some_and(|home| same(&root, &home)) {
         Some("your home folder")
-    } else if root.join(".git").exists() {
+    } else if !named && root.join(".git").exists() {
         Some("a code repository")
     } else if root.canonicalize().is_ok_and(|r| r.parent().is_none()) {
         Some("the root of the disk")

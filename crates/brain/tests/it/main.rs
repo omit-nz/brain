@@ -86,8 +86,9 @@ fn init_then_status_reports_an_empty_vault() {
     assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
 }
 
-/// brain writes ids into every note under its vault, so a home folder or a code repository is
-/// refused as one, whether named or the folder init runs in.
+/// brain writes ids into every note under its vault, so a home folder is refused as one whether
+/// named or the folder init runs in, and a code repository when init falls back to the folder it
+/// runs in.
 #[test]
 fn init_refuses_a_home_folder_or_a_code_repository() {
     let h = Home::new();
@@ -99,7 +100,6 @@ fn init_refuses_a_home_folder_or_a_code_repository() {
         (fake_home.path(), None),
         (h.vault.path(), Some(fake_home.path())),
         (repo.path(), None),
-        (h.vault.path(), Some(repo.path())),
     ] {
         let mut args = vec!["init", "--me", "robin"];
         if let Some(v) = vault {
@@ -119,6 +119,38 @@ fn init_refuses_a_home_folder_or_a_code_repository() {
     assert_eq!(fs::read_dir(fake_home.path()).unwrap().count(), 1);
     assert_eq!(fs::read_dir(repo.path()).unwrap().count(), 1);
     assert!(!h.home.path().join("config").exists());
+}
+
+/// A notes folder synced with git (obsidian-git keeps `.git` in the vault root) is a vault when
+/// the person names it.
+#[test]
+fn a_named_vault_holding_git_is_accepted() {
+    let h = Home::new();
+    fs::create_dir_all(h.vault.path().join(".git")).unwrap();
+    h.put("a.md", "a note\n");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .current_dir(elsewhere.path())
+        .args([
+            "init",
+            "--me",
+            "robin",
+            "--vault",
+            h.vault.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(h.vault.path().join("0-inbox").is_dir());
+    assert_eq!(
+        fs::read_to_string(h.vault.path().join("a.md")).unwrap(),
+        "a note\n"
+    );
 }
 
 #[test]
