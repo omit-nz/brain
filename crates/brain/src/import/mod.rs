@@ -9,11 +9,11 @@ mod memory;
 mod report;
 mod vault;
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, bail};
-use brain_note::{Skip, Vault, rel_key};
+use brain_note::{Layout, Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Privacy, write_atomic};
 use jiff::ToSpan;
@@ -88,14 +88,18 @@ pub struct Written<'a> {
     pub today: Date,
     pub share: &'a [PathBuf],
     pub blocklist: Option<&'a Blocklist>,
-    pub inbox: &'a Path,
+    pub layout: &'a Layout,
 }
 
 impl Written<'_> {
-    /// Visibility for a note that declares none: a learning-loop rule that withholds it wins,
-    /// then a shared folder; everything else is private.
+    /// Visibility for a note that declares none: the inbox and the private folder stay private
+    /// whatever is shared, so a kept inbox note is not shared on the way out; then a learning-loop
+    /// rule that withholds it wins, then a shared folder; everything else is private.
     fn visibility(&self, rel: &Path) -> &'static str {
-        if self.blocklist.is_some_and(|b| b.withholds(&rel_key(rel))) {
+        if rel.starts_with(&self.layout.inbox)
+            || rel.starts_with(&self.layout.private)
+            || self.blocklist.is_some_and(|b| b.withholds(&rel_key(rel)))
+        {
             "private"
         } else if self.share.iter().any(|f| rel.starts_with(f)) {
             "shared"
@@ -119,6 +123,49 @@ fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The `--share` folders as vault paths, with `./` and a trailing `/` dropped. A folder is refused
+/// when it is empty or the vault itself, absolute, climbs out with `..`, or is not a folder of the
+/// source spelled exactly as it is there, since the match is exact and a near miss would
+/// silently share nothing.
+pub fn share_folders(src: &Vault, share: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
+    share
+        .iter()
+        .map(|f| {
+            let mut rel = PathBuf::new();
+            for c in f.components() {
+                match c {
+                    Component::CurDir => {}
+                    Component::Normal(name) => rel.push(name),
+                    _ => bail!("--share {}: name a folder inside the vault", f.display()),
+                }
+            }
+            if rel.as_os_str().is_empty() {
+                bail!(
+                    "--share {:?}: name a folder inside the vault",
+                    f.display().to_string()
+                );
+            }
+            let mut dir = src.root.clone();
+            for name in rel.iter() {
+                let found = std::fs::read_dir(&dir)
+                    .with_context(|| format!("reading {}", dir.display()))?
+                    .filter_map(Result::ok)
+                    .any(|e| e.file_name() == name && e.file_type().is_ok_and(|t| t.is_dir()));
+                if !found {
+                    bail!(
+                        "--share {}: {} has no folder {}",
+                        f.display(),
+                        src.root.display(),
+                        rel_key(&rel)
+                    );
+                }
+                dir.push(name);
+            }
+            Ok(rel)
+        })
         .collect()
 }
 
@@ -158,11 +205,16 @@ fn classify(
     let mut plan = ImportPlan::default();
     let all = sources(src, memory, &mut plan.skipped)?;
     let mut todo = Vec::new();
+    let mut claimed = HashSet::new();
     for s in all {
         let src_hash = hash(s.raw.as_bytes());
         let dst_path = dst.root.join(&s.dst_rel);
         let dst_hash = std::fs::read(&dst_path).ok().map(|b| hash(&b));
+        // Vault notes come first, so a vault note under working-memory/ keeps its path and the
+        // memory note meant for it is the conflict.
+        let first = claimed.insert(s.dst_rel.clone());
         match ledger.0.get(&s.key) {
+            _ if !first => plan.conflicts.push(rel_key(&s.dst_rel)),
             None if dst_hash.is_some() => plan.conflicts.push(rel_key(&s.dst_rel)),
             None => {
                 plan.new.push(rel_key(&s.dst_rel));

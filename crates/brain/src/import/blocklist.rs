@@ -8,6 +8,10 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use globset::{GlobBuilder, GlobMatcher};
 
+/// learning-loop's tiers. It refuses a whole config naming any other, and so does the import: a
+/// misspelt `private` must not quietly share what it was written to withhold.
+const TIERS: [&str; 3] = ["public", "listed", "private"];
+
 pub struct Blocklist {
     rules: Vec<(GlobMatcher, String)>,
 }
@@ -30,6 +34,12 @@ impl Blocklist {
                     path.display()
                 );
             };
+            if !TIERS.contains(&tier.trim()) {
+                bail!(
+                    "{}: rule {pattern:?} names tier {tier:?}, which is not one of {TIERS:?}",
+                    path.display()
+                );
+            }
             let glob = GlobBuilder::new(pattern)
                 .case_insensitive(true)
                 .build()

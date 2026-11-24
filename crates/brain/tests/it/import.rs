@@ -477,3 +477,232 @@ fn dry_run_writes_nothing() {
     assert_eq!(snapshot(i.h.vault.path()), before);
     assert!(!i.h.home.path().join("data/import-ledger.json").exists());
 }
+
+impl Import {
+    /// Runs an import expected to fail; returns its stderr.
+    fn import_fails(&self, extra: &[&str]) -> String {
+        let mut args = vec![
+            "--now",
+            NOW,
+            "import",
+            "learning-loop",
+            "--from",
+            self.src(),
+        ];
+        args.extend_from_slice(extra);
+        let out = self.h.brain().args(&args).output().unwrap();
+        assert!(!out.status.success(), "brain {args:?} did not fail");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    }
+
+    fn put_source(&self, rel: &str, text: &str) {
+        let p = self.src.path().join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    }
+}
+
+#[test]
+fn an_unknown_blocklist_tier_aborts_the_import() {
+    let i = Import::new();
+    let config = tempfile::tempdir().unwrap();
+    fs::create_dir_all(config.path().join("federation")).unwrap();
+    fs::write(
+        config.path().join("federation/config.json"),
+        r#"{"visibility": {"rules": [{"pattern": "**/*separation*", "tier": "Private"}]}}"#,
+    )
+    .unwrap();
+    let before = snapshot(i.h.vault.path());
+    let err = i.import_fails(&[
+        "--share",
+        "3-permanent",
+        "--ll-config",
+        config.path().to_str().unwrap(),
+    ]);
+    assert!(err.contains("Private"), "{err}");
+    assert_eq!(snapshot(i.h.vault.path()), before);
+}
+
+#[test]
+fn an_empty_or_escaping_share_folder_is_refused() {
+    let i = Import::new();
+    let before = snapshot(i.h.vault.path());
+    let outside = i.h.home.path().to_str().unwrap().to_string();
+    for bad in [
+        "",
+        ".",
+        "./",
+        "../3-permanent",
+        "3-permanent/../..",
+        outside.as_str(),
+    ] {
+        let err = i.import_fails(&["--share", bad, "--no-ll-config"]);
+        assert!(err.contains("--share"), "{bad:?}: {err}");
+    }
+    assert_eq!(snapshot(i.h.vault.path()), before);
+}
+
+#[test]
+fn a_share_folder_that_is_not_in_the_source_is_refused() {
+    let i = Import::new();
+    let before = snapshot(i.h.vault.path());
+    for bad in ["3-Permanent", "4-projects", "3-permanent/kept-idea.md"] {
+        let err = i.import_fails(&["--share", bad, "--no-ll-config"]);
+        assert!(err.contains(bad), "{bad:?}: {err}");
+    }
+    assert_eq!(snapshot(i.h.vault.path()), before);
+}
+
+#[test]
+fn a_share_folder_written_with_dot_or_slash_still_shares() {
+    for spelling in ["./3-permanent", "3-permanent/"] {
+        let i = Import::new();
+        i.import(&["--share", spelling, "--no-ll-config"]);
+        assert_eq!(
+            line(&i.copy("3-permanent/kept-idea.md"), "visibility"),
+            Some("shared"),
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
+fn sharing_the_inbox_or_private_folder_still_imports_private() {
+    let i = Import::new();
+    i.put_source(
+        "private/diary.md",
+        "---\nid: 0190a0a0-0000-7000-8000-00000000d1a1\n---\nA private thought.\n",
+    );
+    i.import(&["--share", "0-inbox", "--share", "private", "--no-ll-config"]);
+    assert_eq!(
+        line(&i.copy("0-inbox/captured.md"), "visibility"),
+        Some("private")
+    );
+    assert_eq!(
+        line(&i.copy("private/diary.md"), "visibility"),
+        Some("private")
+    );
+}
+
+#[test]
+fn a_misplaced_or_duplicate_visibility_is_kept_not_overridden() {
+    let i = Import::new();
+    let notes = [
+        (
+            "3-permanent/capital.md",
+            "---\nVisibility: private\n---\nCapital V.\n",
+        ),
+        (
+            "3-permanent/indented.md",
+            "---\n  visibility: private\n---\nIndented.\n",
+        ),
+        (
+            "3-permanent/twice.md",
+            "---\nvisibility: private\nvisibility: shared\n---\nTwice.\n",
+        ),
+    ];
+    for (rel, text) in notes {
+        i.put_source(rel, text);
+    }
+    i.import(&["--share", "3-permanent", "--no-ll-config"]);
+    for (rel, _) in notes {
+        let copy = i.copy(rel);
+        assert_eq!(
+            copy.lines()
+                .filter(|l| l.trim_start().to_lowercase().starts_with("visibility"))
+                .count(),
+            i.source(rel)
+                .lines()
+                .filter(|l| l.trim_start().to_lowercase().starts_with("visibility"))
+                .count(),
+            "{rel} gained a visibility line:\n{copy}"
+        );
+    }
+}
+
+#[test]
+fn an_import_that_fails_part_way_resumes_on_the_next_run() {
+    let i = Import::new();
+    let blocker = i.h.vault.path().join("3-permanent/separation-agreement.md");
+    fs::create_dir_all(&blocker).unwrap();
+    i.import_fails(&[]);
+    assert!(
+        i.h.vault
+            .path()
+            .join("2-literature/literature-note.md")
+            .exists()
+    );
+    fs::remove_dir(&blocker).unwrap();
+    let out = i.import(&[]);
+    assert!(out.contains("0 conflicts"), "{out}");
+    assert!(blocker.is_file());
+}
+
+#[test]
+fn a_linked_memory_project_is_skipped_and_named() {
+    let i = Import::new();
+    link_dir(&i.mem.path().join("solo"), &i.mem.path().join("echo"));
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    let out = i.import(&["--memory", &mem]);
+    assert!(
+        i.h.vault
+            .path()
+            .join("working-memory/solo/reference_dashboard.md")
+            .exists()
+    );
+    assert!(!i.h.vault.path().join("working-memory/echo").exists());
+    assert!(out.contains("memory/echo"), "{out}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_memory_file_is_skipped_and_named() {
+    let i = Import::new();
+    let dir = i.mem.path().join("solo/memory");
+    std::os::unix::fs::symlink(
+        dir.join("reference_dashboard.md"),
+        dir.join("reference_twin.md"),
+    )
+    .unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    let out = i.import(&["--memory", &mem]);
+    assert!(
+        !i.h.vault
+            .path()
+            .join("working-memory/solo/reference_twin.md")
+            .exists()
+    );
+    assert!(out.contains("reference_twin.md"), "{out}");
+}
+
+#[test]
+fn a_vault_note_where_a_memory_note_goes_is_a_conflict() {
+    let i = Import::new();
+    i.put_source(
+        "working-memory/solo/reference_dashboard.md",
+        "A vault note in the way.\n",
+    );
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    let out = i.import(&["--memory", &mem]);
+    assert!(out.contains("1 conflict"), "{out}");
+    assert!(
+        out.contains("working-memory/solo/reference_dashboard.md"),
+        "{out}"
+    );
+    let copy = i.copy("working-memory/solo/reference_dashboard.md");
+    let again = i.import(&["--memory", &mem]);
+    assert_eq!(i.copy("working-memory/solo/reference_dashboard.md"), copy);
+    assert!(again.contains("1 conflict"), "{again}");
+}
+
+#[test]
+fn an_index_failure_after_the_copies_still_ledgers_them() {
+    let i = Import::new();
+    let db = i.h.home.path().join("data/index.db");
+    let _ = fs::remove_file(&db);
+    fs::create_dir_all(&db).unwrap();
+    i.import_fails(&[]);
+    fs::remove_dir(&db).unwrap();
+    let out = i.import(&[]);
+    assert!(out.contains("0 conflicts"), "{out}");
+}

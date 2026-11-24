@@ -492,14 +492,15 @@ fn import_learning_loop(
     let dst = Vault::open(&config.vault)?;
     let src = Vault::open(&a.from)?;
     import::check_apart(&src, &dst)?;
+    let share = import::share_folders(&src, &a.share)?;
     let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
     let mut ledger = Ledger::load(dirs)?;
     let w = Written {
         me: &config.me,
         today,
-        share: &a.share,
+        share: &share,
         blocklist: blocklist.as_ref(),
-        inbox: &dst.layout.inbox,
+        layout: &dst.layout,
     };
     let (plan, written) = if a.dry_run {
         (
@@ -507,7 +508,15 @@ fn import_learning_loop(
             Vec::new(),
         )
     } else {
-        import::apply(&src, a.memory.as_deref(), &dst, &mut ledger, &w)?
+        // The ledger already holds every copy written before a failure; keeping it lets the next
+        // run see those copies as its own instead of as conflicts.
+        match import::apply(&src, a.memory.as_deref(), &dst, &mut ledger, &w) {
+            Ok(applied) => applied,
+            Err(e) => {
+                ledger.save(dirs)?;
+                return Err(e);
+            }
+        }
     };
     let mut lines = vec![format!(
         "{} new, {} updated, {} unchanged, {}, {} skipped{}",
@@ -538,9 +547,10 @@ fn import_learning_loop(
     if a.dry_run {
         return Ok(());
     }
-    index(dirs)?.reindex(&dst)?;
+    let reindexed = index(dirs).and_then(|mut ix| ix.reindex(&dst));
     import::settle(&mut ledger, &dst, &written)?;
     ledger.save(dirs)?;
+    reindexed?;
     println!("{}", terminal(&import::report(&dst, today).to_string()));
     Ok(())
 }
