@@ -18,8 +18,9 @@ fn public(k: &SigningKey) -> [u8; 32] {
 }
 
 /// `brain-<version>-<target>.tar.gz` holding `brain-<version>/brain` and its runtime library,
-/// signed by `signer` when given, with the archive's file name as the signing context.
-fn archive(dir: &Path, version: &str, signer: Option<&SigningKey>) -> PathBuf {
+/// signed by every key in `signers` (none: unsigned), with the archive's file name as the signing
+/// context.
+fn archive(dir: &Path, version: &str, signers: &[SigningKey]) -> PathBuf {
     let name = format!("brain-{version}-{}.tar.gz", update::host_target().unwrap());
     let unsigned = dir.join(format!("unsigned-{name}"));
     {
@@ -47,20 +48,20 @@ fn archive(dir: &Path, version: &str, signer: Option<&SigningKey>) -> PathBuf {
         tar.into_inner().unwrap().finish().unwrap();
     }
     let out = dir.join(&name);
-    match signer {
-        Some(k) => {
+    match signers {
+        [] => {
+            fs::copy(&unsigned, &out).unwrap();
+        }
+        keys => {
             let mut input = fs::File::open(&unsigned).unwrap();
             let mut output = fs::File::create(&out).unwrap();
             zipsign_api::sign::copy_and_sign_tar(
                 &mut input,
                 &mut output,
-                std::slice::from_ref(k),
+                keys,
                 Some(name.as_bytes()),
             )
             .unwrap();
-        }
-        None => {
-            fs::copy(&unsigned, &out).unwrap();
         }
     }
     out
@@ -87,9 +88,9 @@ fn serve(file: PathBuf, hits: usize) -> String {
     format!("http://{addr}")
 }
 
+/// A release listing of `assets`, (name, url) pairs, in order.
 struct Local {
-    name: String,
-    url: String,
+    assets: Vec<(String, String)>,
 }
 
 impl ReleaseSource for Local {
@@ -98,7 +99,7 @@ impl ReleaseSource for Local {
             Release::builder()
                 .version(NEW)
                 .name(format!("v{NEW}"))
-                .asset(ReleaseAsset::new(&self.name, &self.url))
+                .assets(self.assets.iter().map(|(n, u)| ReleaseAsset::new(n, u)))
                 .build()?,
         ])
     }
@@ -120,7 +121,14 @@ fn install_and_update(
     .unwrap();
     let name = archive.file_name().unwrap().to_string_lossy().to_string();
     let url = format!("{}/{name}", serve(archive.to_path_buf(), 4));
-    let r = update::run(Local { name, url }, keys, &current, "0.1.0");
+    let r = update::run(
+        Local {
+            assets: vec![(name, url)],
+        },
+        keys,
+        &current,
+        "0.1.0",
+    );
     (root, r)
 }
 
@@ -135,7 +143,7 @@ fn installed(root: &Path) -> (String, String) {
 #[test]
 fn update_refuses_an_unsigned_archive() {
     let dir = tempfile::tempdir().unwrap();
-    let a = archive(dir.path(), NEW, None);
+    let a = archive(dir.path(), NEW, &[]);
     let (root, r) = install_and_update(&a, &[public(&key(1))]);
     assert!(r.is_err(), "an unsigned archive was installed");
     assert_eq!(
@@ -147,7 +155,7 @@ fn update_refuses_an_unsigned_archive() {
 #[test]
 fn update_refuses_an_archive_signed_by_another_key() {
     let dir = tempfile::tempdir().unwrap();
-    let a = archive(dir.path(), NEW, Some(&key(2)));
+    let a = archive(dir.path(), NEW, &[key(2)]);
     let (root, r) = install_and_update(&a, &[public(&key(1))]);
     assert!(r.is_err(), "an archive signed by a stranger was installed");
     assert_eq!(
@@ -160,7 +168,7 @@ fn update_refuses_an_archive_signed_by_another_key() {
 fn update_replaces_binary_and_runtime_together() {
     let dir = tempfile::tempdir().unwrap();
     let k = key(1);
-    let a = archive(dir.path(), NEW, Some(&k));
+    let a = archive(dir.path(), NEW, std::slice::from_ref(&k));
     let (root, r) = install_and_update(&a, &[public(&k)]);
     assert_eq!(r.unwrap(), NEW);
     assert_eq!(
@@ -172,7 +180,7 @@ fn update_replaces_binary_and_runtime_together() {
 #[test]
 fn update_without_a_key_is_refused_before_any_download() {
     let dir = tempfile::tempdir().unwrap();
-    let a = archive(dir.path(), NEW, Some(&key(1)));
+    let a = archive(dir.path(), NEW, &[key(1)]);
     let (root, r) = install_and_update(&a, &[]);
     let err = format!("{:#}", r.unwrap_err());
     assert!(err.contains("no release key"), "{err}");
@@ -185,11 +193,13 @@ fn update_without_a_key_is_refused_before_any_download() {
 #[test]
 fn check_names_a_newer_release_and_installs_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let a = archive(dir.path(), NEW, Some(&key(1)));
+    let a = archive(dir.path(), NEW, &[key(1)]);
     let name = a.file_name().unwrap().to_string_lossy().to_string();
     let local = |name: &str| Local {
-        name: name.to_string(),
-        url: "http://127.0.0.1:9/never-fetched".to_string(),
+        assets: vec![(
+            name.to_string(),
+            "http://127.0.0.1:9/never-fetched".to_string(),
+        )],
     };
     assert_eq!(
         update::check(local(&name), "0.1.0").unwrap(),
@@ -240,7 +250,7 @@ fn update_from_a_build_with_no_install_is_refused() {
 fn release_verify_refuses_a_changed_byte() {
     let dir = tempfile::tempdir().unwrap();
     let k = key(1);
-    let a = archive(dir.path(), NEW, Some(&k));
+    let a = archive(dir.path(), NEW, std::slice::from_ref(&k));
     update::verify(&a, &[public(&k)]).unwrap();
     let mut bytes = fs::read(&a).unwrap();
     let mid = bytes.len() / 2;
@@ -281,7 +291,7 @@ fn version_prints_the_protocol() {
 #[test]
 fn release_verify_without_a_key_exits_1() {
     let dir = tempfile::tempdir().unwrap();
-    let a = archive(dir.path(), NEW, Some(&key(1)));
+    let a = archive(dir.path(), NEW, &[key(1)]);
     if !update::release_keys().is_empty() {
         return;
     }
@@ -293,4 +303,87 @@ fn release_verify_without_a_key_exits_1() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no release key"));
+}
+
+#[test]
+fn verify_with_no_key_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), NEW, &[key(1)]);
+    let err = update::verify(&a, &[]).unwrap_err().to_string();
+    assert!(err.contains("no release key"), "{err}");
+}
+
+#[test]
+fn an_archive_signed_by_both_keys_updates_an_install_trusting_either() {
+    for trusted in [key(1), key(2)] {
+        let dir = tempfile::tempdir().unwrap();
+        let a = archive(dir.path(), NEW, &[key(1), key(2)]);
+        let (root, r) = install_and_update(&a, &[public(&trusted)]);
+        assert_eq!(r.unwrap(), NEW);
+        assert_eq!(
+            installed(root.path()),
+            (format!("binary {NEW}"), format!("runtime {NEW}"))
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), NEW, &[key(1), key(2)]);
+    let (root, r) = install_and_update(&a, &[public(&key(3))]);
+    assert!(r.is_err(), "a third key's install took a two-key archive");
+    assert_eq!(
+        installed(root.path()),
+        ("binary old".into(), "runtime old".into())
+    );
+}
+
+#[test]
+fn update_picks_the_host_archive_among_every_asset() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let a = archive(dir.path(), NEW, std::slice::from_ref(&k));
+    let host = update::host_target().unwrap();
+    // A decoy is never served: fetching one fails the update.
+    let closed = "http://127.0.0.1:9/decoy".to_string();
+    let mut assets: Vec<(String, String)> = [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ]
+    .into_iter()
+    .filter(|t| *t != host)
+    .map(|t| (format!("brain-{NEW}-{t}.tar.gz"), closed.clone()))
+    .collect();
+    assets.push(("SHA256SUMS".into(), closed.clone()));
+    assets.push(("release.json".into(), closed.clone()));
+    let name = a.file_name().unwrap().to_string_lossy().to_string();
+    assets.push((name.clone(), format!("{}/{name}", serve(a.clone(), 4))));
+
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("brain-current");
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    fs::write(
+        current.join("lib").join(update::runtime_name()),
+        "runtime old",
+    )
+    .unwrap();
+    let r = update::run(Local { assets }, &[public(&k)], &current, "0.1.0");
+    assert_eq!(r.unwrap(), NEW);
+    assert_eq!(
+        installed(root.path()),
+        (format!("binary {NEW}"), format!("runtime {NEW}"))
+    );
+}
+
+#[test]
+fn a_signed_archive_under_another_name_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let a = archive(dir.path(), NEW, std::slice::from_ref(&k));
+    let renamed = dir.path().join(format!(
+        "brain-9.9.8-{}.tar.gz",
+        update::host_target().unwrap()
+    ));
+    fs::copy(&a, &renamed).unwrap();
+    update::verify(&a, &[public(&k)]).unwrap();
+    assert!(update::verify(&renamed, &[public(&k)]).is_err());
 }

@@ -12,7 +12,7 @@ set -euo pipefail
 
 repo=omit-nz/brain
 die() { echo "install.sh: $*" >&2; exit 1; }
-fetch() { curl --proto '=https' --tlsv1.2 --retry 3 -fsSL "$@"; }
+fetch() { curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -fsSL "$@"; }
 
 case "$(uname -s) $(uname -m)" in
   "Darwin arm64") target=aarch64-apple-darwin ;;
@@ -21,20 +21,27 @@ case "$(uname -s) $(uname -m)" in
 esac
 
 version=${1:-}
-if [ -z "$version" ]; then
+# A version goes into URLs and file names, so it is checked before anything is fetched.
+release_version() {
+  local v=${1#v}
+  case "$v" in
+    *[!0-9A-Za-z.+-]* | "") die "not a release version: $1" ;;
+    [0-9]*.[0-9]*.[0-9]*) echo "$v" ;;
+    *) die "not a release version: $1" ;;
+  esac
+}
+if [ -n "$version" ]; then
+  version=$(release_version "$version")
+else
   latest=$(fetch -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")
-  version=${latest##*/}
+  version=$(release_version "${latest##*/}")
 fi
-version=${version#v}
-case "$version" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) die "not a release version: $version" ;;
-esac
 
 name="brain-$version-$target.tar.gz"
 base="https://github.com/$repo/releases/download/v$version"
 work=$(mktemp -d "${TMPDIR:-/tmp}/brain-install.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+stage=
+trap 'rm -rf "$work" ${stage:+"$stage"}' EXIT
 
 fetch -o "$work/$name" "$base/$name"
 fetch -o "$work/SHA256SUMS" "$base/SHA256SUMS"
@@ -54,13 +61,24 @@ new="$work/unpacked/brain-$version"
 "$new/brain" release-verify "$work/$name" >/dev/null ||
   die "$name is not signed by the brain release key; nothing installed"
 
+# The new release is copied in beside the install first, so the swap is two renames on one
+# filesystem, and a failed swap puts the old install back.
 dest=$("$new/brain" install-dir)
-mkdir -p "$(dirname "$dest")"
-old="$dest.old"
-rm -rf "$old"
-[ -e "$dest" ] && mv "$dest" "$old"
-mv "$new" "$dest"
-rm -rf "$old"
+parent=$(dirname "$dest")
+mkdir -p "$parent"
+stage=$(mktemp -d "$parent/.brain-new.XXXXXX")
+cp -R "$new" "$stage/brain"
+if [ -e "$dest" ]; then
+  mv "$dest" "$stage/old"
+fi
+if ! mv "$stage/brain" "$dest"; then
+  if [ -e "$stage/old" ] && ! mv "$stage/old" "$dest"; then
+    kept=$stage
+    stage=
+    die "the swap failed; the old install is at $kept/old, rename it to $dest"
+  fi
+  die "could not move the new release into place; nothing changed"
+fi
 
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$dest/brain" "$HOME/.local/bin/brain"

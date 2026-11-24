@@ -14,9 +14,11 @@ Beside the archives: `SHA256SUMS`, and `release.json`, which reads `{version, pr
 
 `scripts/install.sh` puts the release folder at `brain-current` inside brain's data folder (`brain install-dir` prints the path) and links `~/.local/bin/brain` to the binary in it. `brain update` replaces that folder whole, so the binary and the runtime library always come from one release. A brain that `install.sh` did not install, such as a `cargo build`, refuses to update itself.
 
+`install.sh` copies the new release folder in beside the install before touching it, so replacing the install is two renames on one filesystem; if the second fails, the old install is put back. A version given to it must look like `1.2.3`, checked before anything is downloaded, and every download, redirects included, stays on HTTPS. `scripts/install.test.sh` pins each of these with a stubbed `curl` and release.
+
 ## What is trusted, and when
 
-The first install trusts HTTPS from GitHub and `SHA256SUMS` from the same release: `install.sh` downloads both, checks the archive against `SHA256SUMS`, unpacks it, and then has the brain it just unpacked check the archive's signature against the release key compiled into that brain. A failed check installs nothing. That signature check adds little on a first install, since the binary doing the checking came from the same download; it exists so that a tampered archive whose checksum was also replaced is still caught whenever the binary is genuine.
+The first install trusts HTTPS from GitHub and `SHA256SUMS` from the same release: `install.sh` downloads both, checks the archive against `SHA256SUMS`, unpacks it, and then has the brain it just unpacked check the archive's signature against the release key compiled into that brain. A failed check installs nothing. On a first install that signature check guards against nothing the checksum does not: the binary doing the checking came from the same download, and `install.sh` runs it before it knows the signature is good, so an attacker who can replace both the archive and `SHA256SUMS` on GitHub runs code as you. The first install's trust is GitHub's HTTPS and the integrity of the release page, no more.
 
 Every later update is checked by the brain already installed, before anything is replaced: `brain update` downloads the archive and refuses it unless its signature verifies against the key that brain was built with. A build whose key file is the all-zero placeholder ships no key, and refuses to update or to verify anything.
 
@@ -26,7 +28,7 @@ Every later update is checked by the brain already installed, before anything is
 2. Tag the merged commit `v<version>` and push the tag.
 3. `.github/workflows/release.yml` runs:
    - `build`, on macOS, Linux and Windows, checks the tag matches the workspace version, builds `brain` with `--release --locked`, and packs it with ONNX Runtime.
-   - `sign`, on Linux, signs every archive with `RELEASE_SIGNING_KEY` (and `RELEASE_SIGNING_KEY_PREVIOUS` when it is set), decoded into a private temporary folder and never printed, writes `SHA256SUMS` and `release.json`, and drafts the release.
+   - `sign`, on Linux, signs every archive with `RELEASE_SIGNING_KEY` (and `RELEASE_SIGNING_KEY_PREVIOUS` when it is set), decoded into a private temporary folder and never printed, writes `SHA256SUMS` and `release.json`, and drafts the release. It installs zipsign 0.2.2 from crates.io with `cargo install --locked`, so that crate and its lock file are trusted with the key; the checkouts in `sign` and `verify` keep no token on disk.
    - `verify`, on macOS, builds `brain` from the tag, refuses to go on if its release key is the placeholder, downloads every asset of the draft, checks `SHA256SUMS`, runs `brain release-verify` on every archive (the same check clients run, so a signature that verifies only where it was made fails here), and only then publishes the release.
 
 A release that fails any job stays a draft. Delete the draft and the tag, fix, and tag again.
@@ -48,6 +50,15 @@ To put one machine back on an older release, run `scripts/install.sh <older vers
 
 The key is a zipsign ed25519 key pair. `scripts/release-key.sh init` makes it once: the private key goes base64-encoded to 1Password (item `brain release signing key`, vault `Omit-Infra`) and to the repo secret `RELEASE_SIGNING_KEY`, both on stdin only, and the public key is written to `crates/brain/src/keys/release.pub` to be committed. The script never puts the private key in an argument, on stdout or on stderr, and removes its temporary folder on exit; `scripts/release-key.test.sh` pins that with stubs for `zipsign`, `op` and `gh`.
 
-`scripts/release-key.sh rotate` makes a new key while keeping the old one for one release: it copies the old private key from 1Password into `RELEASE_SIGNING_KEY_PREVIOUS`, renames the old 1Password item as retired, and stores the new key as above. The next release is signed by both keys and its binary trusts only the new one, so installs that trust only the old key can still take it. Once that release is out, delete `RELEASE_SIGNING_KEY_PREVIOUS`. If the old key leaked, rotate anyway, but treat every install as untrusted until it has been reinstalled with `install.sh`.
+Before it makes anything, `init` refuses when the public key file is not the placeholder, when 1Password already holds an item with that title, or when the repo already has `RELEASE_SIGNING_KEY`, so a second run from another checkout cannot replace a key a build already trusts.
 
-`release-key.test.sh` runs on `ubuntu-24.04` in CI and on macOS by hand; it is not run under Git Bash on Windows. Running the scripts needs zipsign 0.2.2 (`cargo install zipsign --version 0.2.2 --locked`), `op` signed in to the account that holds `Omit-Infra`, and `gh` signed in with admin rights on `omit-nz/brain`.
+`scripts/release-key.sh rotate` makes a new key while keeping the old one for one release: it needs exactly one `brain release signing key` item, copies that old private key from 1Password into `RELEASE_SIGNING_KEY_PREVIOUS`, sets the new key as `RELEASE_SIGNING_KEY`, writes the new public key, renames the old 1Password item as retired, and stores the new key under the plain title. The next release is signed by both keys and its binary trusts only the new one, so installs that trust only the old key can still take it. Once that release is out, delete `RELEASE_SIGNING_KEY_PREVIOUS`. If the old key leaked, rotate anyway, but treat every install as untrusted until it has been reinstalled with `install.sh`.
+
+### A run that stopped
+
+Both commands store the new key first as `brain release signing key (pending)` and give it the plain title only as their last step, after the repo secrets and `release.pub` are written. While a pending item exists, every run refuses. To repair:
+
+- If `release.pub` did not change, the run stopped before or at setting `RELEASE_SIGNING_KEY`. Delete the pending item in 1Password and run the same command again. A rotate that stopped here already copied the old key to `RELEASE_SIGNING_KEY_PREVIOUS`, and the next run copies the same old key again.
+- If `release.pub` changed, every secret was set and only the renames are left. After a rotate, rename the old item to `brain release signing key (retired <date>)` if that has not happened, then rename the pending item to `brain release signing key`. After an init, rename the pending item.
+
+`release-key.test.sh` and `install.test.sh` run on `ubuntu-24.04` in CI and on macOS by hand; they are not run under Git Bash on Windows. Running the key script needs zipsign 0.2.2 (`cargo install zipsign --version 0.2.2 --locked`), `jq`, `op` signed in to the account that holds `Omit-Infra`, and `gh` signed in with admin rights on `omit-nz/brain`.
