@@ -11,7 +11,11 @@ use super::{Source, Written};
 
 /// Every memory file to import, in a stable order. A project or memory folder that is a link is
 /// skipped as one, so a tree reached twice is read once.
-pub fn sources(root: &Path, skipped: &mut Vec<(String, Skip)>) -> anyhow::Result<Vec<Source>> {
+pub fn sources(
+    root: &Path,
+    dst_folder: &Path,
+    skipped: &mut Vec<(String, Skip)>,
+) -> anyhow::Result<Vec<Source>> {
     let mut out = Vec::new();
     let mut projects: Vec<PathBuf> = fs::read_dir(root)?
         .map(|e| e.map(|e| e.path()))
@@ -59,7 +63,7 @@ pub fn sources(root: &Path, skipped: &mut Vec<(String, Skip)>) -> anyhow::Result
             match read {
                 Ok(Ok(raw)) => out.push(Source {
                     key,
-                    dst_rel: Path::new("working-memory").join(&name).join(&fname),
+                    dst_rel: dst_folder.join(&name).join(&fname),
                     raw,
                     memory: true,
                 }),

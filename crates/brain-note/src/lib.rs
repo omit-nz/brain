@@ -7,7 +7,7 @@ mod links;
 mod note;
 mod vault;
 
-pub use disclosure::{Disclosure, Place, disclosure, listed_summary};
+pub use disclosure::{Disclosure, Place, RULES, disclosure, listed_summary};
 pub use frontmatter::{FmError, Frontmatter, Split, Value};
 pub use links::wikilinks;
 pub use note::{Kind, Note, ensure_id, reassign_id, rel_key};

@@ -170,6 +170,69 @@ fn a_note_that_fails_to_read_keeps_its_row() {
     assert_eq!(f.fts("alpha"), vec!["a.md"]);
 }
 
+/// An index written under older reading rules is re-derived note by note, so a fixed disclosure
+/// rule reaches notes that did not change; under the same rules unchanged notes are left alone.
+#[test]
+fn an_index_from_older_rules_rereads_every_note() {
+    let f = Fixture::new();
+    f.put("a.md", "alpha\n");
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let stale = |rules: &str| {
+        let c = f.sql();
+        c.execute(
+            "UPDATE notes SET disclosure = 'private' WHERE path = 'a.md'",
+            [],
+        )
+        .unwrap();
+        c.execute("UPDATE meta SET value = ?1 WHERE key = 'rules'", [rules])
+            .unwrap();
+    };
+    let disclosure = || -> String {
+        f.sql()
+            .query_row(
+                "SELECT disclosure FROM notes WHERE path = 'a.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    stale(&brain_note::RULES.to_string());
+    idx.reindex(&f.vault()).unwrap();
+    assert_eq!(
+        disclosure(),
+        "private",
+        "same rules: an unchanged note is not reread"
+    );
+    stale("0");
+    idx.reindex(&f.vault()).unwrap();
+    assert_eq!(disclosure(), "shared");
+}
+
+/// A folder that is briefly unreadable is not a deleted one: its notes keep their rows, and
+/// their embeddings with them.
+#[cfg(unix)]
+#[test]
+fn notes_in_a_folder_that_fails_to_read_keep_their_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.put("top.md", "top\n");
+    f.put("sub/one.md", "alpha\n");
+    f.put("sub/two.md", "beta\n");
+    f.put("subway/three.md", "gamma\n");
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let sub = f.vault.path().join("sub");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::remove_file(f.vault.path().join("subway/three.md")).unwrap();
+    let r = idx.reindex(&f.vault());
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = r.unwrap();
+    assert_eq!(r.removed, 1, "only subway/three.md was deleted");
+    assert_eq!(idx.note_count().unwrap(), 3);
+    assert_eq!(f.fts("alpha"), vec!["sub/one.md"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn an_existing_index_file_is_made_private() {

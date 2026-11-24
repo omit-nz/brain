@@ -186,11 +186,12 @@ pub fn check_apart(src: &Vault, dst: &Vault) -> anyhow::Result<()> {
 fn sources(
     src: &Vault,
     memory: Option<&Path>,
+    dst: &Vault,
     skipped: &mut Vec<(String, Skip)>,
 ) -> anyhow::Result<Vec<Source>> {
     let mut out = vault::sources(src, skipped);
     if let Some(root) = memory {
-        out.extend(memory::sources(root, skipped)?);
+        out.extend(memory::sources(root, &dst.layout.memory, skipped)?);
     }
     Ok(out)
 }
@@ -205,7 +206,7 @@ fn classify(
     ledger: &Ledger,
 ) -> anyhow::Result<(ImportPlan, Vec<Todo>)> {
     let mut plan = ImportPlan::default();
-    let all = sources(src, memory, &mut plan.skipped)?;
+    let all = sources(src, memory, dst, &mut plan.skipped)?;
     let mut todo = Vec::new();
     let mut claimed = HashSet::new();
     for s in all {
@@ -298,7 +299,7 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
         };
         let rel = match key.split_once('/') {
             Some(("vault", rel)) => PathBuf::from(rel),
-            Some(("memory", rest)) => Path::new("working-memory").join(rest),
+            Some(("memory", rest)) => dst.layout.memory.join(rest),
             _ => continue,
         };
         if let Ok(bytes) = std::fs::read(dst.root.join(&rel)) {

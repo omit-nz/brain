@@ -9,6 +9,8 @@ use brain_note::{Disclosure, Entry, Note, Place, Split, Value, Vault, rel_key};
 use jiff::ToSpan;
 use jiff::civil::Date;
 
+use crate::inbox::Dest;
+
 /// A list longer than this shows its first lines, then how many more.
 const SHOWN: usize = 20;
 const INBOX_DAYS: i64 = 14;
@@ -85,7 +87,9 @@ pub fn report(dst: &Vault, today: Date) -> Report {
         .into_values()
         .filter(|paths| {
             paths.iter().any(|p| p.starts_with(&format!("{inbox}/")))
-                && paths.iter().any(|p| p.starts_with("3-permanent/"))
+                && paths
+                    .iter()
+                    .any(|p| p.starts_with(&format!("{}/", Dest::Permanent.folder())))
         })
         .map(|paths| paths.join(" and "))
         .collect();

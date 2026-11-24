@@ -142,3 +142,7 @@ pub fn listed_summary(body: &str) -> String {
     let cut = cut.rfind(' ').map(|i| &cut[..i]).unwrap_or(cut);
     format!("{cut}...")
 }
+
+/// The version of how a note is read: frontmatter, places and disclosure. It goes up with every
+/// change to what a note parses to, and an index built under another version rereads every note.
+pub const RULES: u32 = 2;

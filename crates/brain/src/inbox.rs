@@ -21,7 +21,7 @@ pub enum Dest {
 }
 
 impl Dest {
-    fn folder(self) -> &'static str {
+    pub fn folder(self) -> &'static str {
         match self {
             Dest::Fleeting => "1-fleeting",
             Dest::Literature => "2-literature",

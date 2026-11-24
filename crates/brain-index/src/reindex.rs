@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use brain_note::{Entry, Note, Place, Skip, Vault, ensure_id, reassign_id, rel_key};
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::Index;
 
@@ -94,6 +94,14 @@ impl Index {
     pub fn reindex(&mut self, vault: &Vault) -> anyhow::Result<Reindexed> {
         let abort_after = abort_after();
         let existing = self.rows()?;
+        // Rows written under other reading rules are re-derived, changed or not.
+        let rules: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'rules'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let reread = rules != Some(brain_note::RULES.to_string());
         let mut out = Reindexed::default();
         let mut seen = HashSet::new();
         let mut work = Vec::new();
@@ -101,6 +109,18 @@ impl Index {
         for entry in vault.walk() {
             let (rel, place) = match entry {
                 Entry::Skipped { rel, why } => {
+                    // Notes under a folder that failed to read keep their rows, as an unreadable
+                    // note does.
+                    if matches!(why, Skip::Unreadable(_)) {
+                        let key = rel_key(&rel);
+                        let folder = format!("{key}/");
+                        seen.extend(
+                            existing
+                                .keys()
+                                .filter(|k| **k == key || k.starts_with(&folder))
+                                .cloned(),
+                        );
+                    }
                     out.skipped.push((rel_key(&rel), why));
                     continue;
                 }
@@ -119,9 +139,10 @@ impl Index {
                     continue;
                 }
             };
-            if existing
-                .get(&key)
-                .is_some_and(|r| r.size == size && r.mtime_ns == mtime_ns)
+            if !reread
+                && existing
+                    .get(&key)
+                    .is_some_and(|r| r.size == size && r.mtime_ns == mtime_ns)
             {
                 seen.insert(key);
                 continue;
@@ -220,7 +241,7 @@ impl Index {
                         upsert(&tx, w)?;
                         out.added += 1;
                     }
-                    Some(row) if row.hash == w.note.hash && row.uuid == w.uuid => {
+                    Some(row) if !reread && row.hash == w.note.hash && row.uuid == w.uuid => {
                         tx.execute(
                             "UPDATE notes SET size = ?1, mtime_ns = ?2 WHERE path = ?3",
                             params![w.size, w.mtime_ns, w.key],
@@ -251,6 +272,11 @@ impl Index {
                 params![path, describe(why)],
             )?;
         }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('rules', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [brain_note::RULES.to_string()],
+        )?;
         tx.commit()?;
 
         let mut st = self
