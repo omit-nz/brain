@@ -42,7 +42,7 @@ fn manifests_with_workspace(dir: &Path, found: &mut Vec<PathBuf>) {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if path.is_dir() {
-            if name.starts_with('.') || name == "target" {
+            if name == ".git" || name == "target" {
                 continue;
             }
             manifests_with_workspace(&path, found);
@@ -85,28 +85,60 @@ fn every_crate_is_apache_2() {
     );
 }
 
-#[test]
-fn one_workspace() {
-    let root = root();
+/// Exactly one `[workspace]`, at the root, whose members cover `crates/*` and which excludes
+/// nothing.
+fn one_workspace_at(root: &Path) -> Result<(), String> {
     let mut found = Vec::new();
-    manifests_with_workspace(&root, &mut found);
-    assert_eq!(
-        found,
-        vec![root.join("Cargo.toml")],
-        "exactly one [workspace], at the root"
-    );
-
-    let members = toml_at(&root.join("Cargo.toml"))["workspace"]["members"].clone();
-    let members: Vec<&str> = members
+    manifests_with_workspace(root, &mut found);
+    if found != vec![root.join("Cargo.toml")] {
+        return Err(format!(
+            "exactly one [workspace], at the root; found {found:?}"
+        ));
+    }
+    let ws = &toml_at(&root.join("Cargo.toml"))["workspace"];
+    let members: Vec<&str> = ws["members"]
         .as_array()
         .unwrap()
         .iter()
         .map(|m| m.as_str().unwrap())
         .collect();
+    if !members.contains(&"crates/*") {
+        return Err(format!("members must cover crates/*, got {members:?}"));
+    }
+    if let Some(ex) = ws.get("exclude") {
+        return Err(format!("the workspace excludes {ex}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn one_workspace() {
+    assert_eq!(one_workspace_at(&root()), Ok(()));
+}
+
+#[test]
+fn a_second_or_narrowed_workspace_is_caught() {
+    let ws = "[workspace]\nmembers = [\"crates/*\"]\n";
+    let fixture = |files: &[(&str, &str)]| {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, text) in files {
+            let p = dir.path().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        }
+        let root = dir.path().canonicalize().unwrap();
+        (dir, root)
+    };
+    let (_d, ok) = fixture(&[("Cargo.toml", ws)]);
+    assert_eq!(one_workspace_at(&ok), Ok(()));
+    let (_d, hidden) = fixture(&[("Cargo.toml", ws), (".hidden/x/Cargo.toml", ws)]);
     assert!(
-        members.contains(&"crates/*"),
-        "members must cover crates/*, got {members:?}"
+        one_workspace_at(&hidden).is_err(),
+        "a workspace in a hidden folder"
     );
+    let narrowed = "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"crates/brain-note\"]\n";
+    let (_d, excluded) = fixture(&[("Cargo.toml", narrowed)]);
+    assert!(one_workspace_at(&excluded).is_err(), "a workspace exclude");
 }
 
 #[test]

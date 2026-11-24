@@ -6,26 +6,18 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 pub enum Privacy {
-    /// Owner-only (`0600` on Unix): stores, ledgers, keys.
+    /// Owner-only (`0600` on Unix): stores, ledgers, keys. On Windows the file takes the ACL of
+    /// its folder, which is owner-only under the person's profile and not promised elsewhere.
     Private,
-    /// Whatever the process umask allows: notes the person opens in their own editor.
+    /// Whatever the process umask allows for a new file; a file that exists keeps its mode, so a
+    /// note its owner locked down stays that way.
     Normal,
 }
 
+/// A symlink, or on Windows a junction or other name-surrogate reparse point; std's `is_symlink`
+/// covers both. Cloud placeholders (OneDrive, iCloud) are reparse points too but are not links.
 pub fn is_link(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|m| is_link_meta(&m))
-}
-
-#[cfg(windows)]
-fn is_link_meta(m: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    m.file_type().is_symlink() || m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn is_link_meta(m: &fs::Metadata) -> bool {
-    m.file_type().is_symlink()
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Refuses a relative path that leaves `root` or passes through a link on the way, so a vault
@@ -64,6 +56,10 @@ fn parent_dirs(path: &Path) -> io::Result<&Path> {
 
 pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> io::Result<()> {
     let path = checked(root, rel)?;
+    let existing = match privacy {
+        Privacy::Normal => fs::metadata(&path).ok().map(|m| m.permissions()),
+        Privacy::Private => None,
+    };
     let parent = parent_dirs(&path)?;
     let mut builder = tempfile::Builder::new();
     builder.prefix(".brain-");
@@ -72,6 +68,10 @@ pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> 
     }
     let mut tmp = builder.tempfile_in(parent)?;
     tmp.write_all(bytes)?;
+    // Set on the open file, after the write: the create mode is masked by the umask, this is not.
+    if let Some(p) = existing {
+        tmp.as_file().set_permissions(p)?;
+    }
     tmp.as_file().sync_all()?;
     tmp.persist(&path).map_err(|e| e.error)?;
     Ok(())
@@ -87,12 +87,16 @@ fn permissions(privacy: Privacy) -> Option<fs::Permissions> {
     }))
 }
 
-/// Windows files inherit the ACL of the person's profile folder, which is already owner-only.
+/// Windows files inherit the ACL of their folder; see `Privacy::Private`.
 #[cfg(not(unix))]
 fn permissions(_: Privacy) -> Option<fs::Permissions> {
     None
 }
 
+/// Creates `path` and any missing parents owner-only (`0700` on Unix) from the start, and makes an
+/// existing `path` owner-only. Refuses a `path` that is a link. The check and the create are two
+/// steps, so a process racing to plant a link between them wins; brain's own folders are not
+/// shared with other users, so that race is accepted.
 pub fn create_dir_private(path: &Path) -> io::Result<()> {
     if is_link(path) {
         return Err(io::Error::new(
@@ -100,18 +104,23 @@ pub fn create_dir_private(path: &Path) -> io::Result<()> {
             format!("{} is a link", path.display()),
         ));
     }
-    fs::create_dir_all(path)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        builder.mode(0o700).create(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    builder.create(path)?;
     Ok(())
 }
 
 pub fn rename_within(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
     let src = checked(root, from)?;
     let dst = checked(root, to)?;
+    fs::symlink_metadata(&src)?;
     if fs::symlink_metadata(&dst).is_ok() {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,

@@ -30,7 +30,7 @@ impl Dirs {
         }
         let p = directories::ProjectDirs::from("nz", "omit", "brain")
             .context("no home directory to keep brain's data in")?;
-        let data = p.data_dir().to_path_buf();
+        let data = p.data_local_dir().to_path_buf();
         Ok(Dirs {
             config: p.config_dir().to_path_buf(),
             models: data.join("models"),
