@@ -228,6 +228,26 @@ fn ensure_id_writes_a_v7_only_when_missing() {
     assert_eq!(fs::read_to_string(root.path().join(rel)).unwrap(), after);
 }
 
+/// YAML joins an indented next line onto a plain value (`shared private`), and a column-zero
+/// `- ` there is a syntax error; either way the value is in doubt.
+#[test]
+fn a_value_continued_on_the_next_line_withholds() {
+    for raw in [
+        "---\nvisibility: shared\n  private\n---\nbody\n",
+        "---\nvisibility: shared\n  - private\n---\nbody\n",
+        "---\nvisibility: shared\n- private\n---\nbody\n",
+    ] {
+        assert_eq!(disc(raw, Place::Kept), Disclosure::Private, "{raw:?}");
+    }
+    assert_eq!(
+        disc(
+            "---\nvisibility: shared\ntitle: x\n---\nbody\n",
+            Place::Kept
+        ),
+        Disclosure::Shared
+    );
+}
+
 #[test]
 fn ensure_id_never_overwrites_an_edit_made_since_the_read() {
     let root = tempfile::tempdir().unwrap();

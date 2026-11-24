@@ -86,6 +86,41 @@ fn init_then_status_reports_an_empty_vault() {
     assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
 }
 
+/// brain writes ids into every note under its vault, so a home folder or a code repository is
+/// refused as one, whether named or the folder init runs in.
+#[test]
+fn init_refuses_a_home_folder_or_a_code_repository() {
+    let h = Home::new();
+    let fake_home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(fake_home.path().join("dev")).unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".git")).unwrap();
+    for (cwd, vault) in [
+        (fake_home.path(), None),
+        (h.vault.path(), Some(fake_home.path())),
+        (repo.path(), None),
+        (h.vault.path(), Some(repo.path())),
+    ] {
+        let mut args = vec!["init", "--me", "robin"];
+        if let Some(v) = vault {
+            args.extend(["--vault", v.to_str().unwrap()]);
+        }
+        let out = h
+            .brain()
+            .env("HOME", fake_home.path())
+            .env("USERPROFILE", fake_home.path())
+            .current_dir(cwd)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{cwd:?} {vault:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--vault"));
+    }
+    assert_eq!(fs::read_dir(fake_home.path()).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(repo.path()).unwrap().count(), 1);
+    assert!(!h.home.path().join("config").exists());
+}
+
 #[test]
 fn init_never_touches_existing_notes() {
     let h = Home::new();

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, bail};
-use brain_note::{Layout, Skip, Vault, rel_key};
+use brain_note::{Layout, Place, Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Privacy, replace_unchanged, write_atomic};
 use jiff::ToSpan;
@@ -74,6 +74,9 @@ pub struct ImportPlan {
     pub skipped: Vec<(String, Skip)>,
 }
 
+/// A source to write, with the hash of its copy as classified (`None`: no copy yet).
+type Todo = (Source, Option<String>);
+
 /// One file the import reads and where its copy goes.
 pub struct Source {
     key: String,
@@ -96,8 +99,7 @@ impl Written<'_> {
     /// whatever is shared, so a kept inbox note is not shared on the way out; then a learning-loop
     /// rule that withholds it wins, then a shared folder; everything else is private.
     fn visibility(&self, rel: &Path) -> &'static str {
-        if rel.starts_with(&self.layout.inbox)
-            || rel.starts_with(&self.layout.private)
+        if self.layout.place(rel) != Place::Kept
             || self.blocklist.is_some_and(|b| b.withholds(&rel_key(rel)))
         {
             "private"
@@ -201,7 +203,7 @@ fn classify(
     memory: Option<&Path>,
     dst: &Vault,
     ledger: &Ledger,
-) -> anyhow::Result<(ImportPlan, Vec<(Source, Option<String>)>)> {
+) -> anyhow::Result<(ImportPlan, Vec<Todo>)> {
     let mut plan = ImportPlan::default();
     let all = sources(src, memory, &mut plan.skipped)?;
     let mut todo = Vec::new();

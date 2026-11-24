@@ -232,6 +232,28 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
         Some(v) => v,
         None => std::env::current_dir()?,
     };
+    // brain writes an id into every note under its vault, so a folder holding far more than notes
+    // is refused.
+    let same = |a: &Path, b: &Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| Some(a) == b.canonicalize().ok())
+    };
+    let what = if std::env::home_dir().is_some_and(|home| same(&root, &home)) {
+        Some("your home folder")
+    } else if root.join(".git").exists() {
+        Some("a code repository")
+    } else if root.canonicalize().is_ok_and(|r| r.parent().is_none()) {
+        Some("the root of the disk")
+    } else {
+        None
+    };
+    if let Some(what) = what {
+        anyhow::bail!(
+            "{} is {what}; brain writes an id into every note in its vault, so name your notes folder with --vault",
+            root.display()
+        );
+    }
     if !root.exists() {
         create_dir_private(&root)?;
     }

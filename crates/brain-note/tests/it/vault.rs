@@ -3,6 +3,33 @@ use std::path::Path;
 
 use brain_note::{Entry, MAX_NOTE_BYTES, Place, Skip, Vault, rel_key};
 
+/// macOS and Windows disks ignore case, so `Private/` is the private folder there; folding case
+/// everywhere errs towards private on a disk that does not.
+#[test]
+fn a_layout_folder_in_another_case_keeps_its_place() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "Private/salary.md", "pay\n");
+    put(root.path(), "0-Inbox/draft.md", "draft\n");
+    put(root.path(), "PRIVATE-notes/open.md", "open\n");
+    let vault = Vault::open(root.path()).unwrap();
+    let mut places: Vec<(String, Place)> = vault
+        .walk()
+        .filter_map(|e| match e {
+            Entry::Note { rel, place } => Some((rel_key(&rel), place)),
+            Entry::Skipped { .. } => None,
+        })
+        .collect();
+    places.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        places,
+        vec![
+            ("0-Inbox/draft.md".to_string(), Place::Inbox),
+            ("PRIVATE-notes/open.md".to_string(), Place::Kept),
+            ("Private/salary.md".to_string(), Place::Private),
+        ]
+    );
+}
+
 fn put(root: &Path, rel: &str, text: &str) {
     let p = root.join(rel);
     fs::create_dir_all(p.parent().unwrap()).unwrap();

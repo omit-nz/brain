@@ -171,6 +171,14 @@ fn parse_value(rest: &str, following: &[String]) -> Value {
             };
         }
     }
+    // YAML folds an indented next line into a plain value; a value it would read differently is
+    // in doubt.
+    if following
+        .first()
+        .is_some_and(|l| continues(l.trim_end_matches(['\r', '\n'])))
+    {
+        return Value::Other;
+    }
     Value::Text(v.to_string())
 }
 

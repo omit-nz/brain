@@ -51,7 +51,7 @@ pub fn to_note(s: &Source, w: &Written<'_>, prior_id: Option<&str>) -> anyhow::R
         if !has("visibility") {
             adds.push(("visibility", w.visibility(&s.dst_rel).into()));
         }
-        if !s.dst_rel.starts_with(&w.layout.inbox) {
+        if w.layout.place(&s.dst_rel) != Place::Inbox {
             if !has("owner") {
                 adds.push(("owner", w.me.to_string()));
             }

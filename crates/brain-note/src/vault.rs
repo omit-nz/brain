@@ -46,6 +46,32 @@ impl Default for Layout {
     }
 }
 
+impl Layout {
+    /// Where `rel` sits. Folder names match in any case: macOS and Windows disks ignore case, so
+    /// `Private/` is the private folder there, and folding everywhere errs towards private.
+    pub fn place(&self, rel: &Path) -> Place {
+        if under(rel, &self.inbox) {
+            Place::Inbox
+        } else if under(rel, &self.private) {
+            Place::Private
+        } else {
+            Place::Kept
+        }
+    }
+}
+
+/// Whether `rel` is `folder` or inside it, comparing each component without case.
+fn under(rel: &Path, folder: &Path) -> bool {
+    let mut parts = rel.components();
+    folder.components().all(|f| {
+        parts.next().is_some_and(|p| {
+            p.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&f.as_os_str().to_string_lossy())
+        })
+    })
+}
+
 pub struct Vault {
     pub root: PathBuf,
     pub layout: Layout,
@@ -79,16 +105,6 @@ impl Vault {
                 .follow_links(false)
                 .sort_by_file_name()
                 .into_iter(),
-        }
-    }
-
-    fn place(&self, rel: &Path) -> Place {
-        if rel.starts_with(&self.layout.inbox) {
-            Place::Inbox
-        } else if rel.starts_with(&self.layout.private) {
-            Place::Private
-        } else {
-            Place::Kept
         }
     }
 
@@ -174,7 +190,7 @@ impl Iterator for Walk<'_> {
             let why = match entry.metadata() {
                 Ok(m) if m.len() > MAX_NOTE_BYTES => Skip::TooLarge(m.len()),
                 Ok(_) => {
-                    let place = self.vault.place(&rel);
+                    let place = self.vault.layout.place(&rel);
                     return Some(Entry::Note { rel, place });
                 }
                 Err(e) => Skip::Unreadable(e.to_string()),
