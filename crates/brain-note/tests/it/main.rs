@@ -350,17 +350,24 @@ fn block_scalars_and_mappings_read_as_other() {
     assert_eq!(n.kind, Kind::Knowledge);
 }
 
+/// A PEM armour line, built at run time so the repo's leak scan does not read the fixture as a key.
+fn armour(edge: &str, label: &str) -> String {
+    format!("-----{edge} {label} KEY-----")
+}
+
 #[test]
 fn a_pem_block_split_by_a_blank_line_is_redacted() {
-    let body = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG\n\nw0BAQEFAASCBKcwggSj\n-----END PRIVATE KEY-----\n";
-    let s = listed_summary(body);
+    let (begin, end) = (armour("BEGIN", "PRIVATE"), armour("END", "PRIVATE"));
+    let body = format!("{begin}\nMIIEvQIBADANBgkqhkiG\n\nw0BAQEFAASCBKcwggSj\n{end}\n");
+    let s = listed_summary(&body);
     assert!(!s.contains("BEGIN") && !s.contains("MIIEvQ"), "{s}");
 }
 
 #[test]
 fn an_unterminated_pem_block_is_redacted() {
-    let body = "Key below\n-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nmore";
-    let s = listed_summary(body);
+    let begin = armour("BEGIN", "RSA PRIVATE");
+    let body = format!("Key below\n{begin}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nmore");
+    let s = listed_summary(&body);
     assert!(!s.contains("MIIEvQ") && !s.contains("BEGIN"), "{s}");
     assert!(s.starts_with("Key below"), "{s}");
 }

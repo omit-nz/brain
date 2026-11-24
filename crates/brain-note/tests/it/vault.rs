@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use brain_note::{Entry, MAX_NOTE_BYTES, Place, Skip, Vault, rel_key};
 
@@ -132,7 +132,7 @@ fn oversize_and_binary_files_are_skipped_with_a_reason() {
 /// nothing on Windows.
 struct Locked {
     #[cfg(unix)]
-    path: PathBuf,
+    path: std::path::PathBuf,
     #[cfg(windows)]
     _handle: fs::File,
 }
