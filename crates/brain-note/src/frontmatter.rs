@@ -7,7 +7,7 @@ const BOM: &str = "\u{feff}";
 pub enum FmError {
     /// An opening `---` with no closing fence.
     Unclosed,
-    /// A value holding a line break, which would write a second key.
+    /// A key or value that would write a second key, or a key already written twice.
     Unsafe,
 }
 
@@ -17,6 +17,8 @@ pub enum Value {
     List(Vec<String>),
     /// The key appears more than once at column zero.
     Conflict,
+    /// A block scalar (`|`, `>`), a flow mapping or a nested mapping: not text this reader takes.
+    Other,
 }
 
 #[derive(Debug, Clone)]
@@ -37,8 +39,9 @@ fn lines_of(text: &str) -> Vec<&str> {
     text.split_inclusive('\n').collect()
 }
 
+/// `---` alone on its line; trailing spaces and tabs an editor left behind still count.
 fn is_fence(line: &str) -> bool {
-    line.trim_end_matches(['\r', '\n']) == "---"
+    line.trim_end() == "---"
 }
 
 impl<'a> Split<'a> {
@@ -102,6 +105,30 @@ fn value_after<'l>(line: &'l str, key: &str) -> Option<&'l str> {
     line.strip_prefix(key)?.strip_prefix(':')
 }
 
+/// Whether `line` names `key` in any YAML spelling: indented, quoted, spaced before the colon,
+/// in another case, inside a flow mapping, as a list item's key or as an explicit `? key`.
+fn names_key(line: &str, key: &str) -> bool {
+    line.split([',', '{']).any(|seg| {
+        let seg = seg.trim_start();
+        let (seg, explicit) = match seg.strip_prefix('?') {
+            Some(rest) => (rest, true),
+            None => (seg, false),
+        };
+        let seg = seg.trim_start().trim_start_matches("- ");
+        let k = match seg.split_once(':') {
+            Some((k, _)) => k,
+            None if explicit => seg,
+            None => return false,
+        };
+        unquote(k.trim()).eq_ignore_ascii_case(key)
+    })
+}
+
+/// Lines that continue the key on the line before: indented lines and block list items.
+fn continues(line: &str) -> bool {
+    line.starts_with([' ', '\t']) || line.starts_with("- ") || line.trim_end() == "-"
+}
+
 fn unquote(v: &str) -> &str {
     for q in ['"', '\''] {
         if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
@@ -113,6 +140,9 @@ fn unquote(v: &str) -> &str {
 
 fn parse_value(rest: &str, following: &[String]) -> Value {
     let v = rest.trim();
+    if v.starts_with(['|', '>', '{']) {
+        return Value::Other;
+    }
     if let Some(inner) = v.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         return Value::List(
             inner
@@ -123,28 +153,49 @@ fn parse_value(rest: &str, following: &[String]) -> Value {
         );
     }
     if v.is_empty() {
-        let items: Vec<String> = following
+        let block: Vec<&str> = following
             .iter()
             .map(|l| l.trim_end_matches(['\r', '\n']))
-            .take_while(|l| l.starts_with(' ') || l.starts_with('\t') || l.starts_with('-'))
+            .take_while(|l| continues(l))
+            .collect();
+        let items: Vec<String> = block
+            .iter()
             .filter_map(|l| l.trim_start().strip_prefix("- "))
             .map(|s| unquote(s.trim()).to_string())
             .collect();
-        if !items.is_empty() {
-            return Value::List(items);
+        if !block.is_empty() {
+            return if items.len() == block.len() {
+                Value::List(items)
+            } else {
+                Value::Other
+            };
         }
     }
     Value::Text(v.to_string())
 }
 
+/// A value YAML would read as something other than this text: a comment, an indicator, a
+/// mapping, or a bool, null or number.
 fn needs_quotes(v: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "true", "false", "yes", "no", "on", "off", "y", "n", "null", "~",
+    ];
     v.is_empty()
         || v.contains(": ")
         || v.contains(" #")
+        || v.contains('\t')
+        || v.ends_with(':')
         || v.starts_with([
-            '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`', '{', '[', '-', ' ',
+            '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`', '{', '[', '-', ' ', '?', ',',
+            '+', '.',
         ])
+        || v.parse::<f64>().is_ok()
+        || v.chars()
+            .all(|c| c.is_ascii_digit() || c == '_' || c == ':')
+        || v.starts_with("0x")
+        || v.starts_with("0o")
         || v.ends_with(' ')
+        || RESERVED.iter().any(|r| v.eq_ignore_ascii_case(r))
 }
 
 impl Frontmatter {
@@ -178,18 +229,23 @@ impl Frontmatter {
             .map(|rest| Value::Text(unquote(rest.trim()).to_string()))
     }
 
-    /// The key written somewhere other than column zero, where a reader of column-zero keys
-    /// would miss it.
+    /// The key written any way other than plain `key:` at column zero (indented, quoted, spaced,
+    /// in another case, in a flow mapping), where `get` would miss it.
     pub fn misplaced(&self, key: &str) -> bool {
-        self.lines.iter().any(|l| {
-            let t = l.trim_start();
-            t.len() < l.len() && value_after(t, key).is_some()
-        })
+        self.lines
+            .iter()
+            .any(|l| names_key(l, key) && value_after(l, key).is_none())
     }
 
-    /// Writes `key: value`, replacing the key's line or adding one before the closing fence.
+    /// Writes `key: value`, replacing the key's line and its continuation lines, or adding one
+    /// before the closing fence. Refuses a key that is not a plain name, a value holding a line
+    /// break, and a key already written twice.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), FmError> {
-        if value.contains(['\n', '\r']) {
+        let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+        if key.is_empty() || !key.chars().all(plain) || value.contains(['\n', '\r']) {
+            return Err(FmError::Unsafe);
+        }
+        if self.get(key) == Some(Value::Conflict) {
             return Err(FmError::Unsafe);
         }
         let shown = if needs_quotes(value) {
@@ -208,7 +264,13 @@ impl Frontmatter {
             .iter()
             .position(|l| value_after(l, key).is_some())
         {
-            Some(i) => self.lines[i] = line,
+            Some(i) => {
+                let n = self.lines[i + 1..]
+                    .iter()
+                    .take_while(|l| continues(l))
+                    .count();
+                self.lines.splice(i..=i + n, [line]);
+            }
             None => self.lines.push(line),
         }
         Ok(())
@@ -223,12 +285,13 @@ impl Frontmatter {
         out
     }
 
-    /// A block holding only `key: value`, for a note that had no frontmatter.
-    pub fn new_with(key: &str, value: &str) -> Result<Frontmatter, FmError> {
+    /// A block holding only `key: value`, for a note that had no frontmatter, with the line end
+    /// `eol` the note already uses.
+    pub fn new_with(key: &str, value: &str, eol: &str) -> Result<Frontmatter, FmError> {
         let mut fm = Frontmatter {
-            open: "---\n".into(),
+            open: format!("---{eol}"),
             lines: Vec::new(),
-            close: "---\n".into(),
+            close: format!("---{eol}"),
         };
         fm.set(key, value)?;
         Ok(fm)

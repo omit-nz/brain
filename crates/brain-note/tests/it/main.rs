@@ -282,3 +282,215 @@ fn a_note_reads_its_fields() {
     assert_eq!(n.key, "w/r.md");
     assert_eq!(n.links, vec!["x"]);
 }
+
+fn fm_of<'s>(split: &'s mut Split<'_>) -> &'s mut brain_note::Frontmatter {
+    split.fm.as_mut().unwrap().as_mut().unwrap()
+}
+
+#[test]
+fn a_visibility_key_spelled_any_other_way_withholds() {
+    for line in [
+        "\"visibility\": shared",
+        "'visibility': shared",
+        "visibility : shared",
+        "visibility\t: shared",
+        "Visibility: shared",
+        "{visibility: private}",
+        "{title: t, visibility: private}",
+        "? visibility\n: private",
+    ] {
+        let raw = format!("---\ntitle: t\n{line}\n---\nbody\n");
+        assert_eq!(disc(&raw, Place::Kept), Disclosure::Private, "{line:?}");
+    }
+    let mention = "---\ntitle: About visibility in teams\n---\nbody\n";
+    assert_eq!(disc(mention, Place::Kept), Disclosure::Shared);
+}
+
+#[test]
+fn a_fence_with_trailing_space_is_still_frontmatter() {
+    for raw in [
+        "--- \nvisibility: private\n---\nbody\n",
+        "---\t\r\nvisibility: private\r\n--- \r\nbody\r\n",
+    ] {
+        let split = Split::parse(raw);
+        assert!(matches!(split.fm, Ok(Some(_))), "{raw:?}");
+        assert_eq!(disclosure(&split, Place::Kept), Disclosure::Private);
+        assert_eq!(split.render(), raw);
+    }
+}
+
+#[test]
+fn a_hash_without_a_space_is_part_of_the_value() {
+    for v in ["shared#x", "public#"] {
+        assert_eq!(
+            disc(&with_visibility(v), Place::Kept),
+            Disclosure::Private,
+            "{v:?}"
+        );
+    }
+    assert_eq!(
+        disc(&with_visibility("shared\t# ok"), Place::Kept),
+        Disclosure::Shared
+    );
+}
+
+#[test]
+fn block_scalars_and_mappings_read_as_other() {
+    let raw =
+        "---\ntitle: |\n  Multi\nvisibility:\n  level: shared\nkind: >\n  rule\n---\n# Heading\n";
+    let split = Split::parse(raw);
+    let fm = split.fm.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(fm.get("title"), Some(brain_note::Value::Other));
+    assert_eq!(fm.get("visibility"), Some(brain_note::Value::Other));
+    assert_eq!(disclosure(&split, Place::Kept), Disclosure::Private);
+    let n = Note::parse(Path::new("n.md"), raw, Place::Kept);
+    assert_eq!(n.title, "Heading");
+    assert_eq!(n.kind, Kind::Knowledge);
+}
+
+#[test]
+fn a_pem_block_split_by_a_blank_line_is_redacted() {
+    let body = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG\n\nw0BAQEFAASCBKcwggSj\n-----END PRIVATE KEY-----\n";
+    let s = listed_summary(body);
+    assert!(!s.contains("BEGIN") && !s.contains("MIIEvQ"), "{s}");
+}
+
+#[test]
+fn an_unterminated_pem_block_is_redacted() {
+    let body = "Key below\n-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nmore";
+    let s = listed_summary(body);
+    assert!(!s.contains("MIIEvQ") && !s.contains("BEGIN"), "{s}");
+    assert!(s.starts_with("Key below"), "{s}");
+}
+
+#[test]
+fn a_crlf_or_blank_led_body_gives_its_first_paragraph() {
+    assert_eq!(listed_summary("One line.\r\n\r\nSecond.\r\n"), "One line.");
+    assert_eq!(listed_summary("\n\nFirst.\n\nSecond.\n"), "First.");
+}
+
+#[test]
+fn ensure_id_refuses_a_conflicted_id_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("two.md");
+    let raw = "---\nid: a\nid: b\n---\nx\n";
+    fs::write(root.path().join(rel), raw).unwrap();
+    assert_eq!(
+        ensure_id(root.path(), rel, raw).unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(
+        brain_note::reassign_id(root.path(), rel, raw)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(fs::read_to_string(root.path().join(rel)).unwrap(), raw);
+}
+
+#[test]
+fn set_refuses_a_key_that_could_write_another() {
+    let mut split = Split::parse("---\ntitle: x\n---\n");
+    let fm = fm_of(&mut split);
+    for key in ["a\nowner", "a: b", "a#", " a", "", "a b"] {
+        assert_eq!(
+            fm.set(key, "x"),
+            Err(brain_note::FmError::Unsafe),
+            "{key:?}"
+        );
+    }
+    assert_eq!(split.render(), "---\ntitle: x\n---\n");
+}
+
+#[test]
+fn set_replaces_a_key_with_its_continuation_lines() {
+    let mut split = Split::parse("---\ntags:\n  - a\n  - b\ntitle: x\n---\n");
+    fm_of(&mut split).set("tags", "c").unwrap();
+    assert_eq!(split.render(), "---\ntags: c\ntitle: x\n---\n");
+}
+
+#[test]
+fn a_set_value_reads_back_as_written() {
+    for v in [
+        "a:", "?x", ",x", "a\tb", "true", "null", "~", "123", "1.5", "no", "x #y", "-x",
+    ] {
+        let mut split = Split::parse("---\n---\n");
+        fm_of(&mut split).set("title", v).unwrap();
+        let rendered = split.render();
+        let n = Note::parse(Path::new("n.md"), &rendered, Place::Kept);
+        assert_eq!(n.title, v, "{v:?} written as {rendered:?}");
+        assert!(
+            rendered.contains(&format!("title: \"{v}\"")),
+            "{v:?} written bare: {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn set_keeps_crlf_line_ends() {
+    let mut split = Split::parse("---\r\ntitle: x\r\n---\r\nbody\r\n");
+    fm_of(&mut split).set("owner", "robin").unwrap();
+    assert_eq!(
+        split.render(),
+        "---\r\ntitle: x\r\nowner: robin\r\n---\r\nbody\r\n"
+    );
+}
+
+#[test]
+fn a_new_block_takes_the_note_line_ends_and_keeps_its_bom() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("n.md");
+    for (raw, eol) in [("a\r\nb\r\n", "\r\n"), ("\u{feff}a\nb\n", "\n")] {
+        fs::write(root.path().join(rel), raw).unwrap();
+        let (id, _) = ensure_id(root.path(), rel, raw).unwrap();
+        let bom = if raw.starts_with('\u{feff}') {
+            "\u{feff}"
+        } else {
+            ""
+        };
+        let body = raw.trim_start_matches('\u{feff}');
+        assert_eq!(
+            fs::read_to_string(root.path().join(rel)).unwrap(),
+            format!("{bom}---{eol}id: {id}{eol}---{eol}{body}")
+        );
+    }
+}
+
+#[test]
+fn reassign_id_changes_only_the_id() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("n.md");
+    let raw = "---\nid: 0195f2e0-0000-7000-8000-000000000000\ntitle: x\n---\nbody\n";
+    fs::write(root.path().join(rel), raw).unwrap();
+    let id = brain_note::reassign_id(root.path(), rel, raw).unwrap();
+    assert_eq!(id.get_version_num(), 7);
+    assert_ne!(id.to_string(), "0195f2e0-0000-7000-8000-000000000000");
+    assert_eq!(
+        fs::read_to_string(root.path().join(rel)).unwrap(),
+        format!("---\nid: {id}\ntitle: x\n---\nbody\n")
+    );
+}
+
+#[test]
+fn tags_read_from_block_and_inline_lists() {
+    for raw in [
+        "---\ntags: [a, \"b\"]\n---\n",
+        "---\ntags:\n  - a\n  - 'b'\n---\n",
+        "---\ntags:\n- a\n- b\n---\n",
+    ] {
+        assert_eq!(
+            Note::parse(Path::new("n.md"), raw, Place::Kept).tags,
+            vec!["a", "b"],
+            "{raw:?}"
+        );
+    }
+}
+
+#[test]
+fn a_file_ending_at_the_closing_fence_round_trips() {
+    for raw in ["---\nid: x\n---", "---\r\nid: x\r\n---"] {
+        let split = Split::parse(raw);
+        assert!(matches!(split.fm, Ok(Some(_))));
+        assert_eq!(split.render(), raw);
+    }
+}

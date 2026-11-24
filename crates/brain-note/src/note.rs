@@ -99,10 +99,16 @@ fn write_id(root: &Path, rel: &Path, mut split: Split<'_>, id: Uuid) -> io::Resu
         Err(_) => return Err(invalid("broken frontmatter: no id is written into it")),
         Ok(Some(fm)) => fm
             .set("id", &id.to_string())
-            .map_err(|_: FmError| invalid("unsafe id"))?,
+            .map_err(|_: FmError| invalid("id written twice: no id is written into it"))?,
         Ok(None) => {
+            let crlf = split
+                .body
+                .find('\n')
+                .is_some_and(|i| split.body[..i].ends_with('\r'));
+            let eol = if crlf { "\r\n" } else { "\n" };
             split.fm = Ok(Some(
-                Frontmatter::new_with("id", &id.to_string()).map_err(|_| invalid("unsafe id"))?,
+                Frontmatter::new_with("id", &id.to_string(), eol)
+                    .map_err(|_| invalid("unsafe id"))?,
             ));
         }
     }

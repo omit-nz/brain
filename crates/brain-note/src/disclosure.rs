@@ -48,11 +48,16 @@ pub fn disclosure(split: &Split<'_>, place: Place) -> Disclosure {
 }
 
 /// learning-loop's normalising: an unquoted value loses a trailing `# comment`, and only
-/// matched quotes are stripped, so a half-quoted value stays unknown.
+/// matched quotes are stripped, so a half-quoted value stays unknown. As in YAML, a `#` starts a
+/// comment only after a space or tab: `shared#x` is one unknown value, not `shared`.
 fn normalise(raw: &str) -> String {
     let mut v = raw.trim();
     if !v.starts_with(['"', '\'']) {
-        v = v.split('#').next().unwrap_or("").trim();
+        let comment = v
+            .char_indices()
+            .find(|&(i, c)| c == '#' && v[..i].ends_with([' ', '\t']))
+            .map_or(v.len(), |(i, _)| i);
+        v = v[..comment].trim();
     }
     for q in ['"', '\''] {
         if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
@@ -77,7 +82,8 @@ static SECRETS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"Bearer\s+[A-Za-z0-9._\-/+=]{20,}",
         r"xox[abprs]-[A-Za-z0-9-]{10,}",
         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-        r"(?s:-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----)",
+        // A key with no END line runs to the end of the text.
+        r"(?s:-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z))",
         r"(?i)([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@",
         r#"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret)\b(\s*[=:]\s*)("[^\s"']{6,}"|'[^\s"']{6,}'|[^\s"']{6,})"#,
         r"(?i)\bAuthorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}",
@@ -87,16 +93,16 @@ static SECRETS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
-/// The first paragraph, scrubbed whole and then cut, so a secret the cut would split is still
-/// caught by its full pattern.
+/// The first paragraph of the scrubbed body, then cut: the whole body is scrubbed first, so a
+/// secret that a paragraph break or the cut would split is still caught by its full pattern.
 pub fn listed_summary(body: &str) -> String {
-    let para = body.split("\n\n").next().unwrap_or(body).trim();
-    let mut s = para.to_string();
+    let mut text = body.replace("\r\n", "\n");
     for re in SECRETS.iter() {
-        s = re.replace_all(&s, "[REDACTED]").into_owned();
+        text = re.replace_all(&text, "[REDACTED]").into_owned();
     }
+    let s = text.trim_start().split("\n\n").next().unwrap_or("").trim();
     if s.chars().count() <= LISTED_CHARS {
-        return s;
+        return s.to_string();
     }
     let end = s
         .char_indices()
