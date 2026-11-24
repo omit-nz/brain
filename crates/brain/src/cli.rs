@@ -6,11 +6,12 @@ use brain_note::{Frontmatter, Kind, Split, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Privacy, create_dir_private, write_atomic};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use jiff::ToSpan;
 use serde_json::json;
 
 use crate::config::{Config, REVIEW_DAYS};
+use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
 use crate::out::terminal;
 
@@ -64,6 +65,11 @@ enum Command {
     },
     /// Print a note, by id or by its path in the vault.
     Show { target: String },
+    /// Copy another brain's notes into this vault.
+    Import {
+        #[command(subcommand)]
+        from: ImportFrom,
+    },
     /// List the inbox, oldest first, or keep or skip a note in it.
     Inbox {
         #[command(subcommand)]
@@ -74,6 +80,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ImportFrom {
+    /// A learning-loop vault and, optionally, Claude Code auto-memory.
+    LearningLoop(LearningLoop),
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("blocklist").args(["ll_config", "no_ll_config"])))]
+struct LearningLoop {
+    /// The learning-loop vault; it is only read.
+    #[arg(long)]
+    from: PathBuf,
+    /// Claude Code's projects folder, whose `*/memory/*.md` become working memory.
+    #[arg(long)]
+    memory: Option<PathBuf>,
+    /// A vault folder whose undeclared notes come across shared.
+    #[arg(long, requires = "blocklist")]
+    share: Vec<PathBuf>,
+    /// learning-loop's config folder, whose visibility rules can keep a note private.
+    #[arg(long)]
+    ll_config: Option<PathBuf>,
+    /// Share without learning-loop's rules.
+    #[arg(long)]
+    no_ll_config: bool,
+    /// Show what would change and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -151,6 +186,9 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         }
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
+        Command::Import {
+            from: ImportFrom::LearningLoop(args),
+        } => import_learning_loop(dirs, clock.today(), args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
             match action {
@@ -381,5 +419,75 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
         lines.push("the index is empty; run `brain index`".into());
     }
     println!("{}", terminal(&lines.join("\n")));
+    Ok(())
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+fn import_learning_loop(
+    dirs: &Dirs,
+    today: jiff::civil::Date,
+    a: LearningLoop,
+) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let dst = Vault::open(&config.vault)?;
+    let src = Vault::open(&a.from)?;
+    import::check_apart(&src, &dst)?;
+    let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
+    let mut ledger = Ledger::load(dirs)?;
+    let w = Written {
+        me: &config.me,
+        today,
+        share: &a.share,
+        blocklist: blocklist.as_ref(),
+        inbox: &dst.layout.inbox,
+    };
+    let (plan, written) = if a.dry_run {
+        (
+            import::plan(&src, a.memory.as_deref(), &dst, &ledger)?,
+            Vec::new(),
+        )
+    } else {
+        import::apply(&src, a.memory.as_deref(), &dst, &mut ledger, &w)?
+    };
+    let mut lines = vec![format!(
+        "{} new, {} updated, {} unchanged, {}, {} skipped{}",
+        plan.new.len(),
+        plan.updated.len(),
+        plan.unchanged,
+        plural(plan.conflicts.len(), "conflict"),
+        plan.skipped.len(),
+        if a.dry_run {
+            " (dry run: nothing written)"
+        } else {
+            ""
+        }
+    )];
+    if !plan.conflicts.is_empty() {
+        lines.push("changed on both sides, left as they are:".into());
+        lines.extend(plan.conflicts.iter().map(|p| format!("  {p}")));
+    }
+    if !plan.skipped.is_empty() {
+        lines.push("skipped:".into());
+        lines.extend(
+            plan.skipped
+                .iter()
+                .map(|(k, why)| format!("  {k}: {why:?}")),
+        );
+    }
+    println!("{}\n", terminal(&lines.join("\n")));
+    if a.dry_run {
+        return Ok(());
+    }
+    index(dirs)?.reindex(&dst)?;
+    import::settle(&mut ledger, &dst, &written)?;
+    ledger.save(dirs)?;
+    println!("{}", terminal(&import::report(&dst, today).to_string()));
     Ok(())
 }

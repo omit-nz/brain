@@ -17,10 +17,12 @@ brain-index = { path = "../brain-index" }
 brain-note = { path = "../brain-note" }
 brain-platform = { path = "../brain-platform" }
 clap.workspace = true
+globset.workspace = true
 jiff.workspace = true
 ll-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml.workspace = true
 uuid.workspace = true
 
