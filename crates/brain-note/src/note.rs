@@ -1,7 +1,7 @@
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path};
 
-use brain_platform::fs::{Privacy, write_atomic};
+use brain_platform::fs::{Privacy, replace_unchanged};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -108,7 +108,7 @@ fn invalid(msg: &str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, msg.to_string())
 }
 
-fn write_id(root: &Path, rel: &Path, mut split: Split<'_>, id: Uuid) -> io::Result<()> {
+fn write_id(root: &Path, rel: &Path, raw: &str, mut split: Split<'_>, id: Uuid) -> io::Result<()> {
     match &mut split.fm {
         Err(_) => return Err(invalid("broken frontmatter: no id is written into it")),
         Ok(Some(fm)) => fm
@@ -126,7 +126,13 @@ fn write_id(root: &Path, rel: &Path, mut split: Split<'_>, id: Uuid) -> io::Resu
             ));
         }
     }
-    write_atomic(root, rel, split.render().as_bytes(), Privacy::Normal)
+    replace_unchanged(
+        root,
+        rel,
+        |now| now == Some(raw.as_bytes()),
+        split.render().as_bytes(),
+        Privacy::Normal,
+    )
 }
 
 /// The note's id, writing a new UUIDv7 only when frontmatter is valid and holds none.
@@ -143,13 +149,13 @@ pub fn ensure_id(root: &Path, rel: &Path, raw: &str) -> io::Result<(Uuid, bool)>
         Ok(None) => {}
     }
     let id = Uuid::now_v7();
-    write_id(root, rel, split, id)?;
+    write_id(root, rel, raw, split, id)?;
     Ok((id, true))
 }
 
 /// A fresh id for a note whose id another note already holds.
 pub fn reassign_id(root: &Path, rel: &Path, raw: &str) -> io::Result<Uuid> {
     let id = Uuid::now_v7();
-    write_id(root, rel, Split::parse(raw), id)?;
+    write_id(root, rel, raw, Split::parse(raw), id)?;
     Ok(id)
 }

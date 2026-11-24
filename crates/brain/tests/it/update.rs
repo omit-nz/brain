@@ -387,3 +387,52 @@ fn a_signed_archive_under_another_name_is_refused() {
     update::verify(&a, &[public(&k)]).unwrap();
     assert!(update::verify(&renamed, &[public(&k)]).is_err());
 }
+
+/// An install laid out as scripts/install.sh lays it out: the release folder in `bin/`, and a
+/// link to its binary in `local/` standing in for ~/.local/bin.
+#[cfg(unix)]
+#[test]
+fn an_install_run_through_its_link_finds_its_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("bin").join("brain-current");
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::copy(
+        assert_cmd::cargo::cargo_bin("brain"),
+        current.join(update::exe_name()),
+    )
+    .unwrap();
+    let runtime = current.join("lib").join(update::runtime_name());
+    fs::write(&runtime, "runtime").unwrap();
+    fs::create_dir_all(root.path().join("local")).unwrap();
+    let link = root.path().join("local").join("brain");
+    std::os::unix::fs::symlink(current.join(update::exe_name()), &link).unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let vault = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(&link)
+            .env("BRAIN_HOME", home.path())
+            .env_remove("ORT_DYLIB_PATH")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    run(&[
+        "init",
+        "--me",
+        "r",
+        "--vault",
+        vault.path().to_str().unwrap(),
+    ]);
+    let status: serde_json::Value = serde_json::from_slice(&run(&["status", "--json"])).unwrap();
+    let found = status["runtime"]
+        .as_str()
+        .map(|p| fs::canonicalize(p).unwrap());
+    assert_eq!(found, Some(fs::canonicalize(&runtime).unwrap()), "{status}");
+}

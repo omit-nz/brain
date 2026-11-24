@@ -10,7 +10,10 @@ use brain_platform::dirs::Dirs;
 /// makes takes its warm path and sets the same value again. With no runtime set, nothing is
 /// resolved: ll-core would download one, and brain never does.
 pub fn prepare(dirs: &Dirs) -> anyhow::Result<()> {
+    // macOS reports the path it was started by, so a run through ~/.local/bin/brain names the
+    // link; the release folder is where the link points.
     let bundled = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
         .map(|dir| dir.join("lib").join(runtime_name()))

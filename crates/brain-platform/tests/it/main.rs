@@ -5,8 +5,63 @@ use std::path::Path;
 use brain_platform::clock::{Clock, FixedClock};
 use brain_platform::dirs::{Dirs, parse_brain_home};
 use brain_platform::fs::{
-    Privacy, archive, create_dir_private, ensure_private_file, rename_within, write_atomic,
+    Privacy, archive, create_dir_private, ensure_private_file, rename_within, replace_unchanged,
+    write_atomic,
 };
+
+#[test]
+fn a_replace_refuses_a_file_changed_since_it_was_read() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("n.md");
+    fs::write(root.path().join(rel), "edited\n").unwrap();
+    let err = replace_unchanged(
+        root.path(),
+        rel,
+        |now| now == Some(b"read\n".as_slice()),
+        b"new\n",
+        Privacy::Normal,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("changed since"), "{err}");
+    assert_eq!(
+        fs::read_to_string(root.path().join(rel)).unwrap(),
+        "edited\n"
+    );
+
+    replace_unchanged(
+        root.path(),
+        rel,
+        |now| now == Some(b"edited\n".as_slice()),
+        b"new\n",
+        Privacy::Normal,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(root.path().join(rel)).unwrap(), "new\n");
+
+    let fresh = Path::new("fresh.md");
+    replace_unchanged(
+        root.path(),
+        fresh,
+        |now| now.is_none(),
+        b"first\n",
+        Privacy::Normal,
+    )
+    .unwrap();
+    assert!(
+        replace_unchanged(
+            root.path(),
+            fresh,
+            |now| now.is_none(),
+            b"second\n",
+            Privacy::Normal
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join(fresh)).unwrap(),
+        "first\n"
+    );
+}
 
 #[test]
 fn ensure_private_file_creates_once_and_tightens() {

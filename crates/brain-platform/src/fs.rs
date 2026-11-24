@@ -54,6 +54,30 @@ fn parent_dirs(path: &Path) -> io::Result<&Path> {
     Ok(parent)
 }
 
+/// `write_atomic`, but only when `unchanged` accepts the file as it is now (`None` when there is
+/// none), so brain never writes over a save made since it read the file. The check and the rename
+/// are two steps; the window between them is what a file system allows without a lock.
+pub fn replace_unchanged(
+    root: &Path,
+    rel: &Path,
+    unchanged: impl FnOnce(Option<&[u8]>) -> bool,
+    bytes: &[u8],
+    privacy: Privacy,
+) -> io::Result<()> {
+    let now = match fs::read(checked(root, rel)?) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if !unchanged(now.as_deref()) {
+        return Err(io::Error::other(format!(
+            "{} changed since it was read; nothing written",
+            rel.display()
+        )));
+    }
+    write_atomic(root, rel, bytes, privacy)
+}
+
 pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> io::Result<()> {
     let path = checked(root, rel)?;
     let existing = match privacy {

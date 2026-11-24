@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, bail};
 use brain_note::{Layout, Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{Privacy, write_atomic};
+use brain_platform::fs::{Privacy, replace_unchanged, write_atomic};
 use jiff::ToSpan;
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
@@ -201,7 +201,7 @@ fn classify(
     memory: Option<&Path>,
     dst: &Vault,
     ledger: &Ledger,
-) -> anyhow::Result<(ImportPlan, Vec<Source>)> {
+) -> anyhow::Result<(ImportPlan, Vec<(Source, Option<String>)>)> {
     let mut plan = ImportPlan::default();
     let all = sources(src, memory, &mut plan.skipped)?;
     let mut todo = Vec::new();
@@ -218,12 +218,12 @@ fn classify(
             None if dst_hash.is_some() => plan.conflicts.push(rel_key(&s.dst_rel)),
             None => {
                 plan.new.push(rel_key(&s.dst_rel));
-                todo.push(s);
+                todo.push((s, dst_hash));
             }
             Some(e) if e.src_hash == src_hash => plan.unchanged += 1,
             Some(e) if dst_hash.as_deref() == Some(e.dst_hash.as_str()) => {
                 plan.updated.push(rel_key(&s.dst_rel));
-                todo.push(s);
+                todo.push((s, dst_hash));
             }
             Some(_) => plan.conflicts.push(rel_key(&s.dst_rel)),
         }
@@ -252,7 +252,7 @@ pub fn apply(
 ) -> anyhow::Result<(ImportPlan, Vec<String>)> {
     let (plan, todo) = classify(src, memory, dst, ledger)?;
     let mut written = Vec::new();
-    for s in todo {
+    for (s, seen) in todo {
         let prior = ledger.0.get(&s.key).and_then(|e| e.id.clone());
         let (text, id) = if s.memory {
             let id = prior.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
@@ -264,8 +264,16 @@ pub fn apply(
                 .map(|u| u.to_string());
             (text, id)
         };
-        write_atomic(&dst.root, &s.dst_rel, text.as_bytes(), Privacy::Normal)
-            .with_context(|| format!("writing {}", rel_key(&s.dst_rel)))?;
+        // The copy as classified: absent, or the bytes the ledger recorded. A save made to it since
+        // is left alone.
+        replace_unchanged(
+            &dst.root,
+            &s.dst_rel,
+            |now| now.map(hash) == seen,
+            text.as_bytes(),
+            Privacy::Normal,
+        )
+        .with_context(|| format!("writing {}", rel_key(&s.dst_rel)))?;
         ledger.0.insert(
             s.key.clone(),
             LedgerEntry {

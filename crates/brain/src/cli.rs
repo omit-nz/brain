@@ -444,8 +444,10 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let s = index(dirs)?.stats()?;
     let version = env!("CARGO_PKG_VERSION");
+    let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     if as_json {
         let v = json!({
+            "runtime": runtime,
             "notes": s.notes,
             "embedded": s.embedded,
             "failed": s.failed,
@@ -464,6 +466,10 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             "{} notes: {} embedded, {} pending, {} failed, {} without an id",
             s.notes, s.embedded, s.pending, s.failed, s.unidentified
         ),
+        match &runtime {
+            Some(lib) => format!("ONNX Runtime: {}", lib.display()),
+            None => "ONNX Runtime: none, so search uses words and links only".into(),
+        },
     ];
     for (reason, n) in &s.skipped {
         lines.push(format!("skipped, {reason}: {n}"));

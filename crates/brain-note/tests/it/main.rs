@@ -229,6 +229,17 @@ fn ensure_id_writes_a_v7_only_when_missing() {
 }
 
 #[test]
+fn ensure_id_never_overwrites_an_edit_made_since_the_read() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("n.md");
+    let read = "---\ntitle: x\n---\nbody\n";
+    let saved = "---\ntitle: x\n---\nbody\nan edit saved while brain was working\n";
+    fs::write(root.path().join(rel), saved).unwrap();
+    assert!(ensure_id(root.path(), rel, read).is_err());
+    assert_eq!(fs::read_to_string(root.path().join(rel)).unwrap(), saved);
+}
+
+#[test]
 fn an_id_is_never_written_into_broken_frontmatter() {
     let root = tempfile::tempdir().unwrap();
     let rel = Path::new("broken.md");
