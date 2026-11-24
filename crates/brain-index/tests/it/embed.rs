@@ -199,6 +199,27 @@ fn load_without_a_runtime_names_the_missing_file() {
     assert!(err.contains("ORT_DYLIB_PATH"), "{err}");
 }
 
+/// A runtime file that cannot be loaded (truncated, the wrong platform, not a library) is named
+/// at once; handed to the ort crate it would park the process for good.
+#[test]
+fn a_runtime_that_cannot_be_loaded_is_named_not_waited_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let bogus = dir.path().join("libonnxruntime.dylib");
+    fs::write(&bogus, "not a library").unwrap();
+    // SAFETY: nextest runs each test in its own process, so no other thread reads the env.
+    unsafe { std::env::set_var("ORT_DYLIB_PATH", &bogus) };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(embed::load().err().map(|e| format!("{e:#}")));
+    });
+    let err = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("embed::load waited on a runtime it cannot load")
+        .expect("embed::load accepted a file that is not a library");
+    assert!(err.contains("cannot be loaded"), "{err}");
+    assert!(err.contains(&bogus.display().to_string()), "{err}");
+}
+
 #[test]
 fn the_hash_embedder_is_deterministic_and_sized() {
     let h = HashEmbedder::new(16);

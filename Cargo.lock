@@ -238,6 +238,7 @@ dependencies = [
  "anyhow",
  "brain-note",
  "brain-platform",
+ "libloading",
  "ll-core",
  "rusqlite",
  "serde_json",

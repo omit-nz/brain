@@ -350,6 +350,25 @@ fn keep_moves_and_keeps_the_id() {
 }
 
 #[test]
+fn an_inbox_note_with_broken_frontmatter_is_listed_kept_and_skipped() {
+    let h = Home::new();
+    h.init();
+    let broken = "---\ntitle: oops\nno closing fence\nwalrus here\n";
+    h.put("0-inbox/broken.md", broken);
+    h.put("0-inbox/also-broken.md", broken);
+    let listed = h.run(&["inbox"]);
+    assert!(listed.contains("0-inbox/broken.md"), "{listed}");
+    assert!(listed.contains("frontmatter is broken"), "{listed}");
+    h.run(&["inbox", "keep", "0-inbox/broken.md"]);
+    assert_eq!(
+        fs::read_to_string(h.vault.path().join("1-fleeting/broken.md")).unwrap(),
+        broken
+    );
+    h.run(&["inbox", "skip", "0-inbox/also-broken.md"]);
+    assert!(!h.vault.path().join("0-inbox/also-broken.md").exists());
+}
+
+#[test]
 fn a_kept_note_can_be_shared() {
     let h = Home::new();
     h.init();

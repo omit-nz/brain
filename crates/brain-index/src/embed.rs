@@ -2,7 +2,7 @@
 //! take is marked failed on its own; when every note fails, the embedder is blamed and nothing is
 //! marked, so the queue resumes once it works again.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use ll_core::embed::{EmbeddingProvider, ModelConfig};
@@ -11,17 +11,34 @@ use rusqlite::params;
 
 use crate::Index;
 
-/// The bge-small provider over the ONNX Runtime brain ships. Never downloads a runtime: a missing
-/// `ORT_DYLIB_PATH` is an error naming it.
-pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
-    let ort = std::env::var_os("ORT_DYLIB_PATH")
-        .context("ORT_DYLIB_PATH is not set, so there is no ONNX Runtime to embed with")?;
-    if !Path::new(&ort).is_file() {
+/// The ONNX Runtime library `ORT_DYLIB_PATH` names, once it is known to load. The ort crate waits
+/// forever on a file it cannot load, so a truncated, foreign or non-library file is refused here,
+/// by name. Never downloads a runtime.
+pub fn runtime() -> anyhow::Result<PathBuf> {
+    let ort = PathBuf::from(
+        std::env::var_os("ORT_DYLIB_PATH")
+            .context("ORT_DYLIB_PATH is not set, so there is no ONNX Runtime")?,
+    );
+    if !ort.is_file() {
         bail!(
             "ORT_DYLIB_PATH names {}, which is not a file",
-            Path::new(&ort).display()
+            ort.display()
         );
     }
+    // SAFETY: loading runs the library's initialisers, which the ort crate runs anyway when it
+    // loads the same file; this only learns whether it loads at all.
+    unsafe { libloading::Library::new(&ort) }.with_context(|| {
+        format!(
+            "ORT_DYLIB_PATH names {}, which cannot be loaded as ONNX Runtime",
+            ort.display()
+        )
+    })?;
+    Ok(ort)
+}
+
+/// The bge-small provider over the ONNX Runtime brain ships.
+pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+    runtime()?;
     let (model, tokenizer) = ensure_model()?;
     Ok(Box::new(BgeSmallProvider::from_files(&model, &tokenizer)?))
 }

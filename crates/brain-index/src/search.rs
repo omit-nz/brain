@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::bail;
+use anyhow::Context;
 use brain_note::{Disclosure, Kind};
 use ll_core::embed::EmbeddingProvider;
 use ll_core::graph::{GraphEdges, personalized_pagerank};
@@ -86,9 +86,8 @@ impl Index {
         q: &Query<'_>,
         provider: Option<&dyn EmbeddingProvider>,
     ) -> anyhow::Result<Vec<Hit>> {
-        if q.rerank && !std::env::var_os("ORT_DYLIB_PATH").is_some_and(|p| Path::new(&p).is_file())
-        {
-            bail!("reranking needs ONNX Runtime, and ORT_DYLIB_PATH does not name a file");
+        if q.rerank {
+            crate::embed::runtime().context("reranking needs ONNX Runtime")?;
         }
         let text = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
         if text.is_empty() {

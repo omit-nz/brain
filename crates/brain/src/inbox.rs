@@ -37,6 +37,7 @@ struct Item {
     date: String,
     title: String,
     facts: GateFacts,
+    broken: bool,
 }
 
 /// Inbox notes, oldest `date` first, then by path.
@@ -54,12 +55,14 @@ fn items(vault: &Vault) -> Vec<Item> {
             let raw = vault.read(&rel).ok()?;
             let split = Split::parse(&raw);
             let note = Note::parse(&rel, &raw, Place::Inbox);
-            let date = match split.fm.as_ref().ok()?.as_ref().and_then(|f| f.get("date")) {
+            let fm = split.fm.as_ref().ok().and_then(Option::as_ref);
+            let date = match fm.and_then(|f| f.get("date")) {
                 Some(Value::Text(d)) => d,
                 _ => String::new(),
             };
             Some(Item {
                 facts: gate::facts(&note, &split),
+                broken: split.fm.is_err(),
                 id: note.id,
                 title: note.title,
                 rel,
@@ -114,6 +117,13 @@ pub fn list(vault: &Vault) -> anyhow::Result<()> {
             },
             gate::route(f, None, false),
         );
+        let line = if i.broken {
+            format!(
+                "{line}\n    frontmatter is broken: the note stays private and brain writes nothing into it"
+            )
+        } else {
+            line
+        };
         println!("{}", terminal(&line));
     }
     Ok(())
