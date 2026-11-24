@@ -1,0 +1,3 @@
+# A test fixture's PEM armour line in brain-note's listed-summary test, committed literally in
+# 8d89cf2 and built at run time since; it is not a key.
+8d89cf273fa06a4cd274c37c48cda38cb3276dfb:crates/brain-note/tests/it/main.rs:private-key:353

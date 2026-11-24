@@ -1,0 +1,586 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+use brain_index::{Index, Query, Scope, embed};
+use brain_note::{Frontmatter, Kind, Split, Vault};
+use brain_platform::clock::{Clock, FixedClock, SystemClock};
+use brain_platform::dirs::Dirs;
+use brain_platform::fs::{Privacy, create_dir_private, write_atomic};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use jiff::ToSpan;
+use serde_json::json;
+
+use brain::update;
+
+use crate::config::{Config, REVIEW_DAYS};
+use crate::import::{self, Blocklist, Ledger, Written};
+use crate::inbox::{self, Dest};
+use crate::out::terminal;
+
+#[derive(Parser)]
+#[command(
+    name = "brain",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (protocol 1)"),
+    about = "A team's notes, searchable on your own machine."
+)]
+pub struct Cli {
+    /// Read the clock at this instant instead of the system's (for tests).
+    #[arg(long, global = true, hide = true)]
+    now: Option<jiff::Timestamp>,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Set brain up over a folder of notes (the current folder unless --vault names one).
+    Init {
+        #[arg(long)]
+        me: String,
+        #[arg(long)]
+        vault: Option<PathBuf>,
+    },
+    /// Bring the index up to date with the vault, and embed what is new.
+    Index,
+    /// Search your notes.
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+        /// Reorder the top results with the cross-encoder.
+        #[arg(long)]
+        rerank: bool,
+        /// Only what a colleague could see.
+        #[arg(long)]
+        shared_only: bool,
+    },
+    /// Write a new note into the inbox.
+    Add {
+        text: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<KindArg>,
+    },
+    /// Print a note, by id or by its path in the vault.
+    Show { target: String },
+    /// Copy another brain's notes into this vault.
+    Import {
+        #[command(subcommand)]
+        from: ImportFrom,
+    },
+    /// List the inbox, oldest first, or keep or skip a note in it.
+    Inbox {
+        #[command(subcommand)]
+        action: Option<InboxAction>,
+    },
+    /// What the index holds.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install the newest signed release over this one.
+    Update {
+        /// Only say whether a newer release exists.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Check a release archive's signature against this build's release key.
+    #[command(hide = true)]
+    ReleaseVerify { archive: PathBuf },
+    /// Print the folder an install lives in, for scripts/install.sh.
+    #[command(hide = true)]
+    InstallDir,
+}
+
+#[derive(Subcommand)]
+enum ImportFrom {
+    /// A learning-loop vault and, optionally, Claude Code auto-memory.
+    LearningLoop(LearningLoop),
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("blocklist").args(["ll_config", "no_ll_config"])))]
+struct LearningLoop {
+    /// The learning-loop vault; it is only read.
+    #[arg(long)]
+    from: PathBuf,
+    /// Claude Code's projects folder, whose `*/memory/*.md` become working memory.
+    #[arg(long)]
+    memory: Option<PathBuf>,
+    /// A vault folder whose undeclared notes come across shared.
+    #[arg(long, requires = "blocklist")]
+    share: Vec<PathBuf>,
+    /// learning-loop's config folder, whose visibility rules can keep a note private.
+    #[arg(long)]
+    ll_config: Option<PathBuf>,
+    /// Share without learning-loop's rules.
+    #[arg(long)]
+    no_ll_config: bool,
+    /// Show what would change and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    /// Move a note out of the inbox, unchanged.
+    Keep {
+        /// The note's id or its path in the vault.
+        target: String,
+        #[arg(long, value_enum, default_value = "fleeting")]
+        to: Dest,
+    },
+    /// Archive a note; nothing is deleted.
+    Skip {
+        /// The note's id or its path in the vault.
+        target: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum KindArg {
+    Knowledge,
+    Rule,
+    History,
+}
+
+impl From<KindArg> for Kind {
+    fn from(k: KindArg) -> Kind {
+        match k {
+            KindArg::Knowledge => Kind::Knowledge,
+            KindArg::Rule => Kind::Rule,
+            KindArg::History => Kind::History,
+        }
+    }
+}
+
+fn index(dirs: &Dirs) -> anyhow::Result<Index> {
+    Index::open(&dirs.data.join("index.db"))
+}
+
+/// Lowercase words of `text` joined by `-`, at most 60 characters.
+fn slug(text: &str) -> String {
+    let mut s = String::new();
+    for word in text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        if s.len() + word.len() > 60 {
+            break;
+        }
+        if !s.is_empty() {
+            s.push('-');
+        }
+        s.push_str(&word.to_lowercase());
+    }
+    if s.is_empty() { "note".into() } else { s }
+}
+
+pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
+    let clock: Box<dyn Clock> = match cli.now {
+        Some(t) => Box::new(FixedClock(t)),
+        None => Box::new(SystemClock),
+    };
+    match cli.command {
+        Command::Init { me, vault } => init(dirs, me, vault),
+        Command::Index => reindex(dirs),
+        Command::Search {
+            text,
+            limit,
+            json,
+            rerank,
+            shared_only,
+        } => search(dirs, &text.join(" "), limit, json, rerank, shared_only),
+        Command::Add { text, title, kind } => {
+            add(dirs, &*clock, &text, title, kind.map(Kind::from))
+        }
+        Command::Show { target } => show(dirs, &target),
+        Command::Status { json } => status(dirs, json),
+        Command::Update { check } => update(dirs, check),
+        Command::ReleaseVerify { archive } => {
+            update::verify(&archive, &update::release_keys())?;
+            println!(
+                "{}: signed by the brain release key",
+                terminal(&archive.display().to_string())
+            );
+            Ok(())
+        }
+        Command::InstallDir => {
+            println!("{}", update::install_dir(&dirs.bin).display());
+            Ok(())
+        }
+        Command::Import {
+            from: ImportFrom::LearningLoop(args),
+        } => import_learning_loop(dirs, clock.today(), args),
+        Command::Inbox { action } => {
+            let vault = Vault::open(&Config::load(dirs)?.vault)?;
+            match action {
+                None => inbox::list(&vault),
+                Some(InboxAction::Keep { target, to }) => inbox::keep(&vault, &target, to),
+                Some(InboxAction::Skip { target }) => inbox::skip(&vault, &target),
+            }
+        }
+    }
+}
+
+fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
+    let named = vault.is_some();
+    let root = match vault {
+        Some(v) => v,
+        None => std::env::current_dir()?,
+    };
+    // brain writes an id into every note under its vault, so a folder holding far more than notes
+    // is refused. A git repository is refused only as the folder init happens to run in: a notes
+    // folder synced with git is a vault once its owner names it.
+    let same = |a: &Path, b: &Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| Some(a) == b.canonicalize().ok())
+    };
+    let what = if std::env::home_dir().is_some_and(|home| same(&root, &home)) {
+        Some("your home folder")
+    } else if !named && root.join(".git").exists() {
+        Some("a code repository")
+    } else if root.canonicalize().is_ok_and(|r| r.parent().is_none()) {
+        Some("the root of the disk")
+    } else {
+        None
+    };
+    if let Some(what) = what {
+        anyhow::bail!(
+            "{} is {what}; brain writes an id into every note in its vault, so name your notes folder with --vault",
+            root.display()
+        );
+    }
+    if !root.exists() {
+        create_dir_private(&root)?;
+    }
+    let vault = Vault::open(&root)?;
+    let layout = &vault.layout;
+    for folder in [
+        &layout.inbox,
+        &layout.private,
+        &layout.memory,
+        &layout.archive,
+    ] {
+        let path = vault.root.join(folder);
+        if !path.exists() {
+            create_dir_private(&path)?;
+        }
+    }
+    Config {
+        vault: vault.root.clone(),
+        me: me.clone(),
+    }
+    .save(dirs)?;
+    println!(
+        "{}",
+        terminal(&format!(
+            "brain is set up for {me} over {}.\nNext: `brain add <text>`, `brain index`, `brain search <words>`.",
+            vault.root.display()
+        ))
+    );
+    Ok(())
+}
+
+fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let vault = Vault::open(&config.vault)?;
+    let mut idx = index(dirs)?;
+    let r = idx.reindex(&vault)?;
+    println!(
+        "{} added, {} changed, {} removed, {} skipped, {} ids written, {} without an id",
+        r.added,
+        r.changed,
+        r.removed,
+        r.skipped.len(),
+        r.ids_written,
+        r.unidentified.len()
+    );
+    match embed::load() {
+        Ok(provider) => {
+            let e = idx.embed_pending(&*provider, 32)?;
+            println!(
+                "{} embedded, {} failed, {} pending",
+                e.done, e.failed, e.pending
+            );
+            if let Some(why) = e.stopped {
+                println!("{}", terminal(&format!("embedding stopped: {why}")));
+            }
+        }
+        Err(e) => println!(
+            "{}",
+            terminal(&format!(
+                "embeddings skipped, search uses words and links: {e:#}"
+            ))
+        ),
+    }
+    Ok(())
+}
+
+fn search(
+    dirs: &Dirs,
+    text: &str,
+    limit: usize,
+    as_json: bool,
+    rerank: bool,
+    shared_only: bool,
+) -> anyhow::Result<()> {
+    Config::load(dirs)?;
+    let idx = index(dirs)?;
+    let provider = embed::load().ok();
+    let q = Query {
+        text,
+        limit,
+        kinds: None,
+        scope: if shared_only {
+            Scope::SharedOnly
+        } else {
+            Scope::Mine
+        },
+        rerank,
+    };
+    let hits = idx.search(&q, provider.as_deref())?;
+    if as_json {
+        let rows: Vec<_> = hits
+            .iter()
+            .map(|h| {
+                json!({
+                    "id": h.note_uuid.map(|u| u.to_string()),
+                    "path": h.path,
+                    "title": h.title,
+                    "kind": h.kind.as_str(),
+                    "disclosure": h.disclosure.as_str(),
+                    "score": h.score,
+                    "snippet": h.snippet,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("nothing found");
+    }
+    for h in &hits {
+        println!(
+            "{}",
+            terminal(&format!("{}  ({})\n    {}", h.title, h.path, h.snippet))
+        );
+    }
+    Ok(())
+}
+
+fn add(
+    dirs: &Dirs,
+    clock: &dyn Clock,
+    text: &str,
+    title: Option<String>,
+    kind: Option<Kind>,
+) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let vault = Vault::open(&config.vault)?;
+    let today = clock.today();
+    let review = today.checked_add(REVIEW_DAYS.days())?;
+    let mut fm = Frontmatter::new_with("id", &uuid::Uuid::now_v7().to_string(), "\n")
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let mut fields = Vec::new();
+    if let Some(t) = &title {
+        fields.push(("title", t.clone()));
+    }
+    fields.push(("date", today.to_string()));
+    fields.push(("owner", config.me.clone()));
+    fields.push(("review", review.to_string()));
+    if let Some(k) = kind {
+        fields.push(("kind", k.as_str().to_string()));
+    }
+    for (key, value) in fields {
+        fm.set(key, &value)
+            .map_err(|_| anyhow::anyhow!("{key} cannot hold a line break"))?;
+    }
+    let body = format!("{}\n", text.trim_end());
+    let note = Split {
+        bom: false,
+        fm: Ok(Some(fm)),
+        body: &body,
+    }
+    .render();
+    let base = slug(title.as_deref().unwrap_or(text));
+    let inbox = &vault.layout.inbox;
+    let mut rel = inbox.join(format!("{base}.md"));
+    let mut n = 0;
+    while vault.root.join(&rel).exists() {
+        n += 1;
+        rel = inbox.join(format!("{base}-{n}.md"));
+    }
+    write_atomic(&vault.root, &rel, note.as_bytes(), Privacy::Normal)?;
+    println!("{}", terminal(&brain_note::rel_key(&rel)));
+    Ok(())
+}
+
+fn show(dirs: &Dirs, target: &str) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let vault = Vault::open(&config.vault)?;
+    let path = match uuid::Uuid::parse_str(target) {
+        Ok(id) => index(dirs)?
+            .path_of(&id)?
+            .with_context(|| format!("no indexed note has id {id}; run `brain index`"))?,
+        Err(_) => target.to_string(),
+    };
+    let text = vault
+        .read(Path::new(&path))
+        .map_err(|why| anyhow::anyhow!("cannot show {path}: {why:?}"))?;
+    print!("{}", terminal(&text));
+    Ok(())
+}
+
+fn update(dirs: &Dirs, check: bool) -> anyhow::Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    if check {
+        match update::check(update::GitHub, version)? {
+            Some(newer) => {
+                println!("brain {newer} is out; you have {version}. Run `brain update`.")
+            }
+            None => println!("brain {version} is the newest release."),
+        }
+        return Ok(());
+    }
+    let current = update::install_dir(&dirs.bin);
+    anyhow::ensure!(
+        current.join(update::exe_name()).is_file(),
+        "no install at {}; brain updates only what scripts/install.sh installed",
+        current.display()
+    );
+    let installed = update::run(update::GitHub, &update::release_keys(), &current, version)?;
+    if installed == version {
+        println!("brain {version} is the newest release.");
+    } else {
+        println!("brain {installed} installed over {version}.");
+    }
+    Ok(())
+}
+
+fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let s = index(dirs)?.stats()?;
+    let version = env!("CARGO_PKG_VERSION");
+    let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
+    if as_json {
+        let v = json!({
+            "runtime": runtime,
+            "notes": s.notes,
+            "embedded": s.embedded,
+            "failed": s.failed,
+            "pending": s.pending,
+            "skipped": s.skipped,
+            "unidentified": s.unidentified,
+            "vault": config.vault,
+            "version": version,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let mut lines = vec![
+        format!("brain {version}, vault {}", config.vault.display()),
+        format!(
+            "{} notes: {} embedded, {} pending, {} failed, {} without an id",
+            s.notes, s.embedded, s.pending, s.failed, s.unidentified
+        ),
+        match &runtime {
+            Some(lib) => format!("ONNX Runtime: {}", lib.display()),
+            None => "ONNX Runtime: none, so search uses words and links only".into(),
+        },
+    ];
+    for (reason, n) in &s.skipped {
+        lines.push(format!("skipped, {reason}: {n}"));
+    }
+    if s.notes == 0 {
+        lines.push("the index is empty; run `brain index`".into());
+    }
+    println!("{}", terminal(&lines.join("\n")));
+    Ok(())
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+fn import_learning_loop(
+    dirs: &Dirs,
+    today: jiff::civil::Date,
+    a: LearningLoop,
+) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let dst = Vault::open(&config.vault)?;
+    let src = Vault::open(&a.from)?;
+    import::check_apart(&src, &dst)?;
+    let share = import::share_folders(&src, &a.share)?;
+    let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
+    let mut ledger = Ledger::load(dirs)?;
+    let w = Written {
+        me: &config.me,
+        today,
+        share: &share,
+        blocklist: blocklist.as_ref(),
+        layout: &dst.layout,
+    };
+    let (plan, written) = if a.dry_run {
+        (
+            import::plan(&src, a.memory.as_deref(), &dst, &ledger)?,
+            Vec::new(),
+        )
+    } else {
+        // The ledger already holds every copy written before a failure; keeping it lets the next
+        // run see those copies as its own instead of as conflicts.
+        match import::apply(&src, a.memory.as_deref(), &dst, &mut ledger, &w) {
+            Ok(applied) => applied,
+            Err(e) => {
+                ledger.save(dirs)?;
+                return Err(e);
+            }
+        }
+    };
+    let mut lines = vec![format!(
+        "{} new, {} updated, {} unchanged, {}, {} skipped{}",
+        plan.new.len(),
+        plan.updated.len(),
+        plan.unchanged,
+        plural(plan.conflicts.len(), "conflict"),
+        plan.skipped.len(),
+        if a.dry_run {
+            " (dry run: nothing written)"
+        } else {
+            ""
+        }
+    )];
+    if !plan.conflicts.is_empty() {
+        lines.push("changed on both sides, left as they are:".into());
+        lines.extend(plan.conflicts.iter().map(|p| format!("  {p}")));
+    }
+    if !plan.skipped.is_empty() {
+        lines.push("skipped:".into());
+        lines.extend(
+            plan.skipped
+                .iter()
+                .map(|(k, why)| format!("  {k}: {why:?}")),
+        );
+    }
+    println!("{}\n", terminal(&lines.join("\n")));
+    if a.dry_run {
+        return Ok(());
+    }
+    let reindexed = index(dirs).and_then(|mut ix| ix.reindex(&dst));
+    import::settle(&mut ledger, &dst, &written)?;
+    ledger.save(dirs)?;
+    reindexed?;
+    println!("{}", terminal(&import::report(&dst, today).to_string()));
+    Ok(())
+}

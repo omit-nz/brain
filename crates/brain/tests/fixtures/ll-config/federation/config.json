@@ -1,0 +1,11 @@
+{
+  "identity": { "displayName": "fixture", "pubkey": "ed25519:AAAA" },
+  "visibility": {
+    "default": "shared",
+    "rules": [
+      { "pattern": "3-permanent/**", "tier": "listed" },
+      { "pattern": "**/*SEPARATION*", "tier": "private" }
+    ]
+  },
+  "hub": { "endpoint": "wss://example.invalid/ws", "key_id": "fixture" }
+}

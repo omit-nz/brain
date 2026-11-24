@@ -1,0 +1,157 @@
+name: release
+
+# A tag v<version> builds one archive per target, signs them on Linux, and publishes them only
+# after a brain built on macOS from the same tag has checked every signature. docs/release.md
+# says how to cut, check and roll back a release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      LL_MODEL_CACHE_DIR: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .model-cache
+          key: ll-core-models-0.2.3
+      - name: Version matches the tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME"
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+      - name: Target
+        run: |
+          case "${{ matrix.os }}" in
+            macos-*) target=aarch64-apple-darwin; exe=brain ;;
+            ubuntu-*) target=x86_64-unknown-linux-gnu; exe=brain ;;
+            windows-*) target=x86_64-pc-windows-msvc; exe=brain.exe ;;
+          esac
+          echo "TARGET=$target" >>"$GITHUB_ENV"
+          echo "EXE=$exe" >>"$GITHUB_ENV"
+      - run: cargo build --release --locked -p brain
+      - name: Pack
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/pack/brain-$VERSION"
+          mkdir -p "$dir/lib"
+          cp "target/release/$EXE" "$dir/"
+          scripts/fetch-ort.sh "$TARGET" "$dir/lib" >/dev/null
+          mkdir -p dist
+          tar -czf "dist/brain-$VERSION-$TARGET.tar.gz" -C "$RUNNER_TEMP/pack" "brain-$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archive-${{ matrix.os }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+      - name: zipsign
+        run: cargo install zipsign --version 0.2.2 --locked
+      - name: Sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY_PREVIOUS: ${{ secrets.RELEASE_SIGNING_KEY_PREVIOUS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keys=$(mktemp -d "$RUNNER_TEMP/keys.XXXXXX")
+          trap 'rm -rf "$keys"' EXIT
+          test -n "$RELEASE_SIGNING_KEY"
+          printf '%s' "$RELEASE_SIGNING_KEY" | base64 -d >"$keys/current"
+          set -- "$keys/current"
+          if [ -n "$RELEASE_SIGNING_KEY_PREVIOUS" ]; then
+            printf '%s' "$RELEASE_SIGNING_KEY_PREVIOUS" | base64 -d >"$keys/previous"
+            set -- "$@" "$keys/previous"
+          fi
+          for archive in dist/*.tar.gz; do
+            zipsign sign tar "$archive" "$@" >/dev/null
+          done
+      - name: SHA256SUMS and release.json
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          cd dist
+          sha256sum -- *.tar.gz >SHA256SUMS
+          jq -n --arg v "$version" --arg base "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            --rawfile sums SHA256SUMS '
+            { version: $v, protocol: 1,
+              targets: ($sums | split("\n") | map(select(. != "") | split("  ")) | map({
+                key: (.[1] | ltrimstr("brain-" + $v + "-") | rtrimstr(".tar.gz")),
+                value: { url: ($base + "/" + .[1]), sha256: .[0] } }) | from_entries) }' >release.json
+          test "$(jq '.targets | length' release.json)" = 3
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" dist/*
+
+  verify:
+    needs: sign
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      LL_MODEL_CACHE_DIR: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .model-cache
+          key: ll-core-models-0.2.3
+      - name: The build carries a release key
+        run: test "$(od -An -v -tx1 crates/brain/src/keys/release.pub | tr -d ' \n')" != "$(printf '%064d' 0)"
+      - run: cargo build --release --locked -p brain
+      - name: Check every asset as a client would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir assets
+          gh release download "$GITHUB_REF_NAME" --dir assets
+          cd assets
+          shasum -a 256 -c SHA256SUMS
+          test "$(ls -- *.tar.gz | wc -l | tr -d ' ')" = 3
+          for archive in *.tar.gz; do
+            ../target/release/brain release-verify "$archive"
+          done
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

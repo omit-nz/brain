@@ -1,0 +1,27 @@
+[package]
+name = "brain-index"
+description = "The index: one SQLite file of notes, their text and links, rebuilt from the vault alone."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libloading.workspace = true
+brain-note = { path = "../brain-note" }
+brain-platform = { path = "../brain-platform" }
+ll-core.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ll-core.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

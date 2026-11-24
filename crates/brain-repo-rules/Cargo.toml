@@ -1,0 +1,15 @@
+[package]
+name = "brain-repo-rules"
+description = "Tests that read the repo's own files and hold its rules."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+yaml-rust2.workspace = true
