@@ -1,3 +1,4 @@
+mod gate;
 mod vault;
 
 use std::fs;

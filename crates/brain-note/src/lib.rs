@@ -2,6 +2,7 @@
 
 mod disclosure;
 mod frontmatter;
+pub mod gate;
 mod links;
 mod note;
 mod vault;

@@ -260,3 +260,89 @@ fn status_counts_skips_by_reason() {
     assert_eq!(s["skipped"]["not utf-8"], 1);
     assert_eq!(s["unidentified"], 0);
 }
+
+fn id_in(text: &str) -> String {
+    text.lines()
+        .find_map(|l| l.strip_prefix("id: "))
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn inbox_lists_oldest_first_with_facts() {
+    let h = Home::new();
+    h.init();
+    h.run(&[
+        "--now",
+        "2026-11-20T00:00:00Z",
+        "add",
+        "older thought [unverified]",
+        "--title",
+        "Older",
+    ]);
+    h.run(&[
+        "--now",
+        "2026-11-24T00:00:00Z",
+        "add",
+        "newer thought",
+        "--title",
+        "Newer",
+    ]);
+    let out = h.run(&["inbox"]);
+    let older = out.find("0-inbox/older.md").unwrap();
+    let newer = out.find("0-inbox/newer.md").unwrap();
+    assert!(older < newer, "{out}");
+    assert!(out.contains("[unverified]"), "{out}");
+}
+
+#[test]
+fn keep_moves_and_keeps_the_id() {
+    let h = Home::new();
+    h.init();
+    h.run(&["add", "a thought worth keeping", "--title", "Keeper"]);
+    let before = fs::read(h.vault.path().join("0-inbox/keeper.md")).unwrap();
+    let id = id_in(&String::from_utf8_lossy(&before));
+    h.run(&["inbox", "keep", &id, "--to", "permanent"]);
+    assert!(!h.vault.path().join("0-inbox/keeper.md").exists());
+    let after = fs::read(h.vault.path().join("3-permanent/keeper.md")).unwrap();
+    assert_eq!(after, before, "keep changes no byte");
+    h.run(&["add", "another", "--title", "Second"]);
+    h.run(&["inbox", "keep", "0-inbox/second.md"]);
+    assert!(h.vault.path().join("1-fleeting/second.md").exists());
+}
+
+#[test]
+fn a_kept_note_can_be_shared() {
+    let h = Home::new();
+    h.init();
+    h.run(&["add", "the numbat protocol", "--title", "Numbat"]);
+    h.run(&["index"]);
+    let shared = h.json(&["search", "numbat", "--json", "--shared-only"]);
+    assert_eq!(
+        shared.as_array().unwrap().len(),
+        0,
+        "an inbox note is never shared"
+    );
+    h.run(&["inbox", "keep", "0-inbox/numbat.md", "--to", "permanent"]);
+    h.run(&["index"]);
+    let shared = h.json(&["search", "numbat", "--json", "--shared-only"]);
+    assert_eq!(shared[0]["path"], "3-permanent/numbat.md");
+    assert_eq!(shared[0]["disclosure"], "shared");
+}
+
+#[test]
+fn skip_archives_never_deletes() {
+    let h = Home::new();
+    h.init();
+    h.run(&["add", "not worth keeping", "--title", "Skip me"]);
+    let before = fs::read(h.vault.path().join("0-inbox/skip-me.md")).unwrap();
+    let id = id_in(&String::from_utf8_lossy(&before));
+    h.run(&["inbox", "skip", &id]);
+    assert!(!h.vault.path().join("0-inbox/skip-me.md").exists());
+    assert_eq!(
+        fs::read(h.vault.path().join("_archive/0-inbox/skip-me.md")).unwrap(),
+        before
+    );
+    let out = h.brain().args(["inbox", "skip", &id]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "a note no longer in the inbox");
+}

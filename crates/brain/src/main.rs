@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod inbox;
 mod out;
 mod runtime;
 

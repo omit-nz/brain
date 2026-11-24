@@ -11,6 +11,7 @@ use jiff::ToSpan;
 use serde_json::json;
 
 use crate::config::{Config, REVIEW_DAYS};
+use crate::inbox::{self, Dest};
 use crate::out::terminal;
 
 #[derive(Parser)]
@@ -63,10 +64,31 @@ enum Command {
     },
     /// Print a note, by id or by its path in the vault.
     Show { target: String },
+    /// List the inbox, oldest first, or keep or skip a note in it.
+    Inbox {
+        #[command(subcommand)]
+        action: Option<InboxAction>,
+    },
     /// What the index holds.
     Status {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    /// Move a note out of the inbox, unchanged.
+    Keep {
+        /// The note's id or its path in the vault.
+        target: String,
+        #[arg(long, value_enum, default_value = "fleeting")]
+        to: Dest,
+    },
+    /// Archive a note; nothing is deleted.
+    Skip {
+        /// The note's id or its path in the vault.
+        target: String,
     },
 }
 
@@ -129,6 +151,14 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         }
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
+        Command::Inbox { action } => {
+            let vault = Vault::open(&Config::load(dirs)?.vault)?;
+            match action {
+                None => inbox::list(&vault),
+                Some(InboxAction::Keep { target, to }) => inbox::keep(&vault, &target, to),
+                Some(InboxAction::Skip { target }) => inbox::skip(&vault, &target),
+            }
+        }
     }
 }
 
