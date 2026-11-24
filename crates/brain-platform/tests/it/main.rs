@@ -5,8 +5,8 @@ use std::path::Path;
 use brain_platform::clock::{Clock, FixedClock};
 use brain_platform::dirs::{Dirs, parse_brain_home};
 use brain_platform::fs::{
-    Privacy, archive, create_dir_private, ensure_private_file, rename_within, replace_unchanged,
-    write_atomic,
+    Lock, Privacy, archive, create_dir_private, ensure_private_file, rename_within,
+    replace_unchanged, write_atomic,
 };
 
 #[test]
@@ -358,4 +358,107 @@ fn fixed_clock_is_fixed() {
     assert_eq!(c.now(), t);
     assert_eq!(c.now(), c.now());
     assert_eq!(c.today(), jiff::civil::date(2026, 11, 25));
+}
+
+/// Run by `Holder`: takes the lock named by `BRAIN_TEST_LOCK`, says so, and holds it until killed.
+#[test]
+#[ignore]
+fn lock_holder_child() {
+    let path = std::env::var_os("BRAIN_TEST_LOCK").unwrap();
+    let _held = Lock::acquire(Path::new(&path)).unwrap();
+    println!("held");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+/// Another process holding the lock, until dropped or killed.
+struct Holder(std::process::Child);
+
+impl Holder {
+    fn start(lock: &Path) -> Holder {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["lock_holder_child", "--exact", "--ignored", "--nocapture"])
+            .env("BRAIN_TEST_LOCK", lock)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while line.trim() != "held" {
+            line.clear();
+            assert_ne!(
+                std::io::BufRead::read_line(&mut out, &mut line).unwrap(),
+                0,
+                "the holder exited before taking the lock"
+            );
+        }
+        Holder(child)
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_lock_is_exclusive_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("writer.lock");
+    assert!(!Lock::is_held(&lock));
+    let _holder = Holder::start(&lock);
+    assert!(Lock::is_held(&lock));
+    assert!(Lock::try_acquire(&lock).unwrap().is_none());
+}
+
+#[test]
+fn a_killed_holder_frees_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("writer.lock");
+    let mut holder = Holder::start(&lock);
+    holder.0.kill().unwrap();
+    holder.0.wait().unwrap();
+    // Windows releases a dead process's lock "depending upon available system resources".
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let taken = loop {
+        if let Some(l) = Lock::try_acquire(&lock).unwrap() {
+            break l;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still held 10 s after its holder died"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    drop(taken);
+    assert!(!Lock::is_held(&lock));
+}
+
+#[test]
+fn a_probe_never_takes_the_lock_from_a_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("writer.lock");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probers: Vec<_> = (0..4)
+        .map(|_| {
+            let (lock, stop) = (lock.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    Lock::is_held(&lock);
+                }
+            })
+        })
+        .collect();
+    let refused = (0..500)
+        .filter(|_| Lock::try_acquire(&lock).unwrap().is_none())
+        .count();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for p in probers {
+        p.join().unwrap();
+    }
+    assert_eq!(refused, 0, "a probe was read as a writer");
 }
