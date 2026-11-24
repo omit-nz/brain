@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+jiff.workspace = true
 libloading.workspace = true
 brain-note = { path = "../brain-note" }
 brain-platform = { path = "../brain-platform" }

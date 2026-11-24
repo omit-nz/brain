@@ -340,6 +340,43 @@ fn the_index_rebuilds_from_the_vault_alone() {
     assert_eq!(links, vec!["b"]);
 }
 
+/// A note saved after `settled_before` is still being typed: its id is not written, so the note
+/// waits for a later pass, while a note that already has an id is indexed at once.
+#[test]
+fn an_id_is_not_written_into_a_note_saved_moments_ago() {
+    let f = Fixture::new();
+    f.put("fresh.md", "being typed\n");
+    f.put(
+        "held.md",
+        "---\nid: 0192f0c0-0000-7000-8000-000000000001\n---\nalready kept\n",
+    );
+    let mtime = fs::metadata(f.vault.path().join("fresh.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let saved = jiff::Timestamp::try_from(mtime).unwrap();
+    let vault = Vault::open(f.vault.path()).unwrap();
+    let mut idx = Index::open(&f.db()).unwrap();
+
+    let early = idx
+        .reindex_settled(&vault, saved - jiff::SignedDuration::from_secs(5))
+        .unwrap();
+    assert_eq!(f.read("fresh.md"), "being typed\n");
+    assert_eq!((early.deferred, early.ids_written), (1, 0));
+    assert_eq!(
+        idx.note_count().unwrap(),
+        1,
+        "the note with an id is indexed"
+    );
+
+    let later = idx
+        .reindex_settled(&vault, saved + jiff::SignedDuration::from_secs(5))
+        .unwrap();
+    assert_eq!((later.deferred, later.ids_written), (0, 1));
+    assert!(f.read("fresh.md").starts_with("---\nid: "));
+    assert_eq!(idx.note_count().unwrap(), 2);
+}
+
 /// Run only as a child of `a_killed_reindex_resumes_clean`, which sets the paths and the abort.
 #[test]
 #[ignore]

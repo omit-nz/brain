@@ -24,6 +24,8 @@ pub struct Reindexed {
     pub ids_reassigned: usize,
     /// Notes indexed with no id, because none can be written into their frontmatter.
     pub unidentified: Vec<String>,
+    /// Notes left for a later pass: they need an id but were saved too recently to write one.
+    pub deferred: usize,
 }
 
 struct Row {
@@ -92,6 +94,24 @@ fn abort_after() -> Option<usize> {
 
 impl Index {
     pub fn reindex(&mut self, vault: &Vault) -> anyhow::Result<Reindexed> {
+        self.reindex_with(vault, None)
+    }
+
+    /// As `reindex`, but a note saved after `settled_before` that still needs an id is left for a
+    /// later pass, so an id is never written into a note someone is typing.
+    pub fn reindex_settled(
+        &mut self,
+        vault: &Vault,
+        settled_before: jiff::Timestamp,
+    ) -> anyhow::Result<Reindexed> {
+        self.reindex_with(vault, Some(settled_before))
+    }
+
+    fn reindex_with(
+        &mut self,
+        vault: &Vault,
+        settled_before: Option<jiff::Timestamp>,
+    ) -> anyhow::Result<Reindexed> {
         let abort_after = abort_after();
         let existing = self.rows()?;
         // Rows written under other reading rules are re-derived, changed or not.
@@ -192,7 +212,14 @@ impl Index {
         }
         // A note whose id cannot be written (broken frontmatter, a read-only folder, a file held
         // open) is indexed without one: searchable by its owner, never synced.
+        let mut young = HashSet::new();
         for w in &mut work {
+            if w.note.id.is_none()
+                && settled_before.is_some_and(|t| i128::from(w.mtime_ns) > t.as_nanosecond())
+            {
+                young.insert(w.key.clone());
+                continue;
+            }
             let root = &vault.root;
             let (wrote, keeps_id) = match w.note.id.map(|u| u.to_string()) {
                 Some(u) if claimed.get(&u).is_some_and(|holder| *holder != w.key) => {
@@ -224,6 +251,8 @@ impl Index {
             }
             w.uuid = w.note.id.filter(|_| keeps_id).map(|u| u.to_string());
         }
+        out.deferred = young.len();
+        work.retain(|w| !young.contains(&w.key));
 
         let tx = self.conn.transaction()?;
         for key in existing.keys().filter(|k| !seen.contains(*k)) {
