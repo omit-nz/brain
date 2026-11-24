@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "brain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "brain-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "brain-note",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "brain-note"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "brain-platform",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "brain-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "brain-repo-rules"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sha2 0.11.1",
  "tempfile",
