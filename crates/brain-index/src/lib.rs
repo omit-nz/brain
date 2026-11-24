@@ -1,12 +1,14 @@
 //! The index: one SQLite file of notes, their text and links, rebuilt from the vault alone.
 
 pub mod db;
+pub mod embed;
 mod reindex;
 
 use std::path::Path;
 
 use rusqlite::Connection;
 
+pub use embed::{Embedded, HashEmbedder};
 pub use reindex::Reindexed;
 
 pub struct Index {
