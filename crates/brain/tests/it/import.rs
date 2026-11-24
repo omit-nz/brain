@@ -391,10 +391,12 @@ fn link_dir(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
     {
+        // cmd reads a `/` inside a path as a switch, so the paths go through as `\` only.
+        let native = |p: &Path| p.components().collect::<PathBuf>();
         let ok = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
+            .arg(native(link))
+            .arg(native(target))
             .status()
             .unwrap()
             .success();
