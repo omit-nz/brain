@@ -3,6 +3,7 @@
 pub mod db;
 pub mod embed;
 mod reindex;
+mod search;
 
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use rusqlite::Connection;
 
 pub use embed::{Embedded, HashEmbedder};
 pub use reindex::Reindexed;
+pub use search::{Hit, Query, Scope};
 
 pub struct Index {
     conn: Connection,

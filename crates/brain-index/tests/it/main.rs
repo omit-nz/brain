@@ -1,5 +1,6 @@
 mod edges;
 mod embed;
+mod search;
 
 use std::fs;
 use std::path::{Path, PathBuf};
