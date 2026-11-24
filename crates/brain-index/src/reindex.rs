@@ -4,11 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use anyhow::Context;
 use brain_note::{
     Disclosure, Entry, Kind, Note, Place, Skip, Vault, ensure_id, reassign_id, rel_key,
 };
@@ -106,8 +104,11 @@ impl Work {
     }
 }
 
-/// A test that kills a reindex mid-batch sets this; nothing else does.
+/// A test that kills a reindex mid-batch sets this; release builds never read it.
 fn abort_after() -> Option<usize> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     std::env::var("BRAIN_TEST_ABORT_AFTER_NOTES")
         .ok()?
         .parse()
@@ -131,9 +132,14 @@ impl Index {
                 Entry::Note { rel, place } => (rel, place),
             };
             let key = rel_key(&rel);
+            // A note that only failed to read this time keeps its row: a locked or briefly
+            // unreadable file is not a deleted one.
             let (size, mtime_ns) = match stat(&vault.root.join(&rel)) {
                 Ok(s) => s,
                 Err(e) => {
+                    if existing.contains_key(&key) {
+                        seen.insert(key.clone());
+                    }
                     out.skipped.push((key, Skip::Unreadable(e.to_string())));
                     continue;
                 }
@@ -146,7 +152,12 @@ impl Index {
                 continue;
             }
             match vault.read(&rel) {
-                Err(why) => out.skipped.push((key, why)),
+                Err(why) => {
+                    if matches!(why, Skip::Unreadable(_)) && existing.contains_key(&key) {
+                        seen.insert(key.clone());
+                    }
+                    out.skipped.push((key, why));
+                }
                 Ok(raw) => {
                     seen.insert(key.clone());
                     let note = Note::parse(&rel, &raw, place);
@@ -183,28 +194,30 @@ impl Index {
                 claimed.insert(u, w.key.clone());
             }
         }
+        // A note whose id cannot be written (broken frontmatter, a read-only folder, a file held
+        // open) is indexed without one: searchable by its owner, never synced.
         for w in &mut work {
             let root = &vault.root;
-            let wrote = match w.note.id.map(|u| u.to_string()) {
+            let (wrote, keeps_id) = match w.note.id.map(|u| u.to_string()) {
                 Some(u) if claimed.get(&u).is_some_and(|holder| *holder != w.key) => {
-                    reassign_id(root, &w.rel, &w.raw)
-                        .with_context(|| format!("giving {} a new id", w.key))?;
-                    out.ids_reassigned += 1;
-                    true
+                    match reassign_id(root, &w.rel, &w.raw) {
+                        Ok(_) => {
+                            out.ids_reassigned += 1;
+                            (true, true)
+                        }
+                        Err(_) => (false, false),
+                    }
                 }
                 Some(u) => {
                     claimed.insert(u, w.key.clone());
-                    false
+                    (false, true)
                 }
                 None => match ensure_id(root, &w.rel, &w.raw) {
                     Ok((_, wrote)) => {
                         out.ids_written += usize::from(wrote);
-                        wrote
+                        (wrote, true)
                     }
-                    Err(e) if e.kind() == ErrorKind::InvalidData => false,
-                    Err(e) => {
-                        return Err(e).with_context(|| format!("writing an id into {}", w.key));
-                    }
+                    Err(_) => (false, false),
                 },
             };
             if wrote {
@@ -213,7 +226,7 @@ impl Index {
                     claimed.insert(u.to_string(), w.key.clone());
                 }
             }
-            w.uuid = w.note.id.map(|u| u.to_string());
+            w.uuid = w.note.id.filter(|_| keeps_id).map(|u| u.to_string());
         }
 
         let tx = self.conn.transaction()?;
@@ -253,7 +266,7 @@ impl Index {
 
         let tx = self.conn.transaction()?;
         tx.execute(
-            "DELETE FROM skipped WHERE path NOT IN (SELECT path FROM notes)",
+            "DELETE FROM skipped WHERE path NOT IN (SELECT path FROM notes WHERE embedded = -1)",
             [],
         )?;
         for (path, why) in &out.skipped {

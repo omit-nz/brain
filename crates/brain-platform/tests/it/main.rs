@@ -4,7 +4,61 @@ use std::path::Path;
 
 use brain_platform::clock::{Clock, FixedClock};
 use brain_platform::dirs::{Dirs, parse_brain_home};
-use brain_platform::fs::{Privacy, archive, create_dir_private, rename_within, write_atomic};
+use brain_platform::fs::{
+    Privacy, archive, create_dir_private, ensure_private_file, rename_within, write_atomic,
+};
+
+#[test]
+fn ensure_private_file_creates_once_and_tightens() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("data/index.db");
+    ensure_private_file(root.path(), rel).unwrap();
+    let path = root.path().join(rel);
+    assert_eq!(fs::read(&path).unwrap(), b"");
+
+    fs::write(&path, b"kept").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    ensure_private_file(root.path(), rel).unwrap();
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"kept",
+        "an existing file is never replaced"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let outside = tempfile::tempdir().unwrap();
+    link_dir(outside.path(), &root.path().join("linked"));
+    let err = ensure_private_file(root.path(), Path::new("linked/x.db")).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn racing_creators_share_one_file() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("index.db");
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| ensure_private_file(root.path(), rel).unwrap());
+        }
+    });
+    let names: Vec<_> = fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec!["index.db"]);
+}
 
 #[test]
 fn from_home_holds_every_dir() {

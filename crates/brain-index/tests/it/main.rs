@@ -1,3 +1,4 @@
+mod edges;
 mod embed;
 
 use std::fs;
@@ -67,6 +68,10 @@ impl Fixture {
             .map(|r| r.unwrap())
             .collect()
     }
+
+    fn count(&self, sql: &str) -> i64 {
+        self.sql().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
 }
 
 const ID_A: &str = "0195f2e0-0000-7000-8000-00000000000a";
@@ -84,7 +89,7 @@ fn a_new_vault_indexes_every_note() {
     let mut idx = f.index();
     let r = idx.reindex(&f.vault()).unwrap();
     assert_eq!((r.added, r.changed, r.removed), (4, 0, 0));
-    assert_eq!(idx.note_count(), 4);
+    assert_eq!(idx.note_count().unwrap(), 4);
     let row: (String, String, String, String, String) = f
         .sql()
         .query_row(
@@ -180,7 +185,7 @@ fn a_deleted_file_leaves_the_index() {
     fs::remove_file(f.vault.path().join("a.md")).unwrap();
     let r = idx.reindex(&f.vault()).unwrap();
     assert_eq!(r.removed, 1);
-    assert_eq!(idx.note_count(), 1);
+    assert_eq!(idx.note_count().unwrap(), 1);
     assert_eq!(f.fts("apple"), Vec::<String>::new());
     let content: i64 = f
         .sql()
@@ -275,7 +280,7 @@ fn skipped_files_are_reported_and_recorded() {
         r.skipped,
         vec![("bin.md".to_string(), brain_note::Skip::NotUtf8)]
     );
-    assert_eq!(idx.note_count(), 1);
+    assert_eq!(idx.note_count().unwrap(), 1);
     let why: String = f
         .sql()
         .query_row("SELECT why FROM skipped WHERE path = 'bin.md'", [], |r| {
@@ -367,7 +372,7 @@ fn a_killed_reindex_resumes_clean() {
 
     let mut idx = f.index();
     idx.reindex(&f.vault()).unwrap();
-    assert_eq!(idx.note_count(), 450);
+    assert_eq!(idx.note_count().unwrap(), 450);
     let c = f.sql();
     let content: i64 = c
         .query_row("SELECT count(*) FROM notes_content", [], |r| r.get(0))

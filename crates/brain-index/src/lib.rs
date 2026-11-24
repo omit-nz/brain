@@ -22,9 +22,10 @@ impl Index {
         })
     }
 
-    pub fn note_count(&self) -> usize {
-        self.conn
-            .query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
-            .map_or(0, |n| n as usize)
+    pub fn note_count(&self) -> anyhow::Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?;
+        Ok(n as usize)
     }
 }

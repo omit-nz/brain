@@ -61,12 +61,7 @@ pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> 
         Privacy::Private => None,
     };
     let parent = parent_dirs(&path)?;
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(".brain-");
-    if let Some(p) = permissions(privacy) {
-        builder.permissions(p);
-    }
-    let mut tmp = builder.tempfile_in(parent)?;
+    let mut tmp = temp_in(parent, privacy)?;
     tmp.write_all(bytes)?;
     // Set on the open file, after the write: the create mode is masked by the umask, this is not.
     if let Some(p) = existing {
@@ -75,6 +70,16 @@ pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> 
     tmp.as_file().sync_all()?;
     tmp.persist(&path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// A temporary file beside its target, created with the mode `privacy` asks for.
+fn temp_in(parent: &Path, privacy: Privacy) -> io::Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".brain-");
+    if let Some(p) = permissions(privacy) {
+        builder.permissions(p);
+    }
+    builder.tempfile_in(parent)
 }
 
 #[cfg(unix)]
@@ -91,6 +96,27 @@ fn permissions(privacy: Privacy) -> Option<fs::Permissions> {
 #[cfg(not(unix))]
 fn permissions(_: Privacy) -> Option<fs::Permissions> {
     None
+}
+
+/// Makes `rel` an owner-only file: created empty when absent, never replacing one that exists (so
+/// processes creating it at once all end up with the same file), and an existing one's mode
+/// tightened to `0600` on Unix.
+pub fn ensure_private_file(root: &Path, rel: &Path) -> io::Result<()> {
+    let path = checked(root, rel)?;
+    let parent = parent_dirs(&path)?;
+    let tmp = temp_in(parent, Privacy::Private)?;
+    match tmp.persist_noclobber(&path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.error.kind() == ErrorKind::AlreadyExists => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e.error),
+    }
 }
 
 /// Creates `path` and any missing parents owner-only (`0700` on Unix) from the start, and makes an

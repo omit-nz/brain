@@ -67,6 +67,9 @@ CREATE TABLE links (
     UNIQUE (source_id, target)
 );
 
+-- Backlinks and broken-link reports look links up by target.
+CREATE INDEX links_target ON links(target);
+
 -- Files the last reindex could not take, and notes whose embedding failed on their own.
 CREATE TABLE skipped (
     path TEXT PRIMARY KEY,
