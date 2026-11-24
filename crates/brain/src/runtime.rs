@@ -1,8 +1,8 @@
 //! The environment ll-core reads, set once before anything else runs.
 
-use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
 use std::path::Path;
 
+use brain::update::runtime_name;
 use brain_platform::dirs::Dirs;
 
 /// Points ll-core at brain's model folder and, when an install ships ONNX Runtime in `lib/` beside
@@ -13,10 +13,7 @@ pub fn prepare(dirs: &Dirs) -> anyhow::Result<()> {
     let bundled = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .map(|dir| {
-            dir.join("lib")
-                .join(format!("{DLL_PREFIX}onnxruntime{DLL_SUFFIX}"))
-        })
+        .map(|dir| dir.join("lib").join(runtime_name()))
         .filter(|lib| lib.is_file());
     // SAFETY: `main` calls this first, before any thread exists, and `set_var` is unsound only
     // while another thread reads the environment. ll-core's `ensure_dylib` sets ORT_DYLIB_PATH on

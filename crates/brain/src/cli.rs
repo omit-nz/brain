@@ -10,6 +10,8 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use jiff::ToSpan;
 use serde_json::json;
 
+use brain::update;
+
 use crate::config::{Config, REVIEW_DAYS};
 use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
@@ -18,7 +20,7 @@ use crate::out::terminal;
 #[derive(Parser)]
 #[command(
     name = "brain",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (protocol 1)"),
     about = "A team's notes, searchable on your own machine."
 )]
 pub struct Cli {
@@ -80,6 +82,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Install the newest signed release over this one.
+    Update {
+        /// Only say whether a newer release exists.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Check a release archive's signature against this build's release key.
+    #[command(hide = true)]
+    ReleaseVerify { archive: PathBuf },
+    /// Print the folder an install lives in, for scripts/install.sh.
+    #[command(hide = true)]
+    InstallDir,
 }
 
 #[derive(Subcommand)]
@@ -186,6 +200,19 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         }
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
+        Command::Update { check } => update(dirs, check),
+        Command::ReleaseVerify { archive } => {
+            update::verify(&archive, &update::release_keys())?;
+            println!(
+                "{}: signed by the brain release key",
+                terminal(&archive.display().to_string())
+            );
+            Ok(())
+        }
+        Command::InstallDir => {
+            println!("{}", update::install_dir(&dirs.bin).display());
+            Ok(())
+        }
         Command::Import {
             from: ImportFrom::LearningLoop(args),
         } => import_learning_loop(dirs, clock.today(), args),
@@ -384,6 +411,32 @@ fn show(dirs: &Dirs, target: &str) -> anyhow::Result<()> {
         .read(Path::new(&path))
         .map_err(|why| anyhow::anyhow!("cannot show {path}: {why:?}"))?;
     print!("{}", terminal(&text));
+    Ok(())
+}
+
+fn update(dirs: &Dirs, check: bool) -> anyhow::Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    if check {
+        match update::check(update::GitHub, version)? {
+            Some(newer) => {
+                println!("brain {newer} is out; you have {version}. Run `brain update`.")
+            }
+            None => println!("brain {version} is the newest release."),
+        }
+        return Ok(());
+    }
+    let current = update::install_dir(&dirs.bin);
+    anyhow::ensure!(
+        current.join(update::exe_name()).is_file(),
+        "no install at {}; brain updates only what scripts/install.sh installed",
+        current.display()
+    );
+    let installed = update::run(update::GitHub, &update::release_keys(), &current, version)?;
+    if installed == version {
+        println!("brain {version} is the newest release.");
+    } else {
+        println!("brain {installed} installed over {version}.");
+    }
     Ok(())
 }
 

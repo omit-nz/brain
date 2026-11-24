@@ -56,6 +56,13 @@ jobs:
           test "${{ github.repository }}" = "omit-nz/brain"
           test "${{ github.event.repository.private }}" = "false"
 
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: shellcheck scripts/*.sh
+      - run: bash scripts/release-key.test.sh
+
   gitleaks:
     runs-on: ubuntu-24.04
     steps:

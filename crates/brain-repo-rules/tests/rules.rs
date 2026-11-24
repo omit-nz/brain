@@ -85,6 +85,43 @@ fn every_crate_is_apache_2() {
     );
 }
 
+/// A crate's manifest takes its version from the workspace, so one release is one version.
+fn takes_workspace_version(manifest: &toml::Table) -> Result<(), String> {
+    let inherits = manifest
+        .get("package")
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.get("workspace"))
+        .and_then(|w| w.as_bool());
+    match inherits {
+        Some(true) => Ok(()),
+        _ => Err("must set version.workspace = true".into()),
+    }
+}
+
+#[test]
+fn every_crate_takes_the_workspace_version() {
+    let ws = toml_at(&root().join("Cargo.toml"));
+    assert!(
+        ws["workspace"]["package"]["version"].as_str().is_some(),
+        "the workspace sets the one version"
+    );
+    for manifest in crate_manifests() {
+        if let Err(e) = takes_workspace_version(&toml_at(&manifest)) {
+            panic!("{}: {e}", manifest.display());
+        }
+    }
+    for own in [
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        "[package]\nname = \"x\"\nversion.workspace = false\n",
+        "[package]\nname = \"x\"\n",
+    ] {
+        assert!(
+            takes_workspace_version(&own.parse().unwrap()).is_err(),
+            "{own} passed"
+        );
+    }
+}
+
 /// Exactly one `[workspace]`, at the root, whose members cover `crates/*` and which excludes
 /// nothing.
 fn one_workspace_at(root: &Path) -> Result<(), String> {
