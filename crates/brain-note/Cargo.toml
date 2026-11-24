@@ -8,12 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 brain-platform = { path = "../brain-platform" }
 jiff.workspace = true
 regex.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
