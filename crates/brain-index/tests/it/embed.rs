@@ -169,6 +169,22 @@ fn a_note_that_fails_alone_is_marked_and_the_rest_embed() {
     assert!(why.contains("cannot embed"), "{why}");
 }
 
+/// A bad note alone in the last batch is the note's failure when the embedder still takes a
+/// known-good text, so it is marked once instead of stopping every later run.
+#[test]
+fn a_bad_note_alone_in_the_last_batch_is_marked_not_blamed_on_the_embedder() {
+    let f = Fixture::with_notes(33);
+    let mut idx = f.indexed();
+    let picky = Picky::new("note number 32\n", false);
+    let e = idx.embed_pending(&picky, 32).unwrap();
+    assert_eq!((e.done, e.failed, e.pending, e.stopped), (32, 1, 0, None));
+    let again = idx.embed_pending(&picky, 32).unwrap();
+    assert_eq!(
+        (again.done, again.failed, again.pending, again.stopped),
+        (0, 0, 0, None)
+    );
+}
+
 #[test]
 fn the_index_never_byte_cuts_embed_input() {
     let f = Fixture::with_notes(0);

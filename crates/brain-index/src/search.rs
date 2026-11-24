@@ -13,6 +13,7 @@ use ll_core::rerank::rerank;
 use ll_core::scoring::{
     FtsConfig, FusionWeights, add_weighted_rrf, dot_product, finalize_rrf, try_fts_bm25_query,
 };
+use rusqlite::OptionalExtension;
 
 use crate::Index;
 
@@ -155,16 +156,19 @@ impl Index {
              FROM {items} n JOIN notes_content c ON c.id = n.id WHERE n.path = ?1"
         ))?;
         for (path, score) in finalize_rrf(fused, POOL) {
-            let row = st.query_row([&path], |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            });
-            let Ok((uuid, title, kind, disclosure, body)) = row else {
+            let row = st
+                .query_row([&path], |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })
+                .optional()?;
+            // A path the scope's view does not hold is not a hit; any other failure is an error.
+            let Some((uuid, title, kind, disclosure, body)) = row else {
                 continue;
             };
             let kind = Kind::parse(&kind);

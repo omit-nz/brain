@@ -74,6 +74,20 @@ fn bm25_finds_a_title_word() {
     assert!(hits[0].note_uuid.is_some());
 }
 
+/// A row the final lookup cannot read is an error, not a hit quietly left out.
+#[test]
+fn a_row_the_lookup_cannot_read_is_an_error() {
+    let f = Fixture::new();
+    f.put("a.md", "---\ntitle: Quarterly harvest\n---\nnotes\n");
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    rusqlite::Connection::open(f.db())
+        .unwrap()
+        .execute("UPDATE notes SET title = X'FF' WHERE path = 'a.md'", [])
+        .unwrap();
+    assert!(idx.search(&query("harvest"), None).is_err());
+}
+
 #[test]
 fn a_vector_match_ranks_without_a_shared_word() {
     let f = Fixture::new();

@@ -1,6 +1,7 @@
 //! Note embeddings. A batch that fails is retried a note at a time, so one note the model cannot
-//! take is marked failed on its own; when every note fails, the embedder is blamed and nothing is
-//! marked, so the queue resumes once it works again.
+//! take is marked failed on its own; when every note fails and the embedder also refuses a
+//! known-good text, the embedder is blamed and nothing is marked, so the queue resumes once it
+//! works again.
 
 use std::path::PathBuf;
 
@@ -42,6 +43,9 @@ pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
     let (model, tokenizer) = ensure_model()?;
     Ok(Box::new(BgeSmallProvider::from_files(&model, &tokenizer)?))
 }
+
+/// A text every working embedder takes, used to tell a failing embedder from failing notes.
+const KNOWN_GOOD: &str = "brain";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Embedded {
@@ -157,7 +161,11 @@ impl Index {
                                 .map_err(|e| format!("{e:#}"))
                         })
                         .collect();
-                    if one.iter().all(Result::is_err) {
+                    // Every note failing alone says nothing about the embedder by itself (a batch
+                    // can hold one note); one it takes a known-good text from is working.
+                    if one.iter().all(Result::is_err)
+                        && embed(provider, &[KNOWN_GOOD.to_string()]).is_err()
+                    {
                         out.stopped = Some(format!("{batch_err:#}"));
                         break;
                     }
