@@ -7,9 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use brain_note::{
-    Disclosure, Entry, Kind, Note, Place, Skip, Vault, ensure_id, reassign_id, rel_key,
-};
+use brain_note::{Entry, Note, Place, Skip, Vault, ensure_id, reassign_id, rel_key};
 use rusqlite::{Transaction, params};
 
 use crate::Index;
@@ -56,39 +54,16 @@ fn stat(path: &Path) -> std::io::Result<(i64, i64)> {
     Ok((m.len() as i64, mtime))
 }
 
+/// `reason: detail`, so a report can count skips by the reason before the colon.
 fn describe(why: &Skip) -> String {
     match why {
-        Skip::Link => "a link, which brain never follows".into(),
+        Skip::Link => "link: brain never follows links".into(),
         Skip::TooLarge(n) => format!(
-            "{n} bytes, over the {} byte limit",
+            "too large: {n} bytes, over the {} byte limit",
             brain_note::MAX_NOTE_BYTES
         ),
-        Skip::NotUtf8 => "not UTF-8 text".into(),
-        Skip::Unreadable(e) => e.clone(),
-    }
-}
-
-fn kind_text(k: Kind) -> &'static str {
-    match k {
-        Kind::Knowledge => "knowledge",
-        Kind::Rule => "rule",
-        Kind::History => "history",
-    }
-}
-
-fn place_text(p: Place) -> &'static str {
-    match p {
-        Place::Inbox => "inbox",
-        Place::Private => "private",
-        Place::Kept => "kept",
-    }
-}
-
-fn disclosure_text(d: Disclosure) -> &'static str {
-    match d {
-        Disclosure::Shared => "shared",
-        Disclosure::Listed => "listed",
-        Disclosure::Private => "private",
+        Skip::NotUtf8 => "not utf-8: the file is not UTF-8 text".into(),
+        Skip::Unreadable(e) => format!("unreadable: {e}"),
     }
 }
 
@@ -332,9 +307,9 @@ fn upsert(tx: &Transaction<'_>, w: &Work) -> anyhow::Result<()> {
             w.mtime_ns,
             n.title,
             serde_json::to_string(&n.tags)?,
-            kind_text(n.kind),
-            place_text(w.place),
-            disclosure_text(n.disclosure),
+            n.kind.as_str(),
+            w.place.as_str(),
+            n.disclosure.as_str(),
             n.owner,
             n.review.map(|d| d.to_string()),
         ],

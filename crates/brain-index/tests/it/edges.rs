@@ -181,3 +181,46 @@ fn an_existing_index_file_is_made_private() {
     let mode = fs::metadata(f.db()).unwrap().permissions().mode();
     assert_eq!(mode & 0o077, 0, "{mode:o}");
 }
+
+#[test]
+fn stats_count_every_state() {
+    let f = Fixture::new();
+    for i in 0..4 {
+        f.put(&format!("n{i}.md"), &format!("note {i}\n"));
+    }
+    f.put("broken.md", "---\nnever closed\n");
+    fs::write(f.vault.path().join("bin.md"), [0xff]).unwrap();
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let c = f.sql();
+    c.execute(
+        "UPDATE notes SET embedded = 1 WHERE path IN ('n0.md', 'n1.md')",
+        [],
+    )
+    .unwrap();
+    c.execute("UPDATE notes SET embedded = -1 WHERE path = 'n2.md'", [])
+        .unwrap();
+    c.execute(
+        "INSERT INTO skipped(path, why) VALUES ('n2.md', 'embedding failed: x')",
+        [],
+    )
+    .unwrap();
+    let s = idx.stats().unwrap();
+    assert_eq!(
+        (s.notes, s.embedded, s.failed, s.pending, s.unidentified),
+        (5, 2, 1, 2, 1)
+    );
+    let skipped: Vec<(&str, usize)> = s.skipped.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    assert_eq!(skipped, vec![("embedding failed", 1), ("not utf-8", 1)]);
+}
+
+#[test]
+fn path_of_finds_a_note_by_id() {
+    let f = Fixture::new();
+    f.put("a.md", &format!("---\nid: {ID_A}\n---\nx\n"));
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let id: uuid::Uuid = ID_A.parse().unwrap();
+    assert_eq!(idx.path_of(&id).unwrap().as_deref(), Some("a.md"));
+    assert_eq!(idx.path_of(&uuid::Uuid::nil()).unwrap(), None);
+}

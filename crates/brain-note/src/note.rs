@@ -18,12 +18,26 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn from_value(v: Option<String>) -> Kind {
-        match v.as_deref() {
-            Some("rule") => Kind::Rule,
-            Some("history") => Kind::History,
+    /// The `kind` value as written in frontmatter and stored in the index; anything else reads as
+    /// knowledge.
+    pub fn parse(v: &str) -> Kind {
+        match v {
+            "rule" => Kind::Rule,
+            "history" => Kind::History,
             _ => Kind::Knowledge,
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Knowledge => "knowledge",
+            Kind::Rule => "rule",
+            Kind::History => "history",
+        }
+    }
+
+    fn from_value(v: Option<String>) -> Kind {
+        v.as_deref().map_or(Kind::Knowledge, Kind::parse)
     }
 }
 

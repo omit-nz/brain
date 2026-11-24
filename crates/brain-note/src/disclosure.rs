@@ -16,12 +16,41 @@ pub enum Place {
     Kept,
 }
 
+impl Place {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Place::Inbox => "inbox",
+            Place::Private => "private",
+            Place::Kept => "kept",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disclosure {
     Shared,
     /// Findable but not readable: a title and a scrubbed summary.
     Listed,
     Private,
+}
+
+impl Disclosure {
+    /// The stored spelling; anything unknown reads as private.
+    pub fn parse(v: &str) -> Disclosure {
+        match v {
+            "shared" => Disclosure::Shared,
+            "listed" => Disclosure::Listed,
+            _ => Disclosure::Private,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Disclosure::Shared => "shared",
+            Disclosure::Listed => "listed",
+            Disclosure::Private => "private",
+        }
+    }
 }
 
 pub fn disclosure(split: &Split<'_>, place: Place) -> Disclosure {

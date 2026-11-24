@@ -65,22 +65,6 @@ const SEEDS: usize = 5;
 const DAMPING: f32 = 0.85;
 const SNIPPET_CHARS: usize = 200;
 
-fn kind_of(s: &str) -> Kind {
-    match s {
-        "rule" => Kind::Rule,
-        "history" => Kind::History,
-        _ => Kind::Knowledge,
-    }
-}
-
-fn disclosure_of(s: &str) -> Disclosure {
-    match s {
-        "shared" => Disclosure::Shared,
-        "listed" => Disclosure::Listed,
-        _ => Disclosure::Private,
-    }
-}
-
 fn snippet(body: &str) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(SNIPPET_CHARS) {
@@ -184,7 +168,7 @@ impl Index {
             let Ok((uuid, title, kind, disclosure, body)) = row else {
                 continue;
             };
-            let kind = kind_of(&kind);
+            let kind = Kind::parse(&kind);
             if q.kinds.is_some_and(|ks| !ks.contains(&kind)) {
                 continue;
             }
@@ -194,7 +178,7 @@ impl Index {
                     path,
                     title,
                     kind,
-                    disclosure: disclosure_of(&disclosure),
+                    disclosure: Disclosure::parse(&disclosure),
                     score,
                     snippet: snippet(&body),
                 },
