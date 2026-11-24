@@ -321,6 +321,33 @@ fn an_updated_note_without_an_id_keeps_its_copy_id() {
     assert!(again.contains("0 new, 0 updated"), "{again}");
 }
 
+/// With another writer holding the lock the import copies and indexes nothing, so each copy must
+/// carry its id from the import itself, and the ledger must record those final bytes.
+#[test]
+fn an_import_beside_a_running_writer_writes_ids_and_leaves_the_index_alone() {
+    let i = Import::new();
+    fs::write(
+        i.src.path().join("3-permanent/plain.md"),
+        "no frontmatter\n",
+    )
+    .unwrap();
+    fs::write(i.src.path().join("0-inbox/plain.md"), "an inbox note\n").unwrap();
+    let data = i.h.home.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let _writer = brain_platform::fs::Lock::acquire(&data.join("writer.lock")).unwrap();
+    let out = i.import(&[]);
+    assert!(out.contains("brain's daemon will index them"), "{out}");
+    for rel in ["3-permanent/plain.md", "0-inbox/plain.md"] {
+        let copy = i.copy(rel);
+        let id = line(&copy, "id").unwrap_or_else(|| panic!("{rel} has no id:\n{copy}"));
+        uuid::Uuid::parse_str(id).unwrap();
+    }
+    assert_eq!(i.h.json(&["status", "--json"])["notes"], 0);
+    let again = i.import(&[]);
+    assert!(again.contains("0 new, 0 updated"), "{again}");
+    assert!(again.contains("0 conflicts"), "{again}");
+}
+
 #[test]
 fn a_note_changed_on_both_sides_is_reported_not_overwritten() {
     let i = Import::new();
@@ -386,7 +413,7 @@ fn both_memory_shapes_import_with_the_right_kind() {
     assert_eq!(names, vec!["feedback_short_names.md", "project_launch.md"]);
 }
 
-fn link_dir(target: &Path, link: &Path) {
+pub(crate) fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]

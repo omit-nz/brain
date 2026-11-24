@@ -100,6 +100,17 @@ fn pending_notes_are_embedded_in_batches() {
 }
 
 #[test]
+fn embed_batch_embeds_one_batch_and_counts_the_rest() {
+    let f = Fixture::with_notes(25);
+    let mut idx = f.indexed();
+    let p = Picky::new("never", false);
+    let e = idx.embed_batch(&p, 10).unwrap();
+    assert_eq!((e.done, e.failed, e.pending), (10, 0, 15));
+    let sizes: Vec<usize> = p.batches.lock().unwrap().iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![10]);
+}
+
+#[test]
 fn a_changed_note_is_embedded_again() {
     let f = Fixture::with_notes(3);
     let mut idx = f.indexed();

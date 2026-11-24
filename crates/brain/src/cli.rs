@@ -5,7 +5,7 @@ use brain_index::{Index, Query, Scope, embed};
 use brain_note::{Frontmatter, Kind, Split, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{Privacy, create_dir_private, write_atomic};
+use brain_platform::fs::{Lock, Privacy, create_dir_private, write_atomic};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use jiff::ToSpan;
 use serde_json::json;
@@ -13,6 +13,7 @@ use serde_json::json;
 use brain::update;
 
 use crate::config::{Config, REVIEW_DAYS};
+use crate::daemon::{self, writer_lock};
 use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
 use crate::out::terminal;
@@ -42,6 +43,8 @@ enum Command {
     },
     /// Bring the index up to date with the vault, and embed what is new.
     Index,
+    /// Keep the index up to date as notes change, until stopped.
+    Daemon,
     /// Search your notes.
     Search {
         #[arg(required = true, num_args = 1..)]
@@ -188,6 +191,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
         Command::Index => reindex(dirs),
+        Command::Daemon => daemon::run(dirs, &*clock),
         Command::Search {
             text,
             limit,
@@ -290,17 +294,13 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
 fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let vault = Vault::open(&config.vault)?;
+    let Some(_lock) = Lock::try_acquire(&writer_lock(dirs))? else {
+        println!("brain's daemon keeps the index up to date");
+        return Ok(());
+    };
     let mut idx = index(dirs)?;
     let r = idx.reindex(&vault)?;
-    println!(
-        "{} added, {} changed, {} removed, {} skipped, {} ids written, {} without an id",
-        r.added,
-        r.changed,
-        r.removed,
-        r.skipped.len(),
-        r.ids_written,
-        r.unidentified.len()
-    );
+    println!("{}", daemon::summary(&r));
     match embed::load() {
         Ok(provider) => {
             let e = idx.embed_pending(&*provider, 32)?;
@@ -469,8 +469,10 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let s = index(dirs)?.stats()?;
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
+    let daemon = Lock::is_held(&writer_lock(dirs));
     if as_json {
         let v = json!({
+            "daemon": daemon,
             "runtime": runtime,
             "notes": s.notes,
             "embedded": s.embedded,
@@ -494,6 +496,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             Some(lib) => format!("ONNX Runtime: {}", lib.display()),
             None => "ONNX Runtime: none, so search uses words and links only".into(),
         },
+        format!("daemon: {}", if daemon { "running" } else { "not running" }),
     ];
     for (reason, n) in &s.skipped {
         lines.push(format!("skipped, {reason}: {n}"));
@@ -531,6 +534,12 @@ fn import_learning_loop(
         share: &share,
         blocklist: blocklist.as_ref(),
         layout: &dst.layout,
+    };
+    // Held through the copy too, so a daemon started mid-import waits for it.
+    let lock = if a.dry_run {
+        None
+    } else {
+        Lock::try_acquire(&writer_lock(dirs))?
     };
     let (plan, written) = if a.dry_run {
         (
@@ -577,10 +586,15 @@ fn import_learning_loop(
     if a.dry_run {
         return Ok(());
     }
-    let reindexed = index(dirs).and_then(|mut ix| ix.reindex(&dst));
+    let reindexed = match lock {
+        Some(_) => index(dirs).and_then(|mut ix| ix.reindex(&dst)).map(Some),
+        None => Ok(None),
+    };
     import::settle(&mut ledger, &dst, &written)?;
     ledger.save(dirs)?;
-    reindexed?;
+    if reindexed?.is_none() {
+        println!("brain's daemon will index them\n");
+    }
     println!("{}", terminal(&import::report(&dst, today).to_string()));
     Ok(())
 }

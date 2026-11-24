@@ -243,9 +243,10 @@ pub fn plan(
     Ok(classify(src, memory, dst, ledger)?.0)
 }
 
-/// Classifies, then writes every new and updated copy and records it in the ledger. Returns the
-/// plan and the keys written, whose `dst_hash` the caller refreshes with `settle` once the index
-/// has written ids into the copies.
+/// Classifies, then writes every new and updated copy, each with its id, and records it in the
+/// ledger. Returns the plan and the keys written, whose `dst_hash` the caller refreshes with
+/// `settle` after its own reindex, which can still give a copy a new id when another note holds
+/// its id.
 pub fn apply(
     src: &Vault,
     memory: Option<&Path>,
@@ -290,7 +291,7 @@ pub fn apply(
     Ok((plan, written))
 }
 
-/// Records each written copy's bytes as they are now, after the index wrote any missing id, so
+/// Records each written copy's bytes as they are now, after the index rewrote any id, so
 /// brain's own write never reads as the person's edit on the next import.
 pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::Result<()> {
     for key in written {

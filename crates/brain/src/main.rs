@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod daemon;
 mod import;
 mod inbox;
 mod out;

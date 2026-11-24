@@ -124,9 +124,27 @@ impl Index {
         provider: &dyn EmbeddingProvider,
         batch: usize,
     ) -> anyhow::Result<Embedded> {
+        self.embed_rounds(provider, batch, usize::MAX)
+    }
+
+    /// One batch of `embed_pending`, so a long first embed can stop between batches.
+    pub fn embed_batch(
+        &mut self,
+        provider: &dyn EmbeddingProvider,
+        batch: usize,
+    ) -> anyhow::Result<Embedded> {
+        self.embed_rounds(provider, batch, 1)
+    }
+
+    fn embed_rounds(
+        &mut self,
+        provider: &dyn EmbeddingProvider,
+        batch: usize,
+        rounds: usize,
+    ) -> anyhow::Result<Embedded> {
         let model = provider.config().model_id.clone();
         let mut out = Embedded::default();
-        loop {
+        for _ in 0..rounds {
             let pending: Vec<(i64, String, String)> = {
                 let mut st = self.conn.prepare(
                     "SELECT n.id, n.path, c.title, c.tags, c.body

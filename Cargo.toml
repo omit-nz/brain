@@ -33,3 +33,5 @@ zipsign-api = { version = "=0.2.2", default-features = false, features = ["sign-
 tar = "0.4"
 libloading = "0.9"
 flate2 = "1"
+notify = "9"
+notify-debouncer-full = "0.8"
