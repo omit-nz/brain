@@ -12,7 +12,7 @@ const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 /// GitHub-hosted runner labels a public repo may use. A self-hosted runner would let a
 /// public pull request run code on omit's own machines.
-const HOSTED: &[&str] = &["macos-14", "macos-15", "ubuntu-24.04", "windows-2025"];
+const HOSTED: &[&str] = &["macos-15", "ubuntu-24.04", "windows-2025"];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
