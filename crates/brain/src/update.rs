@@ -103,9 +103,7 @@ pub fn shipped_trust() -> Trust {
         } else {
             vec![RELEASE_KEY]
         },
-        requirement: cfg!(target_os = "macos").then(|| {
-            format!(r#"anchor apple generic and certificate leaf[subject.OU] = "{TEAM_ID}""#)
-        }),
+        requirement: brain_platform::codesign::release_requirement(TEAM_ID),
     }
 }
 
@@ -175,17 +173,12 @@ fn meets(release: &Path, requirement: &str) -> self_update::errors::Result<()> {
         release.join(exe_name()),
         release.join("lib").join(runtime_name()),
     ] {
-        let out = std::process::Command::new("/usr/bin/codesign")
-            .args(["--verify", "--strict", &format!("-R={requirement}")])
-            .arg(&file)
-            .output()?;
-        if !out.status.success() {
-            return Err(self_update::errors::Error::verification_rejected(format!(
-                "{} is not signed by omit's Apple team ({TEAM_ID}): {}",
-                file.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
+        brain_platform::codesign::check(&file, requirement).map_err(|why| {
+            self_update::errors::Error::verification_rejected(format!(
+                "{} is not signed by omit's Apple team ({TEAM_ID}): {why}",
+                file.display()
+            ))
+        })?;
     }
     Ok(())
 }
