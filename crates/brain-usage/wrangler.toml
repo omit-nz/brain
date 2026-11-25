@@ -3,7 +3,12 @@ main = "build/index.js"
 compatibility_date = "2026-11-01"
 
 [build]
+# worker-build 0.9.0, as CI's wasm job pins it: `cargo install worker-build --version 0.9.0 --locked`.
 command = "worker-build --release"
+
+# No request logs: they would keep the sender's address, which the endpoint never needs.
+[observability]
+enabled = false
 
 [[d1_databases]]
 binding = "USAGE_DB"

@@ -2,16 +2,12 @@
 //! with `accept` against today's UTC date, and writes its rows to D1. Nothing else of the request
 //! (address, headers, timing) is kept.
 
-use brain_report::accept;
+use brain_report::{MAX_BODY, accept};
 use futures_util::StreamExt;
-use jiff::Timestamp;
-use jiff::tz::TimeZone;
 use worker::wasm_bindgen::JsValue;
 use worker::{Context, Date, Env, Method, Request, Response, Result, event};
 
-use crate::{Param, statements, status};
-
-const MAX_BODY: usize = 65_536;
+use crate::{Param, statements, status, utc_date};
 
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -22,18 +18,17 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // A request with no body has no stream; accept refuses the empty body as malformed.
     if let Ok(mut stream) = req.stream() {
         while let Some(chunk) = stream.next().await {
-            body.extend_from_slice(&chunk?);
-            if body.len() > MAX_BODY {
+            let chunk = chunk?;
+            if body.len() + chunk.len() > MAX_BODY {
                 return Ok(Response::empty()?.with_status(413));
             }
+            body.extend_from_slice(&chunk);
         }
     }
     let signature = req.headers().get("brain-signature")?.unwrap_or_default();
     // jiff's own clock panics on wasm32-unknown-unknown, so the date comes from the runtime.
-    let today = Timestamp::from_millisecond(Date::now().as_millis() as i64)
-        .map_err(|e| worker::Error::RustError(e.to_string()))?
-        .to_zoned(TimeZone::UTC)
-        .date();
+    let today = utc_date(Date::now().as_millis() as i64)
+        .ok_or_else(|| worker::Error::RustError("the runtime's clock is out of range".into()))?;
     let report = match accept(&body, &signature, today) {
         Ok(report) => report,
         Err(refused) => return Ok(Response::empty()?.with_status(status(&refused))),

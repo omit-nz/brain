@@ -55,6 +55,12 @@ pub fn statements(report: &Report, received: Date) -> Vec<Statement> {
     out
 }
 
+/// The UTC date of an instant in milliseconds since the epoch, as the Worker's runtime gives it.
+pub fn utc_date(millis: i64) -> Option<Date> {
+    let t = jiff::Timestamp::from_millisecond(millis).ok()?;
+    Some(t.to_zoned(jiff::tz::TimeZone::UTC).date())
+}
+
 pub fn status(refused: &Refused) -> u16 {
     match refused {
         Refused::TooLarge => 413,

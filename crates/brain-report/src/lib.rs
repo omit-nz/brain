@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// The one report version `accept` takes.
 pub const VERSION: u32 = 1;
-const MAX_BODY: usize = 65_536;
+/// The largest body `accept` reads; the endpoint stops reading past it.
+pub const MAX_BODY: usize = 65_536;
 const MAX_COUNTS: usize = 500;
 const MAX_N: u64 = 10_000_000;
 const MAX_AGE_DAYS: i64 = 30;

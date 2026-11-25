@@ -151,3 +151,51 @@ fn refusals_map_to_statuses() {
         assert_eq!(status(&refused), code, "{refused:?}");
     }
 }
+
+#[test]
+fn one_event_through_two_doors_keeps_both_rows() {
+    let c = db();
+    let mut r = report();
+    r.counts.push(Count {
+        event: Event::Question,
+        door: Some(Door::Other),
+        n: 4,
+    });
+    run(&c, &statements(&r, RECEIVED));
+    assert_eq!(
+        counts(&c),
+        [
+            "2026-11-24 notes_due  2",
+            "2026-11-24 question cli 3",
+            "2026-11-24 question other 4"
+        ]
+    );
+}
+
+#[test]
+fn a_changed_resend_overwrites_n_and_version() {
+    let c = db();
+    let r = report();
+    run(&c, &statements(&r, RECEIVED));
+    let mut changed = r.clone();
+    changed.version = "0.1.2".into();
+    changed.counts[0].n = 5;
+    run(&c, &statements(&changed, date(2026, 11, 26)));
+    assert_eq!(
+        days(&c),
+        [format!("{} 2026-11-24 0.1.2 1 2026-11-25", r.workspace)]
+    );
+    assert!(
+        counts(&c).contains(&"2026-11-24 question cli 5".to_string()),
+        "{:?}",
+        counts(&c)
+    );
+}
+
+#[test]
+fn the_receipt_day_is_the_utc_date() {
+    // 2026-11-24T23:59:59.999Z and one millisecond later.
+    let last = 1_795_564_799_999;
+    assert_eq!(brain_usage::utc_date(last), Some(date(2026, 11, 24)));
+    assert_eq!(brain_usage::utc_date(last + 1), Some(date(2026, 11, 25)));
+}

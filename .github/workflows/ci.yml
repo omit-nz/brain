@@ -59,6 +59,13 @@ jobs:
       # The only lint that sees the Worker shell, which builds for wasm32 alone.
       - run: cargo clippy -p brain-usage --target wasm32-unknown-unknown --locked -- -D warnings
       - run: cargo build -p brain-usage --target wasm32-unknown-unknown --release --locked
+      # What wrangler deploys: worker-build, pinned, must write the `main` wrangler.toml names.
+      - name: worker-build
+        run: |
+          cargo install worker-build --version 0.9.0 --locked
+          cd crates/brain-usage
+          worker-build --release
+          test -f build/index.js
 
   repo:
     runs-on: ubuntu-24.04
