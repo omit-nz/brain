@@ -27,6 +27,10 @@ const RELEASE_KEY: [u8; 32] = *include_bytes!("keys/release.pub");
 /// omit's Apple Developer team, whose Developer ID signs every macOS release.
 const TEAM_ID: &str = include_str!("keys/team_id").trim_ascii();
 
+/// brain's code signing identifier, fixed so macOS's privacy grants to brain survive updates, and
+/// so no other program signed by the team passes as brain.
+const IDENTIFIER: &str = "nz.omit.brain";
+
 /// A release archive is tens of megabytes; five minutes is under 1 Mbit/s for it.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -74,11 +78,18 @@ pub fn runtime_name() -> String {
 }
 
 /// What a release must carry before it is installed: a zipsign signature by one of `keys`, and,
-/// when `requirement` is set, a code signature on its binary and runtime library meeting that
-/// code requirement (`codesign -R`).
+/// when `code` is set, code signatures on its binary and runtime library meeting those code
+/// requirements (`codesign -R`).
 pub struct Trust {
     pub keys: Vec<[u8; 32]>,
-    pub requirement: Option<String>,
+    pub code: Option<Code>,
+}
+
+/// The code requirement each file of a release must meet.
+#[derive(Clone)]
+pub struct Code {
+    pub brain: String,
+    pub runtime: String,
 }
 
 /// The trust this build checks releases against: the shipped trust, or a test's key alone.
@@ -86,7 +97,7 @@ pub fn release_trust() -> Trust {
     match test_key() {
         Some(key) => Trust {
             keys: vec![key],
-            requirement: None,
+            code: None,
         },
         None => shipped_trust(),
     }
@@ -103,7 +114,13 @@ pub fn shipped_trust() -> Trust {
         } else {
             vec![RELEASE_KEY]
         },
-        requirement: brain_platform::codesign::release_requirement(TEAM_ID),
+        code: brain_platform::codesign::CHECKS_RELEASES.then(|| {
+            let team = brain_platform::codesign::developer_id(TEAM_ID);
+            Code {
+                brain: format!(r#"identifier "{IDENTIFIER}" and {team}"#),
+                runtime: team,
+            }
+        }),
     }
 }
 
@@ -143,7 +160,7 @@ pub fn verify(archive: &Path, keys: &[[u8; 32]]) -> anyhow::Result<()> {
 pub fn check(source: impl Source, version: &str) -> anyhow::Result<Option<String>> {
     let nothing = Trust {
         keys: Vec::new(),
-        requirement: None,
+        code: None,
     };
     let newer = configure(source, &nothing, Path::new("."), version)?.is_update_available()?;
     Ok(newer.map(|r| r.version().to_string()))
@@ -167,15 +184,30 @@ pub fn run(
 }
 
 /// Whether the binary and the runtime library in the release folder `release`, unpacked and not
-/// yet installed, are signed as `requirement` asks.
-fn meets(release: &Path, requirement: &str) -> self_update::errors::Result<()> {
-    for file in [
-        release.join(exe_name()),
-        release.join("lib").join(runtime_name()),
+/// yet installed, are signed as `requirement` asks. Each must be a plain file along a path of plain
+/// folders: codesign follows a link, but the swap installs the link itself.
+fn meets(release: &Path, code: &Code) -> self_update::errors::Result<()> {
+    let plain = |inside: &Path| {
+        std::fs::symlink_metadata(release.join(inside)).is_ok_and(|m| !m.file_type().is_symlink())
+    };
+    for (inside, requirement) in [
+        (PathBuf::from(exe_name()), &code.brain),
+        (Path::new("lib").join(runtime_name()), &code.runtime),
     ] {
+        let file = release.join(&inside);
+        if !inside
+            .ancestors()
+            .filter(|p| !p.as_os_str().is_empty())
+            .all(plain)
+        {
+            return Err(self_update::errors::Error::verification_rejected(format!(
+                "{} is not a plain file in the release",
+                file.display()
+            )));
+        }
         brain_platform::codesign::check(&file, requirement).map_err(|why| {
             self_update::errors::Error::verification_rejected(format!(
-                "{} is not signed by omit's Apple team ({TEAM_ID}): {why}",
+                "{} does not carry brain's Developer ID signature (team {TEAM_ID}): {why}",
                 file.display()
             ))
         })?;
@@ -193,8 +225,8 @@ fn configure(
     if let Some(client) = source.client() {
         b.http_client(client);
     }
-    if let Some(requirement) = trust.requirement.clone() {
-        b.verify_binary(move |release| meets(release, &requirement));
+    if let Some(code) = trust.code.clone() {
+        b.verify_binary(move |release| meets(release, &code));
     }
     b.timeout(source.timeout());
     Ok(b.source(source)

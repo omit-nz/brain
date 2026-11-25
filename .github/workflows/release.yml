@@ -350,15 +350,19 @@ jobs:
           spctl --assess --type install -vv brain.pkg 2>&1 | tee "$RUNNER_TEMP/spctl.txt"
           grep -q 'source=Notarized Developer ID' "$RUNNER_TEMP/spctl.txt"
           xcrun stapler validate brain.pkg
+          developer_id="anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team\""
           for f in "signed/brain-$version/brain" "signed/brain-$version/lib/libonnxruntime.dylib"; do
             codesign --verify --strict --test-requirement="=notarized" "$f"
-            codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"$team\"" "$f"
           done
+          codesign --verify --strict "-R=identifier \"nz.omit.brain\" and $developer_id" "signed/brain-$version/brain"
+          codesign --verify --strict "-R=$developer_id" "signed/brain-$version/lib/libonnxruntime.dylib"
           for f in *.tar.gz *.mcpb brain.pkg; do
             gh attestation verify "$f" -R "$GITHUB_REPOSITORY" --bundle "brain-$version.sigstore.json" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
           done
+      # Published as a pre-release: installs and updates take it, but the latest-release link
+      # moves only when omit marks it latest after its Live check (docs/release.md).
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease

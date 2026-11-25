@@ -405,3 +405,22 @@ fn the_privacy_line_is_on_every_page_about_what_brain_sends() {
         .collect();
     assert_eq!(missing, Vec::<&str>::new());
 }
+
+/// The release job checks the macOS build against what an installed brain asks of an update
+/// (brain_platform::codesign::developer_id, with brain's own identifier for brain), so a build the
+/// release passes is a build every Mac takes. Both scripts write the team as `\"$team\"`.
+#[test]
+fn the_release_checks_what_an_update_checks() {
+    let developer_id = brain_platform::codesign::developer_id("$team").replace('"', "\\\"");
+    for file in ["scripts/sign-macos.sh", ".github/workflows/release.yml"] {
+        let text = fs::read_to_string(root().join(file)).unwrap();
+        assert!(
+            text.contains(&format!("developer_id=\"{developer_id}\"")),
+            "{file} does not ask for {developer_id}"
+        );
+        assert!(
+            text.contains(r#"-R=identifier \"nz.omit.brain\" and $developer_id"#),
+            "{file} does not ask for brain's identifier"
+        );
+    }
+}

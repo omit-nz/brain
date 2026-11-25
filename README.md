@@ -4,7 +4,7 @@ Leave a brain at home. brain is the shared context layer of a business: the know
 
 ## Install
 
-On a Mac (Apple silicon): download `brain.pkg` from the [latest release](https://github.com/omit-nz/brain/releases/latest) and open it. It installs for you alone, with no admin password, and macOS checks its Developer ID signature and notarisation before it runs. Then run `brain init --me <your name>` in your notes folder, which also starts the daemon.
+On a Mac (Apple silicon): download `brain.pkg` from the [releases page](https://github.com/omit-nz/brain/releases) and open it. It installs for you alone, with no admin password, and macOS checks its Developer ID signature and notarisation before it runs. Then run `brain init --me <your name>` in your notes folder, which also starts the daemon.
 
 On Linux (x86_64), and for CI and scripted installs:
 

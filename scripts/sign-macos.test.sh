@@ -14,6 +14,8 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 version=9.9.9
 team=$(cat "$here/../crates/brain/src/keys/team_id")
+# What an installed brain asks of an update (brain_platform::codesign::developer_id).
+developer_id="anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team\""
 failed=0
 
 # Stubs log every call to $box/log and act on files the way the real tools do, closely enough
@@ -71,7 +73,7 @@ EOF
 
 sign() {
   stubs
-  PATH="$box/bin:$PATH" bash "$here/sign-macos.sh" "$box/brain-$version" "$version" "$box/out" >"$box/out.txt" 2>&1
+  PATH="$box/bin:$PATH" "$here/sign-macos.sh" "$box/brain-$version" "$version" "$box/out" >"$box/out.txt" 2>&1
 }
 
 fail() {
@@ -101,8 +103,8 @@ a_run_with_every_secret_signs_notarises_and_staples() {
     fail "${FUNCNAME[0]}" "a step is missing (lib=$lib brain=$brain zip=$zip pkg=$pkg staple=$staple)"
   elif ! [ "$lib" -lt "$brain" ] || ! [ "$brain" -lt "$zip" ] || ! [ "$zip" -lt "$pkg" ] || ! [ "$pkg" -lt "$staple" ]; then
     fail "${FUNCNAME[0]}" "steps out of order (lib=$lib brain=$brain zip=$zip pkg=$pkg staple=$staple)"
-  elif ! grep -q "^codesign --verify --strict -R=anchor apple generic and certificate leaf\[subject.OU\] = \"$team\" .*/brain-$version/brain$" "$box/log" \
-    || ! grep -q "^codesign --verify --strict -R=anchor apple generic and certificate leaf\[subject.OU\] = \"$team\" .*/libonnxruntime.dylib$" "$box/log"; then
+  elif ! grep -qxF "codesign --verify --strict -R=identifier \"nz.omit.brain\" and $developer_id $box/brain-$version/brain" "$box/log" \
+    || ! grep -qxF "codesign --verify --strict -R=$developer_id $box/brain-$version/lib/libonnxruntime.dylib" "$box/log"; then
     fail "${FUNCNAME[0]}" "the signatures were not checked against the team"
   elif ! grep -q "^productsign --timestamp --keychain .* --sign Developer ID Installer: Someone ($team) " "$box/log"; then
     fail "${FUNCNAME[0]}" "brain.pkg was not signed with the Installer identity"

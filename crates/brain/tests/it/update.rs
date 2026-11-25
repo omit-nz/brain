@@ -48,6 +48,33 @@ fn archive_of(
     exe: &[u8],
     runtime: &[u8],
 ) -> PathBuf {
+    archive_with(
+        dir,
+        version,
+        signers,
+        &[
+            (update::exe_name(), Entry::File(exe)),
+            (
+                format!("lib/{}", update::runtime_name()),
+                Entry::File(runtime),
+            ),
+        ],
+    )
+}
+
+/// One entry of a release folder.
+enum Entry<'a> {
+    File(&'a [u8]),
+    Link(&'a Path),
+}
+
+/// `archive`, holding `entries` (paths inside the release folder).
+fn archive_with(
+    dir: &Path,
+    version: &str,
+    signers: &[SigningKey],
+    entries: &[(String, Entry)],
+) -> PathBuf {
     let name = format!("brain-{version}-{}.tar.gz", update::host_target().unwrap());
     let unsigned = dir.join(format!("unsigned-{name}"));
     {
@@ -56,18 +83,22 @@ fn archive_of(
             flate2::Compression::default(),
         );
         let mut tar = tar::Builder::new(gz);
-        for (path, body) in [
-            (format!("brain-{version}/{}", update::exe_name()), exe),
-            (
-                format!("brain-{version}/lib/{}", update::runtime_name()),
-                runtime,
-            ),
-        ] {
+        for (path, entry) in entries {
+            let path = format!("brain-{version}/{path}");
             let mut h = tar::Header::new_gnu();
-            h.set_size(body.len() as u64);
             h.set_mode(0o755);
-            h.set_cksum();
-            tar.append_data(&mut h, path, body).unwrap();
+            match entry {
+                Entry::File(body) => {
+                    h.set_size(body.len() as u64);
+                    h.set_cksum();
+                    tar.append_data(&mut h, path, *body).unwrap();
+                }
+                Entry::Link(target) => {
+                    h.set_entry_type(tar::EntryType::Symlink);
+                    h.set_size(0);
+                    tar.append_link(&mut h, path, target).unwrap();
+                }
+            }
         }
         tar.into_inner().unwrap().finish().unwrap();
     }
@@ -135,7 +166,7 @@ impl update::Source for Local {}
 fn trusting(keys: &[[u8; 32]]) -> update::Trust {
     update::Trust {
         keys: keys.to_vec(),
-        requirement: None,
+        code: None,
     }
 }
 
@@ -571,10 +602,10 @@ fn an_update_waits_for_one_already_running() {
     assert_eq!(installed(root.path()).0, format!("binary {NEW}"));
 }
 
-/// An install whose update is checked against `requirement`, offered a release of `exe` and
-/// `runtime` signed by the trusted key.
+/// An install whose update is checked against `code`, offered a release of `exe` and `runtime`
+/// signed by the trusted key.
 #[cfg(target_os = "macos")]
-fn update_to(exe: &[u8], runtime: &[u8], requirement: &str) -> (tempfile::TempDir, String) {
+fn update_to(exe: &[u8], runtime: &[u8], code: update::Code) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let k = key(1);
     let a = archive_of(dir.path(), NEW, std::slice::from_ref(&k), exe, runtime);
@@ -582,7 +613,7 @@ fn update_to(exe: &[u8], runtime: &[u8], requirement: &str) -> (tempfile::TempDi
         &a,
         &update::Trust {
             keys: vec![public(&k)],
-            requirement: Some(requirement.to_string()),
+            code: Some(code),
         },
     );
     (
@@ -598,33 +629,52 @@ fn apple_signed() -> Vec<u8> {
 }
 
 #[cfg(target_os = "macos")]
-fn shipped_requirement() -> String {
-    update::shipped_trust().requirement.unwrap()
+fn shipped_code() -> update::Code {
+    update::shipped_trust().code.unwrap()
 }
+
+/// `requirement` asked of both files.
+#[cfg(target_os = "macos")]
+fn both(requirement: &str) -> update::Code {
+    update::Code {
+        brain: requirement.to_string(),
+        runtime: requirement.to_string(),
+    }
+}
+
+/// What a Developer ID Application certificate of omit's team carries, in Apple's own form: Apple's
+/// Developer ID intermediate, the Developer ID leaf marker, and the team.
+#[cfg(target_os = "macos")]
+const DEVELOPER_ID: &str = r#"anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "5BCNYRT23U""#;
 
 #[cfg(target_os = "macos")]
 #[test]
-fn the_shipped_trust_on_macos_asks_for_omits_team() {
+fn the_shipped_trust_on_macos_asks_for_brains_developer_id() {
     let team =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/keys/team_id")).unwrap();
     assert_eq!(team, "5BCNYRT23U");
+    let code = shipped_code();
     assert_eq!(
-        shipped_requirement(),
-        r#"anchor apple generic and certificate leaf[subject.OU] = "5BCNYRT23U""#
+        code.brain,
+        format!(r#"identifier "nz.omit.brain" and {DEVELOPER_ID}"#)
     );
+    assert_eq!(code.runtime, DEVELOPER_ID);
 }
 
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn the_shipped_trust_elsewhere_asks_for_no_code_signature() {
-    assert_eq!(update::shipped_trust().requirement, None);
+    assert!(update::shipped_trust().code.is_none());
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn an_unsigned_update_is_refused_on_macos() {
-    let (root, err) = update_to(b"binary 9.9.9", b"runtime 9.9.9", &shipped_requirement());
-    assert!(err.contains("not signed by omit's Apple team"), "{err:?}");
+    let (root, err) = update_to(b"binary 9.9.9", b"runtime 9.9.9", shipped_code());
+    assert!(
+        err.contains("does not carry brain's Developer ID signature"),
+        "{err:?}"
+    );
     assert_eq!(
         installed(root.path()),
         ("binary old".into(), "runtime old".into())
@@ -634,8 +684,11 @@ fn an_unsigned_update_is_refused_on_macos() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_update_signed_by_another_team_is_refused() {
-    let (root, err) = update_to(&apple_signed(), &apple_signed(), &shipped_requirement());
-    assert!(err.contains("not signed by omit's Apple team"), "{err:?}");
+    let (root, err) = update_to(&apple_signed(), &apple_signed(), shipped_code());
+    assert!(
+        err.contains("does not carry brain's Developer ID signature"),
+        "{err:?}"
+    );
     assert_eq!(
         installed(root.path()),
         ("binary old".into(), "runtime old".into())
@@ -646,7 +699,7 @@ fn an_update_signed_by_another_team_is_refused() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_update_whose_brain_and_runtime_meet_the_requirement_is_installed() {
-    let (root, err) = update_to(&apple_signed(), &apple_signed(), "anchor apple");
+    let (root, err) = update_to(&apple_signed(), &apple_signed(), both("anchor apple"));
     assert_eq!(err, "");
     let current = root.path().join("brain-current");
     assert_eq!(
@@ -666,11 +719,94 @@ fn an_update_with_one_unsigned_file_is_refused() {
         (apple_signed(), b"runtime 9.9.9".to_vec()),
         (b"binary 9.9.9".to_vec(), apple_signed()),
     ] {
-        let (root, err) = update_to(&exe, &runtime, "anchor apple");
-        assert!(err.contains("not signed by omit's Apple team"), "{err:?}");
+        let (root, err) = update_to(&exe, &runtime, both("anchor apple"));
+        assert!(
+            err.contains("does not carry brain's Developer ID signature"),
+            "{err:?}"
+        );
         assert_eq!(
             installed(root.path()),
             ("binary old".into(), "runtime old".into())
         );
     }
+}
+
+/// A release whose brain, runtime library or `lib` folder is a link is refused, though what the
+/// link points at meets the requirement: the install would hold the link, not the signed file.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_release_holding_a_link_is_refused() {
+    let signed = tempfile::tempdir().unwrap();
+    let file = signed.path().join(update::runtime_name());
+    fs::write(&file, apple_signed()).unwrap();
+    let lib = format!("lib/{}", update::runtime_name());
+    let ls = apple_signed();
+    let cases: [Vec<(String, Entry)>; 3] = [
+        vec![
+            (update::exe_name(), Entry::Link(&file)),
+            (lib.clone(), Entry::File(&ls)),
+        ],
+        vec![
+            (update::exe_name(), Entry::File(&ls)),
+            (lib.clone(), Entry::Link(&file)),
+        ],
+        vec![
+            (update::exe_name(), Entry::File(&ls)),
+            ("lib".to_string(), Entry::Link(signed.path())),
+        ],
+    ];
+    for entries in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let k = key(1);
+        let a = archive_with(dir.path(), NEW, std::slice::from_ref(&k), &entries);
+        let (root, r) = install_and_update_with(
+            &a,
+            &update::Trust {
+                keys: vec![public(&k)],
+                code: Some(both("anchor apple")),
+            },
+        );
+        let err = format!(
+            "{:#}",
+            r.expect_err("a release holding a link was installed")
+        );
+        assert!(err.contains("not a plain file"), "{err}");
+        assert_eq!(
+            installed(root.path()),
+            ("binary old".into(), "runtime old".into())
+        );
+    }
+}
+
+/// brain's own requirement is asked of brain alone: a signed binary with another identifier (here
+/// Apple's `ls`, as another of the team's tools would be) is refused as brain, and the runtime
+/// library is asked only its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_brain_with_another_identifier_is_refused() {
+    // Another Apple binary, with its own identifier, as the runtime library.
+    let other = fs::read("/bin/cat").unwrap();
+    let code = |brain: &str| update::Code {
+        brain: brain.to_string(),
+        runtime: "anchor apple".to_string(),
+    };
+    let (root, err) = update_to(
+        &apple_signed(),
+        &other,
+        code(r#"identifier "nz.omit.brain" and anchor apple"#),
+    );
+    assert!(
+        err.contains("does not carry brain's Developer ID signature"),
+        "{err:?}"
+    );
+    assert_eq!(
+        installed(root.path()),
+        ("binary old".into(), "runtime old".into())
+    );
+    let (_, err) = update_to(
+        &apple_signed(),
+        &other,
+        code(r#"identifier "com.apple.ls" and anchor apple"#),
+    );
+    assert_eq!(err, "");
 }

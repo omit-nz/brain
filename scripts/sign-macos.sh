@@ -3,7 +3,8 @@
 # from: the update archive and brain.pkg. brain and its runtime library are signed with the
 # hardened runtime and notarised; the archive packs those bytes; brain.pkg holds the same folder,
 # signed with the Developer ID Installer identity, notarised and stapled. Every identity must be
-# omit's team (crates/brain/src/keys/team_id), the team the update check asks for.
+# omit's team (crates/brain/src/keys/team_id), and both files must meet what an installed brain
+# asks of an update (the_release_checks_what_an_update_checks keeps the two the same).
 #
 # Usage: scripts/sign-macos.sh <release-folder> <version> <out-dir>
 # The release folder is named brain-<version> and holds brain and lib/libonnxruntime.dylib.
@@ -33,7 +34,7 @@ done
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 team=$(cat "$here/crates/brain/src/keys/team_id")
-requirement="anchor apple generic and certificate leaf[subject.OU] = \"$team\""
+developer_id="anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team\""
 
 umask 077
 work=$(mktemp -d "${TMPDIR:-/tmp}/brain-sign.XXXXXX")
@@ -91,9 +92,8 @@ notarise() {
 lib="$release/lib/libonnxruntime.dylib"
 codesign --force --options runtime --timestamp --keychain "$kc" --sign "$app" "$lib"
 codesign --force --options runtime --timestamp --keychain "$kc" --sign "$app" -i nz.omit.brain "$release/brain"
-for f in "$lib" "$release/brain"; do
-  codesign --verify --strict "-R=$requirement" "$f"
-done
+codesign --verify --strict "-R=$developer_id" "$lib"
+codesign --verify --strict "-R=identifier \"nz.omit.brain\" and $developer_id" "$release/brain"
 ditto -c -k --keepParent "$release" "$work/notarise.zip"
 notarise "$work/notarise.zip"
 

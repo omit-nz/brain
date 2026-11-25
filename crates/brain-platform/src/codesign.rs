@@ -2,12 +2,17 @@
 
 use std::path::Path;
 
-/// The code requirement a release's binary and runtime library must meet before an update installs
-/// them: on macOS, a signature rooted in Apple's certificate authority whose leaf names `team`. No
-/// other platform checks one yet.
-pub fn release_requirement(team: &str) -> Option<String> {
-    cfg!(target_os = "macos")
-        .then(|| format!(r#"anchor apple generic and certificate leaf[subject.OU] = "{team}""#))
+/// Whether this platform checks a release's code signatures before an update installs it: macOS
+/// does; no other platform yet.
+pub const CHECKS_RELEASES: bool = cfg!(target_os = "macos");
+
+/// The code requirement for a Developer ID Application signature of `team`, in Apple's own form
+/// (Apple's Developer ID intermediate and the Developer ID leaf marker), so the team's development
+/// and distribution certificates do not pass.
+pub fn developer_id(team: &str) -> String {
+    format!(
+        r#"anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "{team}""#
+    )
 }
 
 /// Whether `file` is signed as `requirement` asks (`codesign --verify --strict -R`); the error is

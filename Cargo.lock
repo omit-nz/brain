@@ -308,6 +308,7 @@ dependencies = [
 name = "brain-repo-rules"
 version = "0.1.1"
 dependencies = [
+ "brain-platform",
  "sha2 0.11.1",
  "tempfile",
  "toml",
