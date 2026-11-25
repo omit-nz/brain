@@ -72,6 +72,8 @@ jobs:
           installer -pkg "$RUNNER_TEMP/brain.pkg" -target CurrentUserHomeDirectory
           "$HOME/.local/bin/brain" --version
           test "$("$HOME/.local/bin/brain" install-dir)" = "$HOME/Library/Application Support/nz.omit.brain/bin/brain-current"
+      # The release's signing script, against stub Apple tools; it needs macOS's packaging tools.
+      - run: bash scripts/sign-macos.test.sh
 
   wasm:
     runs-on: ubuntu-24.04

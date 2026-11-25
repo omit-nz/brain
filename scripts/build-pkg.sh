@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds brain.pkg, unsigned, from a release folder (brain and lib/, as in a release archive).
 # The package installs into the current person's home: the folder becomes brain-current in brain's
-# data folder, and pkg/scripts/postinstall links ~/.local/bin/brain to it. Signing, notarising and
-# stapling are the release job's, once the Developer ID certificates exist.
+# data folder, and pkg/scripts/postinstall links ~/.local/bin/brain to it. scripts/sign-macos.sh
+# builds it this way for a release, then signs, notarises and staples it.
 #
 # Usage: scripts/build-pkg.sh <release-folder> <version> <out.pkg>
 set -euo pipefail
