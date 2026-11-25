@@ -44,6 +44,51 @@ fn usage_off_is_saved() {
 }
 
 #[test]
+fn counting_continues_while_sending_is_off() {
+    let h = indexed(&[("a.md", "mailbox notes\n")]);
+    h.run(&["usage", "off"]);
+    h.run(&["search", "mailbox"]);
+    assert!(
+        counts(&h).contains(&"question cli 1".to_string()),
+        "off keeps the counts on this machine; it stops only the sending"
+    );
+}
+
+#[test]
+fn the_mcp_door_counts_captures_corrections_and_gaps() {
+    let h = indexed(&[("bins.md", "---\ntitle: Bins\n---\nMondays\n")]);
+    let mut m = Mcp::start(&h);
+    m.text("capture", json!({"text": "invoices on the 20th"}));
+    m.text(
+        "correct",
+        json!({"target": "bins.md", "correction": "Tuesdays"}),
+    );
+    m.text("search_my_brain", json!({"query": "zeppelin"}));
+    drop(m);
+    let c = counts(&h);
+    for line in [
+        "capture_written claude_code 1",
+        "correction claude_code 1",
+        "gap_logged claude_code 1",
+    ] {
+        assert!(c.contains(&line.to_string()), "{line}: {c:?}");
+    }
+}
+
+#[test]
+fn a_store_that_cannot_be_written_says_so_once_per_action() {
+    let h = indexed(&[("a.md", "mailbox\n")]);
+    let store = h.home.path().join("data/activity.db");
+    let _ = fs::remove_file(&store);
+    fs::create_dir_all(&store).unwrap();
+    for query in ["mailbox", "zeppelin"] {
+        let out = h.brain().args(["search", query]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(err.matches("was not saved").count(), 1, "{query}: {err}");
+    }
+}
+
+#[test]
 fn a_search_counts_a_question_by_door() {
     let h = indexed(&[("a.md", "mailbox notes\n")]);
     h.run(&["search", "mailbox"]);
