@@ -233,6 +233,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "rmcp",
+ "rusqlite",
  "schemars",
  "self_update",
  "serde",

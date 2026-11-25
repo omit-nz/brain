@@ -5,6 +5,7 @@ mod import;
 mod mcp;
 mod service;
 mod update;
+mod usage;
 
 use std::fs;
 use std::path::Path;

@@ -23,6 +23,7 @@ use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
 use crate::mcp;
 use crate::out::terminal;
+use crate::usage;
 
 #[derive(Parser)]
 #[command(
@@ -76,6 +77,11 @@ enum Command {
         /// The note's id or its path in the vault.
         target: String,
         text: String,
+    },
+    /// What brain counts about its own use, and whether the day's counts go to omit.
+    Usage {
+        #[command(subcommand)]
+        action: Option<UsageAction>,
     },
     /// Serve brain to an AI tool over MCP on stdin and stdout.
     Mcp {
@@ -188,6 +194,14 @@ enum InboxAction {
     },
 }
 
+#[derive(Subcommand)]
+enum UsageAction {
+    /// Send the day's counts to omit (the default).
+    On,
+    /// Keep the counts on this machine only.
+    Off,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum DoorArg {
     ClaudeCode,
@@ -248,6 +262,13 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             };
             let w = capture::write(&vault, &config.me, clock.today(), &c)?;
             println!("{}", terminal(&w.rel));
+            let cli = Some(Door::Cli);
+            usage::count(
+                &usage::store(dirs),
+                clock.today(),
+                Event::CaptureWritten,
+                cli,
+            );
             Ok(())
         }
         Command::Correct { target, text } => {
@@ -256,8 +277,19 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             let today = clock.today();
             let w = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
             println!("{}", terminal(&w.rel));
+            usage::count(
+                &usage::store(dirs),
+                today,
+                Event::Correction,
+                Some(Door::Cli),
+            );
             Ok(())
         }
+        Command::Usage { action } => match action {
+            None => usage::show(dirs, clock.today()),
+            Some(UsageAction::On) => usage::set(dirs, true),
+            Some(UsageAction::Off) => usage::set(dirs, false),
+        },
         Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Mcp { door } => mcp::run(dirs, clock, door.into()),
         Command::Show { target } => show(dirs, &target),
@@ -289,11 +321,18 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         } => import_learning_loop(dirs, clock.today(), args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
-            match action {
-                None => inbox::list(&vault),
-                Some(InboxAction::Keep { target, to }) => inbox::keep(&vault, &target, to),
-                Some(InboxAction::Skip { target }) => inbox::skip(&vault, &target),
-            }
+            let (result, event) = match action {
+                None => return inbox::list(&vault),
+                Some(InboxAction::Keep { target, to }) => {
+                    (inbox::keep(&vault, &target, to), Event::CaptureKept)
+                }
+                Some(InboxAction::Skip { target }) => {
+                    (inbox::skip(&vault, &target), Event::CaptureSkipped)
+                }
+            };
+            result?;
+            usage::count(&usage::store(dirs), clock.today(), event, Some(Door::Cli));
+            Ok(())
         }
     }
 }
@@ -346,6 +385,7 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     Config {
         vault: vault.root.clone(),
         me: me.clone(),
+        usage: Default::default(),
     }
     .save(dirs)?;
     println!(
@@ -461,22 +501,11 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
         },
         rerank: s.rerank,
     };
+    let started = std::time::Instant::now();
     let found = idx.search(&q, provider.as_deref())?;
+    let ms = started.elapsed().as_millis();
+    usage::searched(&usage::store(dirs), clock, Door::Cli, text, &found, ms);
     let gap = is_gap(&found);
-    if gap {
-        let area = gaps::area(&found.hits);
-        let logged = activity(dirs).and_then(|a| {
-            a.log_gap(clock.now(), Door::Cli, text, area.as_deref())?;
-            a.count(clock.today(), Event::GapLogged, Some(Door::Cli))
-        });
-        // A gap that cannot be written never fails the search.
-        if let Err(e) = logged {
-            eprintln!(
-                "{}",
-                terminal(&format!("brain: the gap was not logged: {e:#}"))
-            );
-        }
-    }
     let hits = found.hits;
     if s.json {
         let rows: Vec<_> = hits

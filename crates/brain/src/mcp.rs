@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use brain_index::activity::Activity;
 use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
 use brain_platform::clock::Clock;
@@ -25,8 +24,8 @@ use serde::Deserialize;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::daemon::writer_lock;
-use crate::gaps;
 use crate::out::terminal;
+use crate::usage;
 
 pub const INSTRUCTIONS: &str = "brain holds this person's own notes and what their team shares, kept on this computer.
 Before you answer a question about their work, their business, their clients or how something is done here, call search_my_brain (or search_company for what the team shares), answer from the notes you find, and name the note you used.
@@ -112,27 +111,19 @@ impl State {
             scope,
             rerank: false,
         };
+        let started = std::time::Instant::now();
         let found = self
             .index
             .lock()
             .map_err(|_| anyhow::anyhow!("the index is unavailable"))?
             .search(&q, provider.as_deref())?;
+        let ms = started.elapsed().as_millis();
+        usage::searched(&self.activity, &*self.clock, self.door, query, &found, ms);
         let mut out = Vec::new();
         if !Lock::is_held(&self.lock) {
             out.push(NO_DAEMON.to_string());
         }
         if is_gap(&found) {
-            let area = gaps::area(&found.hits);
-            let logged = Activity::open(&self.activity).and_then(|a| {
-                a.log_gap(self.clock.now(), self.door, query, area.as_deref())?;
-                a.count(self.clock.today(), Event::GapLogged, Some(self.door))
-            });
-            if let Err(e) = logged {
-                eprintln!(
-                    "{}",
-                    terminal(&format!("brain: the gap was not logged: {e:#}"))
-                );
-            }
             out.push(GAP.to_string());
             if !found.hits.is_empty() {
                 out.push("Closest notes, which may not answer it:".into());
@@ -250,6 +241,12 @@ impl Server {
                 corrects: None,
             };
             let w = capture::write(&s.vault, &s.me, s.clock.today(), &c)?;
+            usage::count(
+                &s.activity,
+                s.clock.today(),
+                Event::CaptureWritten,
+                Some(s.door),
+            );
             let title = a.title.as_deref().unwrap_or_default();
             Ok(format!(
                 "Saved to the inbox: {}",
@@ -279,6 +276,12 @@ impl Server {
                 &a.target,
                 &a.correction,
             )?;
+            usage::count(
+                &s.activity,
+                s.clock.today(),
+                Event::Correction,
+                Some(s.door),
+            );
             Ok(format!(
                 "Saved the correction to the inbox: {}",
                 fence_ref(

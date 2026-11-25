@@ -10,6 +10,7 @@ mod inbox;
 mod mcp;
 mod out;
 mod runtime;
+mod usage;
 
 use std::process::ExitCode;
 

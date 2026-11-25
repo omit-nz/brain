@@ -6,18 +6,20 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use brain_index::activity::Activity;
 use brain_index::{Index, Reindexed, embed};
 use brain_note::Vault;
 use brain_platform::clock::Clock;
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::Lock;
+use brain_report::Event;
 use notify::event::ModifyKind;
 use notify::{EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, NoCache};
 
 use crate::config::Config;
-use crate::gaps;
 use crate::out::terminal;
+use crate::{gaps, usage};
 
 pub const WRITER_LOCK: &str = "writer.lock";
 /// A full pass this long after the last, for whatever the watcher missed.
@@ -86,6 +88,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
         config, tx, NoCache,
     )?;
     watcher.watch(&vault.root, RecursiveMode::Recursive)?;
+    let store = usage::store(dirs);
     let mut passes = 0u64;
     let mut due = true;
     let mut embedding = false;
@@ -112,6 +115,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     eprintln!("{}", terminal(&format!("pass {passes} failed: {e:#}")));
+                    usage::count(&store, clock.today(), Event::ErrorIndex, None);
                     next = Instant::now() + RETRY;
                     // A vault folder that went away and came back is a new folder to the
                     // watcher on some systems; watching it again costs nothing when it is not.
@@ -125,7 +129,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
             if changed && last_recheck.is_none_or(|t: Instant| t.elapsed() >= RECHECK_EVERY) {
                 changed = false;
                 last_recheck = Some(Instant::now());
-                let filled = crate::cli::activity(dirs)
+                let filled = Activity::open(&store)
                     .and_then(|a| gaps::recheck(&idx, &a, provider.as_deref(), clock));
                 match filled {
                     Ok(n) => eprintln!("recheck: {n} gaps filled"),
@@ -139,11 +143,13 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                 Ok(e) => {
                     if let Some(why) = &e.stopped {
                         eprintln!("{}", terminal(&format!("embedding stopped: {why}")));
+                        usage::count(&store, clock.today(), Event::ErrorEmbed, None);
                     }
                     e.pending > 0 && e.stopped.is_none()
                 }
                 Err(e) => {
                     eprintln!("{}", terminal(&format!("embedding failed: {e:#}")));
+                    usage::count(&store, clock.today(), Event::ErrorEmbed, None);
                     false
                 }
             };
@@ -153,13 +159,19 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
         } else {
             next.saturating_duration_since(Instant::now())
         };
-        due = match rx.recv_timeout(wait) {
-            Ok(event) => matters(&vault.root, &event),
-            Err(RecvTimeoutError::Timeout) => Instant::now() >= next,
+        let mut events = Vec::new();
+        match rx.recv_timeout(wait) {
+            Ok(event) => events.push(event),
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the vault watcher stopped"),
-        };
-        while let Ok(event) = rx.try_recv() {
-            due |= matters(&vault.root, &event);
+        }
+        events.extend(rx.try_iter());
+        due = Instant::now() >= next;
+        for event in &events {
+            if event.is_err() {
+                usage::count(&store, clock.today(), Event::ErrorWatch, None);
+            }
+            due |= matters(&vault.root, event);
         }
     }
 }
