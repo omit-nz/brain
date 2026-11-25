@@ -310,8 +310,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         }
         Command::Usage { action } => match action {
             None => usage::show(dirs, clock.today()),
-            Some(UsageAction::On) => usage::set(dirs, true),
-            Some(UsageAction::Off) => usage::set(dirs, false),
+            Some(UsageAction::On) => usage::set(dirs, &*clock, true),
+            Some(UsageAction::Off) => usage::set(dirs, &*clock, false),
             Some(UsageAction::Send) => {
                 println!("{}", usage::send_due(dirs, &index(dirs)?, &*clock)?.line());
                 Ok(())
@@ -418,10 +418,17 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             create_dir_private(&path)?;
         }
     }
+    // A second init keeps the person's usage choice; an unreadable config fails rather than
+    // quietly switching sending back on.
+    let usage = if dirs.config.join(crate::config::FILE).exists() {
+        Config::load(dirs)?.usage
+    } else {
+        Default::default()
+    };
     Config {
         vault: vault.root.clone(),
         me: me.clone(),
-        usage: Default::default(),
+        usage,
     }
     .save(dirs)?;
     println!(

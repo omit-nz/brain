@@ -12,7 +12,7 @@ fn store() -> (tempfile::TempDir, Activity) {
 fn counts_add_up_by_day_kind_and_door() {
     let (_dir, a) = store();
     let (d1, d2) = (date(2026, 11, 25), date(2026, 11, 26));
-    assert_eq!(a.first_day().unwrap(), None);
+    assert_eq!(a.send_from().unwrap(), None);
     a.count(d1, Event::Question, Some(Door::Cli)).unwrap();
     a.count(d1, Event::Question, Some(Door::Cli)).unwrap();
     a.count(d1, Event::Question, Some(Door::ClaudeCode))
@@ -33,7 +33,7 @@ fn counts_add_up_by_day_kind_and_door() {
         a.day(d2).unwrap(),
         vec![(Event::Question, Some(Door::Cli), 1)]
     );
-    assert_eq!(a.first_day().unwrap(), Some(d1));
+    assert_eq!(a.send_from().unwrap(), Some(d1));
 }
 
 #[test]
@@ -72,4 +72,17 @@ fn a_gap_is_logged_and_filled_once() {
     let still = a.open_gaps(10).unwrap();
     assert_eq!(still.len(), 1);
     assert_eq!(a.filled_since(t1).unwrap(), 1);
+}
+
+#[test]
+fn a_day_seen_off_holds_back_itself_and_every_day_before() {
+    let (_dir, a) = store();
+    a.count(date(2026, 11, 20), Event::Question, None).unwrap();
+    a.off(date(2026, 11, 22)).unwrap();
+    a.off(date(2026, 11, 21)).unwrap();
+    assert_eq!(
+        a.send_from().unwrap(),
+        Some(date(2026, 11, 23)),
+        "the latest off day holds"
+    );
 }

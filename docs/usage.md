@@ -26,7 +26,7 @@ A question no note answered is kept as a gap, with its words, so brain can tell 
 
 `brain usage` says whether sending is on and where to, then today's counts, one `kind  door  n` line each, then every report sent: its day, when it was made and what came of it, the report exactly as it left, and its signature.
 
-Sending is on by default. `brain usage off` stops the sending and keeps counting on this machine only; `brain usage on` turns sending back on. The setting lives in `config.toml` under `[usage]`, and brain reads it before every send, so a running daemon stops at its next one.
+Sending is on by default. `brain usage off` stops the sending and keeps counting on this machine only; `brain usage on` turns sending back on. A day that had sending off for any part of it is never sent, and nor is any day before it, so counts made while off stay on this machine after you switch back on. The setting lives in `config.toml` under `[usage]`, and brain reads it before every send, so a running daemon stops at its next one; if you change it by hand rather than with `brain usage off`, only the days up to the last send that found it off are held back. Running `brain init` again keeps the setting.
 
 A count that cannot be saved never stops what you were doing: brain says so in one line and carries on.
 

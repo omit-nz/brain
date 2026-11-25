@@ -55,6 +55,21 @@ fn usage_off_is_saved() {
 }
 
 #[test]
+fn a_second_init_keeps_usage_off() {
+    let h = Home::new();
+    h.init();
+    h.run(&["usage", "off"]);
+    h.run(&[
+        "init",
+        "--me",
+        "robin",
+        "--vault",
+        h.vault.path().to_str().unwrap(),
+    ]);
+    assert!(h.run(&["usage"]).starts_with("Usage sending: off"));
+}
+
+#[test]
 fn counting_continues_while_sending_is_off() {
     let h = indexed(&[("a.md", "mailbox notes\n")]);
     h.run(&["usage", "off"]);
@@ -496,6 +511,35 @@ fn switched_off_sends_nothing() {
     send(&h);
     assert!(e.got().is_empty());
     assert!(ledger(&h).is_empty());
+}
+
+#[test]
+fn days_counted_while_off_are_never_sent() {
+    let h = counted(&["2026-11-19"]);
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    on(&h, "2026-11-20", &["usage", "off"]);
+    on(&h, "2026-11-21", &["add", "a note"]);
+    on(&h, "2026-11-22", &["usage", "on"]);
+    on(&h, "2026-11-23", &["add", "a note"]);
+    send(&h);
+    let sent: Vec<String> = e.got().iter().map(Received::day).collect();
+    assert_eq!(
+        sent,
+        ["2026-11-23", "2026-11-24"],
+        "a day even partly off never leaves"
+    );
+}
+
+#[test]
+fn a_send_that_finds_sending_off_holds_back_the_days_before() {
+    let h = counted(&["2026-11-21"]);
+    on(&h, "2026-11-22", &["usage", "send"]);
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    send(&h);
+    let sent: Vec<String> = e.got().iter().map(Received::day).collect();
+    assert_eq!(sent, ["2026-11-23", "2026-11-24"]);
 }
 
 /// Runs `brain daemon` at today's fixed clock until it prints its send line, and returns its

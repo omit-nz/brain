@@ -156,14 +156,32 @@ impl Activity {
         Ok(out)
     }
 
-    pub fn first_day(&self) -> anyhow::Result<Option<Date>> {
+    /// Remembers that sending was off at some point on `day`, so neither it nor any day before it
+    /// is ever sent: counts made while off stay on this machine.
+    pub fn off(&self, day: Date) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('usage_off_through', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = max(value, excluded.value)",
+            [day.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// The first day that may be sent: the first day anything was counted, but never a day on or
+    /// before one when sending was off.
+    pub fn send_from(&self) -> anyhow::Result<Option<Date>> {
+        let first = self.meta_day("usage_first_day")?;
+        let off = self.meta_day("usage_off_through")?;
+        Ok(match (first, off) {
+            (Some(first), Some(off)) => Some(first.max(off.tomorrow()?)),
+            (first, _) => first,
+        })
+    }
+
+    fn meta_day(&self, key: &str) -> anyhow::Result<Option<Date>> {
         let day: Option<String> = self
             .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'usage_first_day'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?;
         Ok(day.map(|d| d.parse()).transpose()?)
     }

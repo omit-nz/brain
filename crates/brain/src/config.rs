@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Days from a note's creation to its first review.
 pub const REVIEW_DAYS: i64 = 90;
 
-const FILE: &str = "config.toml";
+pub(crate) const FILE: &str = "config.toml";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {

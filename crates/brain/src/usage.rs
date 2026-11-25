@@ -143,20 +143,24 @@ pub fn send_due(dirs: &Dirs, index: &Index, clock: &dyn Clock) -> anyhow::Result
         return Ok(out);
     };
     let activity = Activity::open(&store(dirs))?;
-    let Some(first) = activity.first_day()? else {
-        return Ok(out);
-    };
     let today = clock.today();
-    let mut day = first.max(today.checked_sub(CATCH_UP_DAYS.days())?);
+    // Nothing counted yet leaves nothing to send: the window starts today.
+    let mut day =
+        (activity.send_from()?.unwrap_or(today)).max(today.checked_sub(CATCH_UP_DAYS.days())?);
     let client = reqwest::blocking::Client::builder()
         .timeout(SEND_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut key = None;
-    while day < today {
-        // Read before every day, so `brain usage off` stops even a run already going.
+    loop {
+        // Read before every day, so `brain usage off` stops even a run already going, and a run
+        // that finds sending off keeps today's counts and every earlier one here for good.
         let config = Config::load(dirs)?;
         if !config.usage.send {
+            activity.off(today)?;
+            break;
+        }
+        if day >= today {
             break;
         }
         let row = match activity.send(day)? {
@@ -288,11 +292,12 @@ fn install_key(dirs: &Dirs) -> anyhow::Result<SigningKey> {
     Ok(SigningKey::from_bytes(&bytes))
 }
 
-/// `brain usage on|off`.
-pub fn set(dirs: &Dirs, send: bool) -> anyhow::Result<()> {
+/// `brain usage on|off`. Either way today had sending off for part of it, so it is never sent.
+pub fn set(dirs: &Dirs, clock: &dyn Clock, send: bool) -> anyhow::Result<()> {
     let mut config = Config::load(dirs)?;
     config.usage.send = send;
     config.save(dirs)?;
+    Activity::open(&store(dirs))?.off(clock.today())?;
     println!("Usage sending: {}", if send { "on" } else { "off" });
     Ok(())
 }
