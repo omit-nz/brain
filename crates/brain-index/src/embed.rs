@@ -37,8 +37,13 @@ pub fn runtime() -> anyhow::Result<PathBuf> {
     Ok(ort)
 }
 
-/// The bge-small provider over the ONNX Runtime brain ships.
+/// The bge-small provider over the ONNX Runtime brain ships. A debug build given
+/// `BRAIN_TEST_EMBEDDER` gets the hash embedder instead, so a test can drive the commands that
+/// embed without a model download; release builds never read it.
 pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+    if cfg!(debug_assertions) && std::env::var_os("BRAIN_TEST_EMBEDDER").is_some() {
+        return Ok(Box::new(HashEmbedder::new(8)));
+    }
     runtime()?;
     let (model, tokenizer) = ensure_model()?;
     Ok(Box::new(BgeSmallProvider::from_files(&model, &tokenizer)?))

@@ -294,6 +294,7 @@ fn index_defers_to_a_running_daemon() {
         out.contains("brain's daemon keeps the index up to date"),
         "{out}"
     );
+    assert!(out.contains("or another brain command"), "{out}");
 }
 
 #[test]
@@ -345,6 +346,66 @@ fn import_leaves_indexing_to_a_running_daemon() {
     let again = import();
     assert!(again.contains("0 new, 1 updated"), "{again}");
     assert!(again.contains("0 conflicts"), "{again}");
+}
+
+/// A folder of notes moved in from outside the vault: Windows reports only the folder's arrival.
+#[test]
+fn a_folder_of_notes_moved_in_is_indexed() {
+    let h = Home::new();
+    h.init();
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    let outside = h.vault.path().with_extension("outside");
+    fs::create_dir_all(&outside).unwrap();
+    for n in 0..3 {
+        fs::write(
+            outside.join(format!("m{n}.md")),
+            note_with_id(n, "moved in"),
+        )
+        .unwrap();
+    }
+    fs::rename(&outside, h.vault.path().join("moved")).unwrap();
+    wait_for_notes(&h, &d, 3);
+}
+
+/// The daemon embeds a batch a turn and keeps turning while notes are pending, without waiting
+/// for the next pass.
+#[test]
+fn the_daemon_embeds_every_pending_note_a_batch_at_a_time() {
+    let h = Home::new();
+    h.init();
+    for n in 0..100 {
+        h.put(&format!("n{n:03}.md"), &note_with_id(n, "to embed"));
+    }
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_EMBEDDER", "1")]);
+    until(
+        "100 embedded",
+        || h.json(&["status", "--json"])["embedded"] == 100,
+        || d.stderr(),
+    );
+    assert_eq!(d.passes(), 1, "{}", d.stderr());
+}
+
+/// The vault moved away and back (an unmounted disk, a rename undone): the failed pass is tried
+/// again soon, and a note saved after the return is indexed.
+#[test]
+fn the_daemon_follows_its_vault_away_and_back() {
+    let h = Home::new();
+    h.init();
+    h.put("a.md", &note_with_id(1, "before"));
+    let d = Daemon::start(&h);
+    wait_for_notes(&h, &d, 1);
+    let away = h.vault.path().with_extension("away");
+    fs::rename(h.vault.path(), &away).unwrap();
+    until(
+        "a failed pass",
+        || d.stderr().contains("failed"),
+        || d.stderr(),
+    );
+    fs::rename(&away, h.vault.path()).unwrap();
+    assert_eq!(notes(&h), 1, "the index outlived the vault's absence");
+    h.put("b.md", &note_with_id(2, "after"));
+    wait_for_notes(&h, &d, 2);
 }
 
 #[test]

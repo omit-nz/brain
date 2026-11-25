@@ -97,21 +97,29 @@ impl Index {
         self.reindex_with(vault, None)
     }
 
-    /// As `reindex`, but a note saved after `settled_before` that still needs an id is left for a
-    /// later pass, so an id is never written into a note someone is typing.
+    /// As `reindex`, but a note saved after `settled_before` (and not after `now`) that still
+    /// needs an id is left for a later pass, so an id is never written into a note someone is
+    /// typing. A note stamped later than `now` came from another clock, and gets its id.
     pub fn reindex_settled(
         &mut self,
         vault: &Vault,
         settled_before: jiff::Timestamp,
+        now: jiff::Timestamp,
     ) -> anyhow::Result<Reindexed> {
-        self.reindex_with(vault, Some(settled_before))
+        self.reindex_with(vault, Some(settled_before..=now))
     }
 
     fn reindex_with(
         &mut self,
         vault: &Vault,
-        settled_before: Option<jiff::Timestamp>,
+        typing: Option<std::ops::RangeInclusive<jiff::Timestamp>>,
     ) -> anyhow::Result<Reindexed> {
+        // A vault folder that is gone would read as a vault with no notes and empty the index.
+        anyhow::ensure!(
+            vault.root.is_dir(),
+            "the vault folder {} is not there; the index is left as it was",
+            vault.root.display()
+        );
         let abort_after = abort_after();
         let existing = self.rows()?;
         // Rows written under other reading rules are re-derived, changed or not.
@@ -215,7 +223,11 @@ impl Index {
         let mut young = HashSet::new();
         for w in &mut work {
             if w.note.id.is_none()
-                && settled_before.is_some_and(|t| i128::from(w.mtime_ns) > t.as_nanosecond())
+                && typing.as_ref().is_some_and(|t| {
+                    t.contains(
+                        &jiff::Timestamp::from_nanosecond(w.mtime_ns.into()).unwrap_or_default(),
+                    )
+                })
             {
                 young.insert(w.key.clone());
                 continue;

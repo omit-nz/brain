@@ -232,6 +232,7 @@ impl Lock {
                     if probe.try_lock_shared().is_err() || std::time::Instant::now() > deadline {
                         return Ok(None);
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
             }
         }

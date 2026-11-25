@@ -87,15 +87,19 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     let mut passes = 0u64;
     let mut due = true;
     let mut embedding = false;
+    let mut rewatch = false;
     let mut next = Instant::now();
     loop {
         if due {
             passes += 1;
+            if rewatch && watcher.watch(&vault.root, RecursiveMode::Recursive).is_ok() {
+                rewatch = false;
+            }
             match clock
                 .now()
                 .checked_sub(SETTLE)
                 .map_err(anyhow::Error::from)
-                .and_then(|settled| idx.reindex_settled(&vault, settled))
+                .and_then(|settled| idx.reindex_settled(&vault, settled, clock.now()))
             {
                 Ok(r) => {
                     eprintln!("{}", terminal(&format!("pass {passes}: {}", summary(&r))));
@@ -103,7 +107,11 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     eprintln!("{}", terminal(&format!("pass {passes} failed: {e:#}")));
-                    next = Instant::now() + BACKSTOP;
+                    next = Instant::now() + RETRY;
+                    // A vault folder that went away and came back is a new folder to the
+                    // watcher on some systems; watching it again costs nothing when it is not.
+                    let _ = watcher.unwatch(&vault.root);
+                    rewatch = true;
                 }
             }
             embedding = provider.is_some();
@@ -140,8 +148,9 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
 }
 
 /// Whether a batch of watcher events can change the index. The exact events an editor's save
-/// makes differ by system and editor, so any `.md` path counts, and so does any rename or
-/// removal, which can take a folder of notes with it; nothing inside a hidden folder does.
+/// makes differ by system and editor, so any `.md` path counts, and so does any creation, rename
+/// or removal, which can bring or take a folder of notes (Windows reports a folder moved in as
+/// one creation); nothing inside a hidden folder does.
 fn matters(root: &Path, result: &DebounceEventResult) -> bool {
     let Ok(events) = result else {
         return true;
@@ -159,7 +168,9 @@ fn matters(root: &Path, result: &DebounceEventResult) -> bool {
                     && (p.extension().is_some_and(|x| x == "md")
                         || matches!(
                             e.kind,
-                            EventKind::Modify(ModifyKind::Name(_)) | EventKind::Remove(_)
+                            EventKind::Create(_)
+                                | EventKind::Modify(ModifyKind::Name(_))
+                                | EventKind::Remove(_)
                         ))
             })
     })

@@ -337,6 +337,10 @@ fn an_import_beside_a_running_writer_writes_ids_and_leaves_the_index_alone() {
     let _writer = brain_platform::fs::Lock::acquire(&data.join("writer.lock")).unwrap();
     let out = i.import(&[]);
     assert!(out.contains("brain's daemon will index them"), "{out}");
+    assert!(
+        out.contains("with no daemon running, run `brain index`"),
+        "the writer here is no daemon: {out}"
+    );
     for rel in ["3-permanent/plain.md", "0-inbox/plain.md"] {
         let copy = i.copy(rel);
         let id = line(&copy, "id").unwrap_or_else(|| panic!("{rel} has no id:\n{copy}"));

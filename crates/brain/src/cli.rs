@@ -312,7 +312,9 @@ fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let vault = Vault::open(&config.vault)?;
     let Some(_lock) = Lock::try_acquire(&writer_lock(dirs))? else {
-        println!("brain's daemon keeps the index up to date");
+        println!(
+            "brain's daemon keeps the index up to date, or another brain command is updating it now"
+        );
         return Ok(());
     };
     let mut idx = index(dirs)?;
@@ -650,7 +652,9 @@ fn import_learning_loop(
     import::settle(&mut ledger, &dst, &written)?;
     ledger.save(dirs)?;
     if reindexed?.is_none() {
-        println!("brain's daemon will index them\n");
+        println!(
+            "brain's daemon will index them; with no daemon running, run `brain index` once the other brain command finishes\n"
+        );
     }
     println!("{}", terminal(&import::report(&dst, today).to_string()));
     Ok(())

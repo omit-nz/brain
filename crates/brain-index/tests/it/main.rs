@@ -359,7 +359,7 @@ fn an_id_is_not_written_into_a_note_saved_moments_ago() {
     let mut idx = Index::open(&f.db()).unwrap();
 
     let early = idx
-        .reindex_settled(&vault, saved - jiff::SignedDuration::from_secs(5))
+        .reindex_settled(&vault, saved - jiff::SignedDuration::from_secs(5), saved)
         .unwrap();
     assert_eq!(f.read("fresh.md"), "being typed\n");
     assert_eq!((early.deferred, early.ids_written), (1, 0));
@@ -370,11 +370,58 @@ fn an_id_is_not_written_into_a_note_saved_moments_ago() {
     );
 
     let later = idx
-        .reindex_settled(&vault, saved + jiff::SignedDuration::from_secs(5))
+        .reindex_settled(
+            &vault,
+            saved + jiff::SignedDuration::from_secs(5),
+            saved + jiff::SignedDuration::from_secs(10),
+        )
         .unwrap();
     assert_eq!((later.deferred, later.ids_written), (0, 1));
     assert!(f.read("fresh.md").starts_with("---\nid: "));
     assert_eq!(idx.note_count().unwrap(), 2);
+}
+
+/// A clock behind the file's (a sync, a restore) must not leave a note unindexed for good.
+#[test]
+fn a_note_saved_in_the_future_is_not_young_forever() {
+    let f = Fixture::new();
+    f.put("ahead.md", "from a machine whose clock runs ahead\n");
+    let now = jiff::Timestamp::try_from(
+        fs::metadata(f.vault.path().join("ahead.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+    )
+    .unwrap();
+    let ahead = std::time::SystemTime::from(now + jiff::SignedDuration::from_hours(1));
+    fs::File::options()
+        .write(true)
+        .open(f.vault.path().join("ahead.md"))
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    let mut idx = f.index();
+    let r = idx
+        .reindex_settled(&f.vault(), now - jiff::SignedDuration::from_secs(5), now)
+        .unwrap();
+    assert_eq!((r.deferred, r.ids_written), (0, 1));
+    assert_eq!(idx.note_count().unwrap(), 1);
+}
+
+/// A vault folder that is gone (unmounted, renamed) is an error, never a vault with no notes.
+#[test]
+fn a_missing_vault_folder_removes_nothing() {
+    let f = Fixture::new();
+    f.put("a.md", "kept\n");
+    let vault = f.vault();
+    let mut idx = f.index();
+    idx.reindex(&vault).unwrap();
+    let away = f.vault.path().with_extension("away");
+    fs::rename(f.vault.path(), &away).unwrap();
+    let r = idx.reindex(&vault);
+    fs::rename(&away, f.vault.path()).unwrap();
+    assert!(r.is_err(), "{:?}", r.map(|r| r.removed));
+    assert_eq!(idx.note_count().unwrap(), 1);
 }
 
 /// Run only as a child of `a_killed_reindex_resumes_clean`, which sets the paths and the abort.
