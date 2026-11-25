@@ -1,0 +1,13 @@
+name = "brain-usage"
+main = "build/index.js"
+compatibility_date = "2026-11-01"
+
+[build]
+command = "worker-build --release"
+
+[[d1_databases]]
+binding = "USAGE_DB"
+database_name = "brain-usage"
+# Set when the database is created at deploy.
+database_id = "create-at-deploy"
+migrations_dir = "migrations"

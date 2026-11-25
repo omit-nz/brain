@@ -48,6 +48,18 @@ jobs:
       - run: cargo nextest run --workspace --locked
       - run: cargo test --doc --workspace --locked
 
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+      # The only lint that sees the Worker shell, which builds for wasm32 alone.
+      - run: cargo clippy -p brain-usage --target wasm32-unknown-unknown --locked -- -D warnings
+      - run: cargo build -p brain-usage --target wasm32-unknown-unknown --release --locked
+
   repo:
     runs-on: ubuntu-24.04
     steps:

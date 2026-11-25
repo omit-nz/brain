@@ -12,6 +12,7 @@ const LAYERS: &[&str] = &[
     "brain-note",
     "brain-index",
     "brain",
+    "brain-usage",
 ];
 const DB_RS: &str = "crates/brain-index/src/db.rs";
 
