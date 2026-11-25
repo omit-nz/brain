@@ -65,6 +65,7 @@ fn archive_of(
 /// One entry of a release folder.
 enum Entry<'a> {
     File(&'a [u8]),
+    #[cfg(target_os = "macos")]
     Link(&'a Path),
 }
 
@@ -93,6 +94,7 @@ fn archive_with(
                     h.set_cksum();
                     tar.append_data(&mut h, path, *body).unwrap();
                 }
+                #[cfg(target_os = "macos")]
                 Entry::Link(target) => {
                     h.set_entry_type(tar::EntryType::Symlink);
                     h.set_size(0);
