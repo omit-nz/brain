@@ -9,8 +9,10 @@ use std::collections::BTreeMap;
 use std::env::consts::{ARCH, DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX, OS};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
+use brain_platform::fs::Lock;
 use self_update::http::HeaderMap;
 use self_update::http_client::{HttpClient, HttpResponse};
 use self_update::{Release, ReleaseAsset, ReleaseSource};
@@ -20,6 +22,16 @@ use self_update::{Release, ReleaseAsset, ReleaseSource};
 pub const PROTOCOL: u32 = 1;
 
 const RELEASE_KEY: [u8; 32] = *include_bytes!("keys/release.pub");
+
+/// A release archive is tens of megabytes; five minutes is under 1 Mbit/s for it.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The release listing is a few kilobytes.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Held beside `brain-current` (never inside it: the swap renames that folder) for a whole
+/// install, so the daemon's own update and a `brain update` run by hand never swap at once.
+const UPDATE_LOCK: &str = "update.lock";
 
 /// The target triple this machine's releases are built for.
 pub fn host_target() -> anyhow::Result<&'static str> {
@@ -116,6 +128,10 @@ pub fn run(
     version: &str,
 ) -> anyhow::Result<String> {
     require(keys)?;
+    let install = current
+        .parent()
+        .context("the install folder has no parent")?;
+    let _lock = Lock::acquire(&install.join(UPDATE_LOCK)).context("waiting for another update")?;
     let status = configure(source, keys, current, version)?.update()?;
     Ok(status.version().to_string())
 }
@@ -130,6 +146,7 @@ fn configure(
     if let Some(client) = source.client() {
         b.http_client(client);
     }
+    b.timeout(source.timeout());
     Ok(b.source(source)
         .bin_name("brain")
         .target(host_target()?)
@@ -148,6 +165,11 @@ pub trait Source: ReleaseSource + 'static {
     /// The transport for this source's asset URLs; self_update's own HTTPS client when `None`.
     fn client(&self) -> Option<Arc<dyn HttpClient>> {
         None
+    }
+
+    /// The most one download may take, body included.
+    fn timeout(&self) -> Duration {
+        DOWNLOAD_TIMEOUT
     }
 }
 
@@ -240,6 +262,7 @@ impl ReleaseSource for GitHub {
         self_update::backends::github::ReleaseList::configure()
             .repo_owner("omit-nz")
             .repo_name("brain")
+            .timeout(LIST_TIMEOUT)
             .build()?
             .fetch()
             .map(|r| r.into_vec())

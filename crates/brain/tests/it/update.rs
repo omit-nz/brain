@@ -438,3 +438,85 @@ fn an_install_run_through_its_link_finds_its_runtime() {
         .map(|p| fs::canonicalize(p).unwrap());
     assert_eq!(found, Some(fs::canonicalize(&runtime).unwrap()), "{status}");
 }
+
+/// A release listing whose one asset sits on a host that accepts and never answers.
+struct Silent {
+    url: String,
+}
+
+impl ReleaseSource for Silent {
+    fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
+        let name = format!("brain-{NEW}-{}.tar.gz", update::host_target().unwrap());
+        Ok(vec![
+            Release::builder()
+                .version(NEW)
+                .name(format!("v{NEW}"))
+                .assets([ReleaseAsset::new(&name, &self.url)])
+                .build()?,
+        ])
+    }
+}
+
+impl update::Source for Silent {
+    fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+}
+
+#[test]
+fn a_silent_release_host_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/brain.tar.gz", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            held.push(stream);
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("brain-current");
+    fs::create_dir_all(&current).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = update::run(Silent { url }, &[public(&key(1))], &current, "0.1.0");
+        let _ = tx.send(r.is_err());
+    });
+    let failed = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the download never timed out");
+    assert!(failed);
+}
+
+#[test]
+fn an_update_waits_for_one_already_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), NEW, &[key(1)]);
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("brain-current");
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    let held = brain_platform::fs::Lock::acquire(&root.path().join("update.lock")).unwrap();
+    let name = a.file_name().unwrap().to_string_lossy().to_string();
+    let url = format!("{}/{name}", serve(a.clone(), 4));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = current.clone();
+    std::thread::spawn(move || {
+        let r = update::run(
+            Local {
+                assets: vec![(name, url)],
+            },
+            &[public(&key(1))],
+            &target,
+            "0.1.0",
+        );
+        let _ = tx.send(r.map_err(|e| e.to_string()));
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(2)).is_err(),
+        "an update ran while another held the install"
+    );
+    drop(held);
+    let r = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+    assert_eq!(r.unwrap(), NEW);
+    assert_eq!(installed(root.path()).0, format!("binary {NEW}"));
+}
