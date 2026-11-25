@@ -391,3 +391,17 @@ fn a_message_naming_install_sh_is_caught() {
     ];
     assert_eq!(naming_install_sh(&files), ["crates/brain/src/cli.rs"]);
 }
+
+/// The spec's one plain line (spec:353), in every page a person reads about what brain sends.
+#[test]
+fn the_privacy_line_is_on_every_page_about_what_brain_sends() {
+    let missing: Vec<&str> = ["README.md", "SECURITY.md", "docs/usage.md"]
+        .into_iter()
+        .filter(|page| {
+            !fs::read_to_string(root().join(page))
+                .unwrap()
+                .contains("omit looks at usage, never at notes.")
+        })
+        .collect();
+    assert_eq!(missing, Vec::<&str>::new());
+}

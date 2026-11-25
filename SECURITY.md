@@ -16,7 +16,7 @@ The answers below follow what NIST SP 800-218 v1.1 (the Secure Software Developm
 
 ## What brain sends
 
-brain sends one report a day of counts of its own use, signed with a key made for each install, and never note text, titles, questions or paths. `docs/usage.md` lists every field; `brain usage off` stops it.
+omit looks at usage, never at notes. brain sends one report a day of counts of its own use, signed with a key made for each install, and never note text, titles, questions or paths. `docs/usage.md` lists every field; `brain usage off` stops it.
 
 ## Not done yet
 

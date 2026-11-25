@@ -20,3 +20,7 @@ Then `brain update` moves you to each new release once its signature checks. [do
 - Claude Desktop: open `brain-<version>.mcpb` from the release page. The extension's copy of brain hands every connection to the brain you installed, so it needs the install above first.
 
 Both reach your notes through the same five tools: search your brain, search what your team shares, capture, correct and due.
+
+## What omit sees
+
+omit looks at usage, never at notes. brain sends one report a day of counts of its own use, and never note text, titles, questions or paths. [docs/usage.md](docs/usage.md) lists every field, and `brain usage off` stops it.
