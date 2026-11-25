@@ -454,10 +454,16 @@ fn installed_home() -> (Home, std::path::PathBuf) {
     (h, exe)
 }
 
-/// A release folder with 9.9.9 signed by `signer`, and the hex of the key the daemon trusts.
+/// A release folder with 9.9.9 signed by `signer`, and the hex of the key the daemon trusts. The
+/// release's brain writes the arguments it was started with to `started` in the brain home.
 fn releases(signer: u8) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
-    super::update::archive(dir.path(), "9.9.9", &[super::update::key(signer)]);
+    super::update::archive_holding(
+        dir.path(),
+        "9.9.9",
+        &[super::update::key(signer)],
+        "#!/bin/sh\necho \"brain 9.9.9 $*\" > \"$BRAIN_HOME/started\"\n",
+    );
     let trusted = super::update::public(&super::update::key(7));
     (dir, trusted.iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -493,14 +499,21 @@ fn stderr_with(h: &Home, line: &str) -> String {
     }
 }
 
-// Replacing the folder a running binary lives in is a Unix move; the daemon updates itself under
-// launchd, on macOS.
+// Replacing the folder a running binary lives in is a Unix move. The daemon starts the release it
+// installed in its own place, so a daemon run in a terminal keeps running as one under launchd does.
 #[cfg(unix)]
 #[test]
-fn the_daemon_installs_a_newer_release_and_exits_for_a_restart() {
+fn the_daemon_installs_a_newer_release_and_runs_it_in_its_place() {
     let (h, exe) = installed_home();
     let (dir, hex) = releases(7);
-    let mut d = updating_daemon(&h, &exe, dir.path(), &hex);
+    let d = updating_daemon(&h, &exe, dir.path(), &hex);
+    assert_runs_9_9_9(&h, d, dir.path());
+}
+
+/// Waits for the daemon `d` to install 9.9.9 from `releases` and become it, in the same process
+/// and with the same arguments.
+#[cfg(unix)]
+fn assert_runs_9_9_9(h: &Home, mut d: std::process::Child, releases: &std::path::Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let status = loop {
         if let Some(s) = d.try_wait().unwrap() {
@@ -512,9 +525,12 @@ fn the_daemon_installs_a_newer_release_and_exits_for_a_restart() {
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
-    assert_eq!(status.code(), Some(75));
-    stderr_with(&h, "installed brain 9.9.9; exiting for launchd to restart");
-    assert_eq!(std::fs::read_to_string(&exe).unwrap(), "binary 9.9.9");
+    stderr_with(h, "installed brain 9.9.9; starting it");
+    assert!(status.success(), "{status}");
+    assert_eq!(
+        std::fs::read_to_string(h.home.path().join("started")).unwrap(),
+        format!("brain 9.9.9 daemon --from-dir {}\n", releases.display())
+    );
 }
 
 #[test]
@@ -599,19 +615,8 @@ fn a_daemon_started_through_a_link_into_the_install_still_updates() {
     let link = link_dir.path().join("brain");
     std::os::unix::fs::symlink(&exe, &link).unwrap();
     let (dir, hex) = releases(7);
-    let mut d = updating_daemon(&h, &link, dir.path(), &hex);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let status = loop {
-        if let Some(s) = d.try_wait().unwrap() {
-            break s;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the daemon never exited"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    };
-    assert_eq!(status.code(), Some(75));
+    let d = updating_daemon(&h, &link, dir.path(), &hex);
+    assert_runs_9_9_9(&h, d, dir.path());
 }
 
 /// A vault on a disk not yet mounted at login: the daemon waits for it rather than exiting into

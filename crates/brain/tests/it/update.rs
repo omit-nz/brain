@@ -21,6 +21,16 @@ pub(crate) fn public(k: &SigningKey) -> [u8; 32] {
 /// signed by every key in `signers` (none: unsigned), with the archive's file name as the signing
 /// context.
 pub(crate) fn archive(dir: &Path, version: &str, signers: &[SigningKey]) -> PathBuf {
+    archive_holding(dir, version, signers, &format!("binary {version}"))
+}
+
+/// `archive`, with `exe` as the release's brain.
+pub(crate) fn archive_holding(
+    dir: &Path,
+    version: &str,
+    signers: &[SigningKey],
+    exe: &str,
+) -> PathBuf {
     let name = format!("brain-{version}-{}.tar.gz", update::host_target().unwrap());
     let unsigned = dir.join(format!("unsigned-{name}"));
     {
@@ -32,7 +42,7 @@ pub(crate) fn archive(dir: &Path, version: &str, signers: &[SigningKey]) -> Path
         for (path, body) in [
             (
                 format!("brain-{version}/{}", update::exe_name()),
-                format!("binary {version}"),
+                exe.to_string(),
             ),
             (
                 format!("brain-{version}/lib/{}", update::runtime_name()),

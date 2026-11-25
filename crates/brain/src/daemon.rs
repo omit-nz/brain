@@ -2,6 +2,7 @@
 //! watches the vault and brings the index up to date after any change that can matter, so a
 //! saved note is searchable seconds later. `brain index` and `brain import` defer to it.
 
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ use brain_note::Vault;
 use brain_platform::clock::Clock;
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::Lock;
+use brain_platform::process;
 use brain_report::Event;
 use notify::event::ModifyKind;
 use notify::{EventKind, EventKindMask, RecursiveMode};
@@ -33,8 +35,6 @@ const EMBED_BATCH: usize = 32;
 const RECHECK_EVERY: Duration = Duration::from_secs(3600);
 const SEND_EVERY: Duration = Duration::from_secs(3600);
 const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
-/// The exit that tells launchd (KeepAlive, SuccessfulExit false) to start the new binary.
-const EXIT_UPDATED: i32 = 75;
 
 pub fn writer_lock(dirs: &Dirs) -> PathBuf {
     dirs.data.join(WRITER_LOCK)
@@ -61,30 +61,31 @@ pub fn summary(r: &Reindexed) -> String {
 }
 
 /// Installs a newer signed release over the install this daemon runs from, through the same
-/// checks `brain update` makes, then exits for launchd to start it. A failure leaves this version
-/// running; a brain run from anywhere but its install (a dev build) never replaces anything.
-fn update_self(dirs: &Dirs, store: &Path, clock: &dyn Clock, from_dir: Option<&Path>) {
+/// checks `brain update` makes, and returns its version. A failure leaves this version running; a
+/// brain run from anywhere but its install (a dev build) never replaces anything.
+fn update_self(
+    dirs: &Dirs,
+    store: &Path,
+    clock: &dyn Clock,
+    from_dir: Option<&Path>,
+) -> Option<String> {
     let current = update::install_dir(&dirs.bin);
     if !update::runs_from(&current) {
         eprintln!("update: this brain was not run from its install, so it never updates itself");
-        return;
+        return None;
     }
     let version = env!("CARGO_PKG_VERSION");
     let installed = match from_dir {
         Some(dir) => newer(|| update::LocalDir(dir.to_path_buf()), &current, version),
         None => newer(|| update::GitHub, &current, version),
     };
-    match installed {
-        Ok(None) => {}
-        Ok(Some(v)) => {
-            eprintln!("installed brain {v}; exiting for launchd to restart");
-            std::process::exit(EXIT_UPDATED);
-        }
-        Err(e) => {
+    installed
+        .map_err(|e| {
             eprintln!("{}", terminal(&format!("update failed: {e:#}")));
             usage::count(store, clock.today(), Event::ErrorUpdate, None);
-        }
-    }
+        })
+        .ok()
+        .flatten()
 }
 
 /// The version installed over `current`, when a newer one was out.
@@ -100,7 +101,20 @@ fn newer<S: update::Source>(
     Ok((v != version).then_some(v))
 }
 
+/// Runs the daemon until it installs a newer release, then runs that release in its place with
+/// the same arguments: the same process under launchd, and the same terminal elsewhere.
 pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<()> {
+    let v = serve(dirs, clock, from_dir)?;
+    eprintln!("installed brain {v}; starting it");
+    let exe = update::install_dir(&dirs.bin).join(update::exe_name());
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    Err(anyhow::Error::new(process::replace(&exe, &args))
+        .context(format!("starting {}", exe.display())))
+}
+
+/// The daemon's work, holding the writer lock and the vault watcher, which it lets go of when it
+/// returns the version it installed.
+fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<String> {
     let path = writer_lock(dirs);
     let _lock = match Lock::try_acquire(&path)? {
         Some(lock) => lock,
@@ -210,7 +224,9 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::R
             }
             if last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY) {
                 last_update = Some(Instant::now());
-                update_self(dirs, &store, clock, from_dir);
+                if let Some(v) = update_self(dirs, &store, clock, from_dir) {
+                    return Ok(v);
+                }
             }
         }
         // One batch a turn, so a save made during a long first embed waits for one batch only.
