@@ -881,3 +881,28 @@ fn a_second_sender_says_another_is_sending() {
         "{said:?}"
     );
 }
+
+#[test]
+fn a_failed_day_shows_in_brain_usage_and_is_dropped_once_a_week_old() {
+    let h = counted(&["2026-11-18", "2026-11-26"]);
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    h.usage(&format!(
+        "send = true\nendpoint = \"http://127.0.0.1:{port}/v1/day\""
+    ));
+    on(&h, "2026-11-19", &["usage", "send"]);
+    let shown = h.run(&["usage"]);
+    assert!(
+        shown
+            .lines()
+            .any(|l| l.starts_with("2026-11-18") && l.contains("failed: ")),
+        "{shown}"
+    );
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    on(&h, "2026-11-27", &["usage", "send"]);
+    let sent: Vec<String> = e.got().iter().map(Received::day).collect();
+    assert_eq!(sent.first().map(String::as_str), Some("2026-11-20"), "{sent:?}");
+    assert!(!sent.contains(&"2026-11-18".to_string()), "{sent:?}");
+}
