@@ -107,6 +107,7 @@ jobs:
       - run: shellcheck scripts/*.sh pkg/scripts/postinstall
       - run: bash scripts/release-key.test.sh
       - run: bash scripts/install.test.sh
+      - run: bash scripts/verify-mcpb.test.sh
 
   gitleaks:
     runs-on: ubuntu-24.04

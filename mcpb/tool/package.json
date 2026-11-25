@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "The mcpb tool the release job packs and signs with, pinned with its whole tree.",
+  "dependencies": {
+    "@anthropic-ai/mcpb": "2.1.2"
+  }
+}
