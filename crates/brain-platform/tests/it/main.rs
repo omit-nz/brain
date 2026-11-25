@@ -20,11 +20,9 @@ fn create_new_never_replaces_a_file() {
     let leftovers = fs::read_dir(root.path().join("inbox")).unwrap().count();
     assert_eq!(leftovers, 1, "no temp file is left behind");
     let elsewhere = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(root.path().join("x")).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("linked")).unwrap();
-    #[cfg(unix)]
+    link_dir(elsewhere.path(), &root.path().join("linked"));
     assert!(create_new(root.path(), Path::new("linked/n.md"), b"x", Privacy::Normal).is_err());
+    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
 }
 use brain_platform::service::plist;
 
