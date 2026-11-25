@@ -42,7 +42,8 @@ pub fn runtime() -> anyhow::Result<PathBuf> {
 /// embed without a model download; release builds never read it.
 pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
     if cfg!(debug_assertions) && std::env::var_os("BRAIN_TEST_EMBEDDER").is_some() {
-        return Ok(Box::new(HashEmbedder::new(8)));
+        // Wide enough that unrelated texts land far apart, as a real model's do.
+        return Ok(Box::new(HashEmbedder::new(256)));
     }
     runtime()?;
     let (model, tokenizer) = ensure_model()?;

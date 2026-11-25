@@ -4,9 +4,10 @@
 
 Each crate depends only on the crates below it.
 
+- `brain-report`: the names brain counts its own use by (kinds of event and the door they came through), and later the usage report's types, signing and checking. No I/O, so the usage Worker builds it for wasm too.
 - `brain-platform`: everything that touches the operating system. Folders, atomic and private file writes, moves that refuse links, archiving instead of deleting, and the clock. Platform-specific code lives here and nowhere else.
 - `brain-note`: one note. Frontmatter that round-trips byte for byte, the one function that decides what a note may disclose, ids, wikilinks, the vault walk and the promote gate.
-- `brain-index`: the SQLite index beside each person's data, embeddings and hybrid search. The index is a cache: it can always be rebuilt from the vault.
+- `brain-index`: the SQLite index beside each person's data, embeddings and hybrid search. The index is a cache: it can always be rebuilt from the vault. Beside it, `activity.db` holds what the vault cannot give back: counts of brain's use per day, kind and door, and the gaps (questions no note answered, with their text, which stays on the machine). It is not a cache, so it is never deleted or rebuilt with the index. Both open through `db::open`, the one place a database connection opens; opening an up-to-date database only reads, so a reader never waits on the daemon's writes. Whether a search found an answer is decided once, by `is_gap`: with vectors, the closest note below `GAP_FLOOR` is a gap whatever words matched; without vectors, no matching word is.
 - `brain`: the binary. The CLI, the learning-loop import, the inbox, updates and the daemon; later the MCP server and the hooks.
 
 `brain-repo-rules` holds no code. Its tests read the repository itself and fail when a repo rule breaks.

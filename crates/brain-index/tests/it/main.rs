@@ -1,3 +1,4 @@
+mod activity;
 mod edges;
 mod embed;
 mod search;
@@ -379,6 +380,46 @@ fn an_id_is_not_written_into_a_note_saved_moments_ago() {
     assert_eq!((later.deferred, later.ids_written), (0, 1));
     assert!(f.read("fresh.md").starts_with("---\nid: "));
     assert_eq!(idx.note_count().unwrap(), 2);
+}
+
+/// While the daemon holds a long write, a reader (`brain status`, a search) still opens the
+/// index at once: opening an up-to-date index takes no write lock.
+#[test]
+fn opening_an_up_to_date_index_waits_for_no_writer() {
+    let f = Fixture::new();
+    drop(f.index());
+    let writer = f.sql();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let opened = Index::open(&f.db());
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(opened.is_ok(), "{:?}", opened.err());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "open waited {:?}",
+        started.elapsed()
+    );
+}
+
+/// A reader opening the index must not write it, so a status probe never takes a write lock.
+#[test]
+fn opening_the_index_twice_writes_nothing() {
+    let f = Fixture::new();
+    drop(f.index());
+    let snapshot = || {
+        let mut files: Vec<(String, Vec<u8>)> = fs::read_dir(f.data.path())
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                (p.display().to_string(), fs::read(&p).unwrap())
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    let before = snapshot();
+    drop(f.index());
+    assert_eq!(snapshot(), before);
 }
 
 /// A clock behind the file's (a sync, a restore) must not leave a note unindexed for good.

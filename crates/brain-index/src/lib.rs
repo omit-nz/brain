@@ -1,5 +1,7 @@
-//! The index: one SQLite file of notes, their text and links, rebuilt from the vault alone.
+//! The index: one SQLite file of notes, their text and links, rebuilt from the vault alone. Beside
+//! it, the activity store keeps what the index cannot rebuild: counts and gaps.
 
+pub mod activity;
 pub mod db;
 pub mod embed;
 mod reindex;
@@ -12,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub use embed::{Embedded, HashEmbedder};
 pub use reindex::Reindexed;
-pub use search::{Hit, Query, Scope};
+pub use search::{Found, GAP_FLOOR, Hit, Query, Scope, is_gap};
 
 pub struct Index {
     conn: Connection,
@@ -21,7 +23,7 @@ pub struct Index {
 impl Index {
     pub fn open(path: &Path) -> anyhow::Result<Index> {
         Ok(Index {
-            conn: db::open(path)?,
+            conn: db::open(path, db::INDEX_MIGRATIONS)?,
         })
     }
 

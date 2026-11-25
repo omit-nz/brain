@@ -16,6 +16,7 @@ use notify::{EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, NoCache};
 
 use crate::config::Config;
+use crate::gaps;
 use crate::out::terminal;
 
 pub const WRITER_LOCK: &str = "writer.lock";
@@ -26,6 +27,7 @@ const SETTLE: Duration = Duration::from_secs(5);
 /// When a pass left a young note without its id, the next pass comes this soon.
 const RETRY: Duration = Duration::from_secs(6);
 const EMBED_BATCH: usize = 32;
+const RECHECK_EVERY: Duration = Duration::from_secs(3600);
 
 pub fn writer_lock(dirs: &Dirs) -> PathBuf {
     dirs.data.join(WRITER_LOCK)
@@ -88,6 +90,8 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     let mut due = true;
     let mut embedding = false;
     let mut rewatch = false;
+    let mut changed = false;
+    let mut last_recheck: Option<Instant> = None;
     let mut next = Instant::now();
     loop {
         if due {
@@ -104,6 +108,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                 Ok(r) => {
                     eprintln!("{}", terminal(&format!("pass {passes}: {}", summary(&r))));
                     next = Instant::now() + if r.deferred > 0 { RETRY } else { BACKSTOP };
+                    changed |= r.added + r.changed + r.removed > 0;
                 }
                 Err(e) => {
                     eprintln!("{}", terminal(&format!("pass {passes} failed: {e:#}")));
@@ -115,6 +120,18 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                 }
             }
             embedding = provider.is_some();
+            // Each recheck searches every open gap, so it waits for a pass that changed notes and
+            // runs at most once an hour, never once per save.
+            if changed && last_recheck.is_none_or(|t: Instant| t.elapsed() >= RECHECK_EVERY) {
+                changed = false;
+                last_recheck = Some(Instant::now());
+                let filled = crate::cli::activity(dirs)
+                    .and_then(|a| gaps::recheck(&idx, &a, provider.as_deref(), clock));
+                match filled {
+                    Ok(n) => eprintln!("recheck: {n} gaps filled"),
+                    Err(e) => eprintln!("{}", terminal(&format!("recheck failed: {e:#}"))),
+                }
+            }
         }
         // One batch a turn, so a save made during a long first embed waits for one batch only.
         if embedding && let Some(p) = &provider {

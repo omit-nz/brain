@@ -215,6 +215,7 @@ dependencies = [
  "brain-index",
  "brain-note",
  "brain-platform",
+ "brain-report",
  "clap",
  "flate2",
  "globset",
@@ -240,6 +241,7 @@ dependencies = [
  "anyhow",
  "brain-note",
  "brain-platform",
+ "brain-report",
  "jiff",
  "libloading",
  "ll-core",
@@ -283,6 +285,14 @@ dependencies = [
  "tempfile",
  "toml",
  "yaml-rust2",
+]
+
+[[package]]
+name = "brain-report"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

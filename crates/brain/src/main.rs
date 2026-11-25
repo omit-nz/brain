@@ -3,6 +3,7 @@
 mod cli;
 mod config;
 mod daemon;
+mod gaps;
 mod import;
 mod inbox;
 mod out;

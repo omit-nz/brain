@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use brain_index::{Index, Query, Scope, embed};
+use brain_index::activity::Activity;
+use brain_index::{Index, Query, Scope, embed, is_gap};
 use brain_note::{Frontmatter, Kind, Split, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Lock, Privacy, create_dir_private, write_atomic};
 use brain_platform::service::{self, Launchctl};
+use brain_report::{Door, Event};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use jiff::ToSpan;
 use serde_json::json;
@@ -15,6 +17,7 @@ use brain::update;
 
 use crate::config::{Config, REVIEW_DAYS};
 use crate::daemon::{self, writer_lock};
+use crate::gaps;
 use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
 use crate::out::terminal;
@@ -50,16 +53,13 @@ enum Command {
     Search {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
+        #[command(flatten)]
+        s: SearchArgs,
+    },
+    /// Questions no note answered yet, newest first.
+    Gaps {
         #[arg(long)]
         json: bool,
-        /// Reorder the top results with the cross-encoder.
-        #[arg(long)]
-        rerank: bool,
-        /// Only what a colleague could see.
-        #[arg(long)]
-        shared_only: bool,
     },
     /// Write a new note into the inbox.
     Add {
@@ -105,6 +105,20 @@ enum Command {
     /// Print the folder an install lives in, for scripts/install.sh.
     #[command(hide = true)]
     InstallDir,
+}
+
+#[derive(Args)]
+struct SearchArgs {
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+    /// Reorder the top results with the cross-encoder.
+    #[arg(long)]
+    rerank: bool,
+    /// Only what a colleague could see.
+    #[arg(long)]
+    shared_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -198,15 +212,10 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     };
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
-        Command::Index => reindex(dirs),
+        Command::Index => reindex(dirs, &*clock),
         Command::Daemon => daemon::run(dirs, &*clock),
-        Command::Search {
-            text,
-            limit,
-            json,
-            rerank,
-            shared_only,
-        } => search(dirs, &text.join(" "), limit, json, rerank, shared_only),
+        Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
+        Command::Gaps { json } => list_gaps(dirs, &*clock, json),
         Command::Add { text, title, kind } => {
             add(dirs, &*clock, &text, title, kind.map(Kind::from))
         }
@@ -308,7 +317,7 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
+fn reindex(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let vault = Vault::open(&config.vault)?;
     let Some(_lock) = Lock::try_acquire(&writer_lock(dirs))? else {
@@ -320,7 +329,7 @@ fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
     let mut idx = index(dirs)?;
     let r = idx.reindex(&vault)?;
     println!("{}", daemon::summary(&r));
-    match embed::load() {
+    let provider = match embed::load() {
         Ok(provider) => {
             let e = idx.embed_pending(&*provider, 32)?;
             println!(
@@ -330,41 +339,105 @@ fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
             if let Some(why) = e.stopped {
                 println!("{}", terminal(&format!("embedding stopped: {why}")));
             }
+            Some(provider)
         }
-        Err(e) => println!(
-            "{}",
-            terminal(&format!(
-                "embeddings skipped, search uses words and links: {e:#}"
-            ))
-        ),
+        Err(e) => {
+            println!(
+                "{}",
+                terminal(&format!(
+                    "embeddings skipped, search uses words and links: {e:#}"
+                ))
+            );
+            None
+        }
+    };
+    if r.added + r.changed + r.removed > 0 {
+        let filled = gaps::recheck(&idx, &activity(dirs)?, provider.as_deref(), clock)?;
+        if filled > 0 {
+            println!("{}", plural(filled, "gap") + " filled");
+        }
     }
     Ok(())
 }
 
-fn search(
-    dirs: &Dirs,
-    text: &str,
-    limit: usize,
-    as_json: bool,
-    rerank: bool,
-    shared_only: bool,
-) -> anyhow::Result<()> {
+pub fn activity(dirs: &Dirs) -> anyhow::Result<Activity> {
+    Activity::open(&dirs.data.join("activity.db"))
+}
+
+fn list_gaps(dirs: &Dirs, clock: &dyn Clock, as_json: bool) -> anyhow::Result<()> {
+    Config::load(dirs)?;
+    let a = activity(dirs)?;
+    let open = a.open_gaps(usize::MAX)?;
+    let filled = a.filled_since(clock.now() - jiff::SignedDuration::from_hours(30 * 24))?;
+    if as_json {
+        let rows: Vec<_> = open
+            .iter()
+            .map(|g| {
+                json!({
+                    "at": g.at.to_string(),
+                    "door": g.door.as_str(),
+                    "area": g.area,
+                    "query": g.query,
+                })
+            })
+            .collect();
+        let v = json!({ "open": rows, "filled_last_30_days": filled });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let mut lines: Vec<String> = open
+        .iter()
+        .map(|g| {
+            format!(
+                "{}  {}  {}  {}",
+                g.at.strftime("%Y-%m-%d"),
+                g.door.as_str(),
+                g.area.as_deref().unwrap_or("-"),
+                g.query
+            )
+        })
+        .collect();
+    if open.is_empty() {
+        lines.push("no open gaps".into());
+    }
+    lines.push(format!("{filled} filled in the last 30 days"));
+    println!("{}", terminal(&lines.join("\n")));
+    Ok(())
+}
+
+fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::Result<()> {
     Config::load(dirs)?;
     let idx = index(dirs)?;
     let provider = embed::load().ok();
     let q = Query {
         text,
-        limit,
+        limit: s.limit,
         kinds: None,
-        scope: if shared_only {
+        scope: if s.shared_only {
             Scope::SharedOnly
         } else {
             Scope::Mine
         },
-        rerank,
+        rerank: s.rerank,
     };
-    let hits = idx.search(&q, provider.as_deref())?;
-    if as_json {
+    let found = idx.search(&q, provider.as_deref())?;
+    let gap = is_gap(&found);
+    if gap {
+        let area = gaps::area(&found.hits);
+        let logged = activity(dirs).and_then(|a| {
+            a.log_gap(clock.now(), Door::Cli, text, area.as_deref())?;
+            a.count(clock.today(), Event::GapLogged, Some(Door::Cli))
+        });
+        // A gap that cannot be written never fails the search.
+        if let Err(e) = logged {
+            eprintln!(
+                "{}",
+                terminal(&format!("brain: the gap was not logged: {e:#}"))
+            );
+        }
+    }
+    let hits = found.hits;
+    if s.json {
         let rows: Vec<_> = hits
             .iter()
             .map(|h| {
@@ -379,10 +452,17 @@ fn search(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let v = json!({
+            "gap": gap,
+            "best_similarity": found.best_similarity,
+            "hits": rows,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    if hits.is_empty() {
+    if gap {
+        println!("no note answers this; logged as a gap");
+    } else if hits.is_empty() {
         println!("nothing found");
     }
     for h in &hits {

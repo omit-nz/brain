@@ -20,6 +20,7 @@ anyhow.workspace = true
 brain-index = { path = "../brain-index" }
 brain-note = { path = "../brain-note" }
 brain-platform = { path = "../brain-platform" }
+brain-report = { path = "../brain-report" }
 clap.workspace = true
 globset.workspace = true
 jiff.workspace = true

@@ -107,7 +107,7 @@ fn note_with_id(n: usize, body: &str) -> String {
 /// Paths of a search's hits, sorted.
 fn found(h: &Home, query: &str) -> Vec<String> {
     let hits: Value = h.json(&["search", "--json", "--limit", "1000", query]);
-    let mut paths: Vec<String> = hits
+    let mut paths: Vec<String> = hits["hits"]
         .as_array()
         .unwrap()
         .iter()
@@ -126,6 +126,28 @@ fn the_daemon_indexes_a_new_note() {
     h.put("a.md", &note_with_id(1, "a note about pelicans"));
     wait_for_notes(&h, &d, 1);
     assert_eq!(found(&h, "pelicans"), vec!["a.md"]);
+}
+
+/// Each recheck searches every open gap, so saves do not trigger one each: the first pass that
+/// changed notes does, then nothing until an hour has gone.
+#[test]
+fn recheck_runs_at_most_hourly() {
+    let h = Home::new();
+    h.init();
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    for n in 0..20 {
+        h.put(&format!("s{n}.md"), &note_with_id(n, "a save"));
+        std::thread::sleep(Duration::from_millis(600));
+    }
+    wait_for_notes(&h, &d, 20);
+    let rechecks = d
+        .stderr()
+        .lines()
+        .filter(|l| l.starts_with("recheck"))
+        .count();
+    assert!(d.passes() > 2, "{}", d.stderr());
+    assert_eq!(rechecks, 1, "{}", d.stderr());
 }
 
 #[test]

@@ -1,5 +1,5 @@
-use brain_index::{Hit, Query, Scope};
-use brain_note::Kind;
+use brain_index::{Found, GAP_FLOOR, Hit, Query, Scope, is_gap};
+use brain_note::{Kind, Place};
 use ll_core::embed::{EmbeddingProvider, ModelConfig};
 
 use super::Fixture;
@@ -68,7 +68,7 @@ fn bm25_finds_a_title_word() {
     f.put("b.md", "unrelated text about the office\n");
     let mut idx = f.index();
     idx.reindex(&f.vault()).unwrap();
-    let hits = idx.search(&query("harvest"), None).unwrap();
+    let hits = idx.search(&query("harvest"), None).unwrap().hits;
     assert_eq!(paths(&hits), vec!["a.md"]);
     assert_eq!(hits[0].title, "Quarterly harvest");
     assert!(hits[0].note_uuid.is_some());
@@ -97,8 +97,8 @@ fn a_vector_match_ranks_without_a_shared_word() {
     idx.reindex(&f.vault()).unwrap();
     let p = Concepts::new();
     idx.embed_pending(&p, 10).unwrap();
-    assert_eq!(idx.search(&query("car"), None).unwrap().len(), 0);
-    let hits = idx.search(&query("car"), Some(&p)).unwrap();
+    assert_eq!(idx.search(&query("car"), None).unwrap().hits.len(), 0);
+    let hits = idx.search(&query("car"), Some(&p)).unwrap().hits;
     assert_eq!(paths(&hits)[0], "auto.md");
 }
 
@@ -110,7 +110,7 @@ fn a_linked_note_rises_by_the_graph() {
     f.put("other.md", "another note entirely\n");
     let mut idx = f.index();
     idx.reindex(&f.vault()).unwrap();
-    let hits = idx.search(&query("zephyr"), None).unwrap();
+    let hits = idx.search(&query("zephyr"), None).unwrap().hits;
     assert_eq!(paths(&hits), vec!["hub.md", "spoke.md"]);
 }
 
@@ -132,10 +132,10 @@ fn rerank_reorders_when_asked() {
     let mut idx = f.index();
     idx.reindex(&f.vault()).unwrap();
     let mut q = query("what is the capital of France");
-    let plain = idx.search(&q, None).unwrap();
+    let plain = idx.search(&q, None).unwrap().hits;
     assert_eq!(paths(&plain)[0], "stuffed.md");
     q.rerank = true;
-    let reranked = idx.search(&q, None).unwrap();
+    let reranked = idx.search(&q, None).unwrap().hits;
     assert_eq!(paths(&reranked)[0], "answer.md");
 }
 
@@ -186,7 +186,7 @@ fn shared_only_never_shows_private_or_inbox_notes() {
     let mut q = query("meridian");
     q.limit = 3;
     q.scope = Scope::SharedOnly;
-    let hits = idx.search(&q, Some(&p)).unwrap();
+    let hits = idx.search(&q, Some(&p)).unwrap().hits;
     assert_eq!(hits.len(), 3);
     for h in &hits {
         assert!(
@@ -198,7 +198,7 @@ fn shared_only_never_shows_private_or_inbox_notes() {
     }
     q.scope = Scope::Mine;
     q.limit = 20;
-    assert_eq!(idx.search(&q, Some(&p)).unwrap().len(), 13);
+    assert_eq!(idx.search(&q, Some(&p)).unwrap().hits.len(), 13);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn kinds_filter_works() {
     idx.reindex(&f.vault()).unwrap();
     let mut q = query("lantern");
     q.kinds = Some(&[Kind::Rule, Kind::History]);
-    let mut got = paths(&idx.search(&q, None).unwrap())
+    let mut got = paths(&idx.search(&q, None).unwrap().hits)
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -246,7 +246,80 @@ fn search_without_a_model_still_answers() {
     f.put("a.md", "orchard pruning schedule\n");
     let mut idx = f.index();
     idx.reindex(&f.vault()).unwrap();
-    let hits = idx.search(&query("pruning"), None).unwrap();
+    let hits = idx.search(&query("pruning"), None).unwrap().hits;
     assert_eq!(paths(&hits), vec!["a.md"]);
     assert!(hits[0].snippet.contains("orchard pruning"));
+}
+
+#[test]
+fn found_reports_whether_words_matched() {
+    let f = Fixture::new();
+    f.put("a.md", "orchard pruning schedule\n");
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    assert!(idx.search(&query("orchard"), None).unwrap().words);
+    let none = idx.search(&query("zeppelin"), None).unwrap();
+    assert!(!none.words);
+    assert_eq!(none.best_similarity, None);
+}
+
+#[test]
+fn found_reports_the_best_similarity() {
+    let f = Fixture::new();
+    // Concept words only, so car sits near automobile and far from kettle.
+    f.put(
+        "auto.md",
+        "---\ntitle: automobile\nvisibility: private\n---\nautomobile vehicle\n",
+    );
+    f.put(
+        "tea.md",
+        "---\ntitle: kettle\nvisibility: shared\n---\nkettle tea\n",
+    );
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let p = Concepts::new();
+    idx.embed_pending(&p, 10).unwrap();
+    let mine = idx.search(&query("car"), Some(&p)).unwrap();
+    assert!(
+        mine.best_similarity.unwrap() > GAP_FLOOR,
+        "{:?}",
+        mine.best_similarity
+    );
+    let mut q = query("car");
+    q.scope = Scope::SharedOnly;
+    let shared = idx.search(&q, Some(&p)).unwrap();
+    assert!(
+        shared.best_similarity.unwrap() < GAP_FLOOR,
+        "the private automobile note is out of scope: {:?}",
+        shared.best_similarity
+    );
+}
+
+#[test]
+fn a_hit_carries_its_body_and_place() {
+    let f = Fixture::new();
+    f.put("0-inbox/x.md", "harvest notes from the north block\n");
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let hits = idx.search(&query("harvest"), None).unwrap().hits;
+    assert_eq!(hits[0].place, Place::Inbox);
+    assert!(hits[0].body.contains("north block"));
+}
+
+#[test]
+fn is_gap_reads_the_floor_when_vectors_exist() {
+    let found = |words, best_similarity| Found {
+        hits: Vec::new(),
+        words,
+        best_similarity,
+    };
+    assert!(
+        is_gap(&found(true, Some(0.2))),
+        "words do not rescue a far vector"
+    );
+    assert!(!is_gap(&found(false, Some(0.9))));
+    assert!(is_gap(&found(false, None)));
+    assert!(!is_gap(&found(true, None)));
+    assert!(is_gap(&found(true, Some(GAP_FLOOR - 0.01))));
+    assert!(!is_gap(&found(false, Some(GAP_FLOOR))));
 }

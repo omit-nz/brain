@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Context;
-use brain_note::{Disclosure, Kind};
+use brain_note::{Disclosure, Kind, Place};
 use ll_core::embed::EmbeddingProvider;
 use ll_core::graph::{GraphEdges, personalized_pagerank};
 use ll_core::rerank::rerank;
@@ -40,8 +40,35 @@ pub struct Hit {
     pub title: String,
     pub kind: Kind,
     pub disclosure: Disclosure,
+    pub place: Place,
     pub score: f64,
     pub snippet: String,
+    pub body: String,
+}
+
+/// A search's hits, and how close it came.
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub hits: Vec<Hit>,
+    /// Whether any note matched a word of the question, the loose OR fallback included.
+    pub words: bool,
+    /// The closest note's vector similarity in scope, before fusion; `None` when no vectors
+    /// were searched.
+    pub best_similarity: Option<f32>,
+}
+
+/// The similarity below which the closest note does not answer the question. A starting guess,
+/// refitted from Robin's own questions in Part 2's Live check.
+pub const GAP_FLOOR: f32 = 0.6;
+
+/// What a search means, decided here once for every door: with vectors, a gap when the closest
+/// note is below the floor, whatever words matched, since the loose word fallback matches
+/// nearly any question on a large vault; without vectors, a gap when no word matched.
+pub fn is_gap(found: &Found) -> bool {
+    match found.best_similarity {
+        Some(best) => best < GAP_FLOOR,
+        None => !found.words,
+    }
 }
 
 const WEIGHTS: &str = "10.0, 5.0, 1.0";
@@ -86,13 +113,18 @@ impl Index {
         &self,
         q: &Query<'_>,
         provider: Option<&dyn EmbeddingProvider>,
-    ) -> anyhow::Result<Vec<Hit>> {
+    ) -> anyhow::Result<Found> {
         if q.rerank {
             crate::embed::runtime().context("reranking needs ONNX Runtime")?;
         }
+        let mut found = Found {
+            hits: Vec::new(),
+            words: false,
+            best_similarity: None,
+        };
         let text = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
         if text.is_empty() {
-            return Ok(Vec::new());
+            return Ok(found);
         }
         let config = match q.scope {
             Scope::Mine => &MINE,
@@ -103,6 +135,7 @@ impl Index {
         let mut fused = HashMap::new();
 
         let bm25 = try_fts_bm25_query(&self.conn, &text, POOL, config)?;
+        found.words = !bm25.is_empty();
         add_weighted_rrf(
             &mut fused,
             weights.bm25,
@@ -128,6 +161,7 @@ impl Index {
                 })?
                 .collect::<Result<_, _>>()?;
             scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            found.best_similarity = scored.first().map(|(_, s)| *s);
             scored.truncate(POOL);
             add_weighted_rrf(
                 &mut fused,
@@ -152,7 +186,7 @@ impl Index {
 
         let mut hits = Vec::new();
         let mut st = self.conn.prepare(&format!(
-            "SELECT n.note_uuid, n.title, n.kind, n.disclosure, c.body
+            "SELECT n.note_uuid, n.title, n.kind, n.disclosure, c.body, n.place
              FROM {items} n JOIN notes_content c ON c.id = n.id WHERE n.path = ?1"
         ))?;
         for (path, score) in finalize_rrf(fused, POOL) {
@@ -164,45 +198,45 @@ impl Index {
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                     ))
                 })
                 .optional()?;
             // A path the scope's view does not hold is not a hit; any other failure is an error.
-            let Some((uuid, title, kind, disclosure, body)) = row else {
+            let Some((uuid, title, kind, disclosure, body, place)) = row else {
                 continue;
             };
             let kind = Kind::parse(&kind);
             if q.kinds.is_some_and(|ks| !ks.contains(&kind)) {
                 continue;
             }
-            hits.push((
-                Hit {
-                    note_uuid: uuid.and_then(|u| u.parse().ok()),
-                    path,
-                    title,
-                    kind,
-                    disclosure: Disclosure::parse(&disclosure),
-                    score,
-                    snippet: snippet(&body),
-                },
+            hits.push(Hit {
+                note_uuid: uuid.and_then(|u| u.parse().ok()),
+                path,
+                title,
+                kind,
+                disclosure: Disclosure::parse(&disclosure),
+                place: Place::parse(&place),
+                score,
+                snippet: snippet(&body),
                 body,
-            ));
+            });
         }
 
         if q.rerank && !hits.is_empty() {
             let top = hits.len().min(RERANK_TOP);
             let docs: Vec<(String, String)> = hits[..top]
                 .iter()
-                .map(|(h, body)| (h.path.clone(), format!("{}\n{body}", h.title)))
+                .map(|h| (h.path.clone(), format!("{}\n{}", h.title, h.body)))
                 .collect();
             let order = rerank(&text, &docs, top);
-            let mut head: Vec<Option<(Hit, String)>> = hits.drain(..top).map(Some).collect();
-            let mut reranked: Vec<(Hit, String)> = order
+            let mut head: Vec<Option<Hit>> = hits.drain(..top).map(Some).collect();
+            let mut reranked: Vec<Hit> = order
                 .iter()
                 .filter_map(|r| {
-                    head[r.index].take().map(|(mut h, b)| {
+                    head[r.index].take().map(|mut h| {
                         h.score = r.score;
-                        (h, b)
+                        h
                     })
                 })
                 .collect();
@@ -213,7 +247,8 @@ impl Index {
         }
 
         hits.truncate(q.limit);
-        Ok(hits.into_iter().map(|(h, _)| h).collect())
+        found.hits = hits;
+        Ok(found)
     }
 
     /// Links between notes in `items`, both ways, with targets resolved by lowercased file stem
