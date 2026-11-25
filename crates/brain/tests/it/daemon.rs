@@ -408,8 +408,10 @@ fn the_daemon_embeds_every_pending_note_a_batch_at_a_time() {
     assert_eq!(d.passes(), 1, "{}", d.stderr());
 }
 
-/// The vault moved away and back (an unmounted disk, a rename undone): the failed pass is tried
-/// again soon, and a note saved after the return is indexed.
+/// The vault moved away and back (an unmounted disk, a rename undone): the index outlives the
+/// absence, and a note saved after the return is indexed. macOS and Linux report the root going
+/// and the pass fails and is retried with the watch set up again; Windows reports nothing, and
+/// its watch follows the folder.
 #[test]
 fn the_daemon_follows_its_vault_away_and_back() {
     let h = Home::new();
@@ -419,11 +421,7 @@ fn the_daemon_follows_its_vault_away_and_back() {
     wait_for_notes(&h, &d, 1);
     let away = h.vault.path().with_extension("away");
     fs::rename(h.vault.path(), &away).unwrap();
-    until(
-        "a failed pass",
-        || d.stderr().contains("failed"),
-        || d.stderr(),
-    );
+    std::thread::sleep(Duration::from_secs(2));
     fs::rename(&away, h.vault.path()).unwrap();
     assert_eq!(notes(&h), 1, "the index outlived the vault's absence");
     h.put("b.md", &note_with_id(2, "after"));
