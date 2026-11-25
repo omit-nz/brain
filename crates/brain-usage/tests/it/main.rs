@@ -199,3 +199,27 @@ fn the_receipt_day_is_the_utc_date() {
     assert_eq!(brain_usage::utc_date(last), Some(date(2026, 11, 24)));
     assert_eq!(brain_usage::utc_date(last + 1), Some(date(2026, 11, 25)));
 }
+
+#[test]
+fn one_ipv6_network_is_one_rate_limit_key() {
+    assert_eq!(brain_usage::limit_key("203.0.113.7"), "203.0.113.7");
+    assert_eq!(
+        brain_usage::limit_key("2001:db8:1:2:aaaa:bbbb:cccc:dddd"),
+        brain_usage::limit_key("2001:db8:1:2::1"),
+        "addresses in one /64 share a key"
+    );
+    assert_ne!(
+        brain_usage::limit_key("2001:db8:1:2::1"),
+        brain_usage::limit_key("2001:db8:1:3::1")
+    );
+    assert_eq!(
+        brain_usage::limit_key("::ffff:203.0.113.7"),
+        "203.0.113.7",
+        "an IPv4 address written as IPv6 keeps its own key"
+    );
+    assert_ne!(
+        brain_usage::limit_key("::ffff:203.0.113.7"),
+        brain_usage::limit_key("::ffff:203.0.113.8")
+    );
+    assert_eq!(brain_usage::limit_key(""), "");
+}

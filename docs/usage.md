@@ -43,7 +43,7 @@ One report per closed day, a JSON object with these fields and no others:
 
 The report is signed with the install's key, and the signature travels beside it in a `brain-signature` header, so omit can tell a report was not changed on the way.
 
-omit's endpoint keeps the report's counts and nothing else of the request: no request logs, no address. Your address is used only for a rate limit: more than 10 requests in a minute from one address are answered 429, and brain tries the day again at the next run.
+omit's endpoint keeps the report's fields and the date it arrived, and nothing else of the request: no request logs, no address, no time of day. Your address is used only for a rate limit: past about 30 requests a minute from one address (one IPv6 network), the endpoint answers 429, and brain tries the day again at the next run. The endpoint runs on Cloudflare, which sees your address as it does for any site it serves.
 
 The daemon sends at start and then hourly; today is never sent, only days that have ended. A run looks back seven days at most, from the first day anything was counted, so a laptop that was offline for a week sends each missed day once when it is back. Older days are never sent.
 

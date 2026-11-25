@@ -20,12 +20,14 @@ database_name = "brain-usage"
 database_id = "9ef3aeda-d5de-4660-835f-2d328adf16f5"
 migrations_dir = "migrations"
 
-# Any key's signed report is accepted, so each address gets 10 requests a minute per Cloudflare
-# location. An install catching up on a week sends 7; the zone's one free WAF rate-limit rule is taken.
+# Any key's signed report is accepted, so each address (an IPv6 /64) gets about 30 requests a
+# minute per Cloudflare location: an install catching up on a week sends 7, and an office behind
+# one address sends one burst per install on a Monday. The zone's one free WAF rate-limit rule is
+# taken.
 [[ratelimits]]
 name = "USAGE_LIMIT"
 namespace_id = "20001"
 
   [ratelimits.simple]
-  limit = 10
+  limit = 30
   period = 60

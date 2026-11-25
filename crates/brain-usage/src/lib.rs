@@ -1,5 +1,5 @@
 //! omit's usage endpoint. A report is checked by `brain_report::accept` and kept as rows of
-//! counts; nothing else of the request is stored. The statements are plain SQL with their
+//! counts with the date it arrived; nothing else of the request is stored. The statements are plain SQL with their
 //! parameters, so the native tests run them on SQLite and the Worker shell runs them on D1.
 
 use brain_report::{Refused, Report};
@@ -59,6 +59,22 @@ pub fn statements(report: &Report, received: Date) -> Vec<Statement> {
 pub fn utc_date(millis: i64) -> Option<Date> {
     let t = jiff::Timestamp::from_millisecond(millis).ok()?;
     Some(t.to_zoned(jiff::tz::TimeZone::UTC).date())
+}
+
+/// The rate limit's key for a client's address: an IPv6 address cut to its /64, which one
+/// machine or network usually holds whole, so it cannot take a fresh key per request; IPv4 as it
+/// is, written as IPv4 even when it arrives as an IPv4-mapped IPv6 address.
+pub fn limit_key(address: &str) -> String {
+    match address.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        _ => address.to_string(),
+    }
 }
 
 pub fn status(refused: &Refused) -> u16 {

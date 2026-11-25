@@ -1,13 +1,14 @@
 //! The Worker around the statements: `POST /v1/day` takes a report of at most 64 KiB, checks it
-//! with `accept` against today's UTC date, and writes its rows to D1. Nothing else of the request
-//! (address, headers, timing) is kept; the address only keys the rate limit.
+//! with `accept` against today's UTC date, and writes its rows to D1 with the date it arrived.
+//! Nothing else of the request (address, headers, time of day) is kept; the address only keys
+//! the rate limit.
 
 use brain_report::{MAX_BODY, accept};
 use futures_util::StreamExt;
 use worker::wasm_bindgen::JsValue;
 use worker::{Context, Date, Env, Method, Request, Response, Result, event};
 
-use crate::{Param, statements, status, utc_date};
+use crate::{Param, limit_key, statements, status, utc_date};
 
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -16,7 +17,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     let address = req.headers().get("cf-connecting-ip")?.unwrap_or_default();
     let limit = env.rate_limiter("USAGE_LIMIT")?;
-    if !limit.limit(address).await?.success {
+    if !limit.limit(limit_key(&address)).await?.success {
         return Ok(Response::empty()?.with_status(429));
     }
     let mut body = Vec::new();
