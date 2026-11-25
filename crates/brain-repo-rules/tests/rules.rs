@@ -275,8 +275,10 @@ fn rust_files(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
     }
 }
 
-/// The files that name `CLAUDE.md`: brain reaches an AI tool through its MCP door and its own
-/// `claude mcp` command, never by writing the person's instructions file.
+/// The files that name `CLAUDE.md`, exactly as written: brain reaches an AI tool through its MCP
+/// door and its own `claude mcp` command, never by writing the person's instructions file. Naming
+/// the file is the proxy for writing it; a path built from pieces would slip past, and review
+/// catches that.
 fn naming_claude_md(files: &[(PathBuf, String)]) -> Vec<String> {
     files
         .iter()

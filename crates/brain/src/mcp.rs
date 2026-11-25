@@ -8,13 +8,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use brain::update;
-use brain_platform::process;
-
 use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
 use brain_platform::clock::Clock;
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::Lock;
+use brain_platform::process;
 use brain_report::{Door, Event};
 use jiff::ToSpan;
 use ll_core::embed::EmbeddingProvider;
@@ -52,7 +51,7 @@ pub fn hand_over(dirs: &Dirs, door: &str) -> anyhow::Result<()> {
         .context(format!("starting {}", exe.display())))
 }
 
-pub const INSTRUCTIONS: &str ="brain holds this person's own notes and what their team shares, kept on this computer.
+pub const INSTRUCTIONS: &str = "brain holds this person's own notes and what their team shares, kept on this computer.
 Before you answer a question about their work, their business, their clients or how something is done here, call search_my_brain (or search_company for what the team shares), answer from the notes you find, and name the note you used.
 When the conversation settles something worth keeping (a decision, a fact, how a job is done, a preference), offer to save it with capture, and save it only if they agree.
 When they tell you a note is wrong, use correct. When they ask what needs their attention, call due.

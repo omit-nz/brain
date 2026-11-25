@@ -34,7 +34,11 @@ pub fn claude_code(dirs: &Dirs) -> anyhow::Result<()> {
         .args(["mcp", "--door", "claude-code"])
         .status()
         .context("running claude; is Claude Code installed and on your PATH?")?;
-    anyhow::ensure!(status.success(), "claude mcp add failed ({status})");
+    // The remove above has already run, so a brain connected before is gone too.
+    anyhow::ensure!(
+        status.success(),
+        "claude mcp add failed ({status}); brain is not connected to Claude Code now, so run brain connect claude-code again"
+    );
     println!("Claude Code can now search your brain; start a new session.");
     Ok(())
 }

@@ -148,3 +148,98 @@ fn the_mcpb_manifest_names_the_hand_over() {
         serde_json::json!(["darwin"])
     );
 }
+
+/// A stub `claude` that writes each argument on its own line to `calls`, and exits 1 when its
+/// second argument is `fail` (`add` or `remove`).
+fn claude_failing_on(fail: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let calls = dir.path().join("calls");
+    script(
+        &dir.path().join("claude"),
+        &format!(
+            "for a in \"$@\"; do echo \"$a\"; done >> '{}'\n[ \"$2\" = '{fail}' ] && exit 1\nexit 0",
+            calls.display()
+        ),
+    );
+    dir
+}
+
+#[test]
+fn connect_fails_when_claude_add_fails() {
+    let h = Home::new();
+    install(&h);
+    let stub = claude_failing_on("add");
+    let home = tempfile::tempdir().unwrap();
+    let out = connect(&h, stub.path(), home.path());
+    assert!(!out.status.success());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("can now search"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("run brain connect claude-code again"), "{err}");
+}
+
+#[test]
+fn connect_carries_on_when_nothing_was_connected_before() {
+    let h = Home::new();
+    install(&h);
+    let stub = claude_failing_on("remove");
+    let home = tempfile::tempdir().unwrap();
+    let out = connect(&h, stub.path(), home.path());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn connect_names_claude_when_it_is_missing() {
+    let h = Home::new();
+    install(&h);
+    let empty = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let out = connect(&h, empty.path(), home.path());
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("is Claude Code installed"), "{err}");
+}
+
+#[test]
+fn an_install_path_with_spaces_is_one_argument() {
+    let h = Home::new();
+    let spaced = h.home.path().join("my brain home");
+    let exe = spaced.join("data/bin/brain-current/brain");
+    script(&exe, "exit 0");
+    let stub = claude_failing_on("none");
+    let home = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("BRAIN_HOME", &spaced)
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(stub.path().join("calls")).unwrap();
+    assert!(calls.lines().any(|l| l == exe.to_str().unwrap()), "{calls}");
+}
+
+#[test]
+fn a_hand_over_to_an_install_that_cannot_run_fails() {
+    let h = Home::new();
+    let exe = h.home.path().join("data/bin/brain-current/brain");
+    fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    fs::write(&exe, "not a program").unwrap();
+    let out = h
+        .brain()
+        .args(["mcp", "--door", "claude-desktop", "--hand-over"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("starting"), "{err}");
+}
