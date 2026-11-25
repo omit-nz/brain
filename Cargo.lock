@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "brain"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "brain-index"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "brain-note",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "brain-note"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "brain-platform",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "brain-platform"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "brain-repo-rules"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "brain-platform",
  "sha2 0.11.1",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "brain-report"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "brain-usage"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "brain-report",
  "ed25519-dalek",
