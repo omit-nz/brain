@@ -529,3 +529,24 @@ fn the_mcp_server_never_writes_the_index() {
 const NO_DAEMON: &str = "brain's daemon is not running, so notes changed since the last index are missing; run brain start.";
 #[cfg(not(target_os = "macos"))]
 const NO_DAEMON: &str = "brain's daemon is not running, so notes changed since the last index are missing; run brain daemon in a terminal.";
+
+/// The server loads its embedder when it starts, not at the first search, so the runtime library
+/// it loads is the one its own release shipped even if an update replaces the install later.
+#[test]
+fn the_embedder_is_loaded_when_the_server_starts() {
+    let h = indexed(&[("a.md", "mailbox\n")]);
+    let _m = Mcp::start(&h);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let err = h.home.path().join("mcp.err");
+    loop {
+        let text = fs::read_to_string(&err).unwrap_or_default();
+        if text.contains("could not load its embedder") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no embedder load before any search: {text}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}

@@ -135,12 +135,10 @@ impl State {
         self.index.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn search(&self, query: &str, limit: Option<u32>, scope: Scope) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            query.chars().count() <= MAX_QUERY,
-            "the query is longer than 2,000 characters"
-        );
-        let provider = self.provider.get_or_init(|| {
+    /// The embedder, loaded once. `run` starts the load as the server starts, so the runtime
+    /// library comes from this server's own release even if an update replaces the install later.
+    fn provider(&self) -> &Option<Box<dyn EmbeddingProvider>> {
+        self.provider.get_or_init(|| {
             embed::load_with_threads(Some(THREADS))
                 .inspect_err(|e| {
                     eprintln!(
@@ -151,7 +149,15 @@ impl State {
                     );
                 })
                 .ok()
-        });
+        })
+    }
+
+    fn search(&self, query: &str, limit: Option<u32>, scope: Scope) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            query.chars().count() <= MAX_QUERY,
+            "the query is longer than 2,000 characters"
+        );
+        let provider = self.provider();
         let q = Query {
             text: query,
             limit: limit.unwrap_or(5).clamp(1, 20) as usize,
@@ -374,6 +380,8 @@ pub fn run(dirs: &Dirs, clock: Box<dyn Clock>, door: Door) -> anyhow::Result<()>
         state: Arc::new(state),
         tool_router: Server::tool_router(),
     };
+    let warm = server.state.clone();
+    std::thread::spawn(move || warm.provider().is_some());
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
