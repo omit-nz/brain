@@ -39,10 +39,11 @@ fn slug(text: &str) -> String {
     if s.is_empty() { "note".into() } else { s }
 }
 
-/// A note just written: its vault path and id.
+/// A note just written: its vault path, id and title (empty when it was given none).
 pub struct Written {
     pub rel: String,
     pub id: uuid::Uuid,
+    pub title: String,
 }
 
 /// Writes `c` as a new inbox note owned by `me`. Its name is the slug of its title (or text),
@@ -95,6 +96,7 @@ pub fn write(vault: &Vault, me: &str, today: Date, c: &Capture<'_>) -> anyhow::R
                 return Ok(Written {
                     rel: rel_key(&rel),
                     id,
+                    title: c.title.unwrap_or_default().to_string(),
                 });
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,

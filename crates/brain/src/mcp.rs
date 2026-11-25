@@ -4,7 +4,7 @@
 //! escaped, with control characters stripped.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
@@ -40,9 +40,16 @@ const BODY_CHARS: usize = 4_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
 
-/// `&`, `<`, `>` and `"` as entities, after control characters are stripped.
+/// Bidi embeddings, overrides and isolates, which reorder what a reader sees, and the tag block,
+/// which spells hidden ASCII. Joiners stay: emoji and several scripts need them.
+fn hidden(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{E0000}'..='\u{E007F}')
+}
+
+/// `&`, `<`, `>` and `"` as entities, after control and hidden characters are stripped.
 fn escape(text: &str) -> String {
     terminal(text)
+        .replace(hidden, "")
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -96,14 +103,29 @@ struct State {
 }
 
 impl State {
+    /// The index, even after a tool panicked holding it: SQLite keeps no half-done state in the
+    /// connection, so one bad call must not end every later one.
+    fn index(&self) -> MutexGuard<'_, Index> {
+        self.index.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn search(&self, query: &str, limit: Option<u32>, scope: Scope) -> anyhow::Result<String> {
         anyhow::ensure!(
             query.chars().count() <= MAX_QUERY,
             "the query is longer than 2,000 characters"
         );
-        let provider = self
-            .provider
-            .get_or_init(|| embed::load_with_threads(Some(THREADS)).ok());
+        let provider = self.provider.get_or_init(|| {
+            embed::load_with_threads(Some(THREADS))
+                .inspect_err(|e| {
+                    eprintln!(
+                        "{}",
+                        terminal(&format!(
+                            "brain could not load its embedder, so search matches words only: {e:#}"
+                        ))
+                    );
+                })
+                .ok()
+        });
         let q = Query {
             text: query,
             limit: limit.unwrap_or(5).clamp(1, 20) as usize,
@@ -112,11 +134,7 @@ impl State {
             rerank: false,
         };
         let started = std::time::Instant::now();
-        let found = self
-            .index
-            .lock()
-            .map_err(|_| anyhow::anyhow!("the index is unavailable"))?
-            .search(&q, provider.as_deref())?;
+        let found = self.index().search(&q, provider.as_deref())?;
         let ms = started.elapsed().as_millis();
         usage::searched(&self.activity, &*self.clock, self.door, query, &found, ms);
         let mut out = Vec::new();
@@ -196,7 +214,7 @@ impl Server {
         let state = self.state.clone();
         match tokio::task::spawn_blocking(move || f(&state)).await {
             Ok(Ok(text)) => Ok(text),
-            Ok(Err(e)) => Err(terminal(&format!("{e:#}"))),
+            Ok(Err(e)) => Err(escape(&format!("{e:#}"))),
             Err(e) => Err(format!("brain failed: {e}")),
         }
     }
@@ -247,10 +265,9 @@ impl Server {
                 Event::CaptureWritten,
                 Some(s.door),
             );
-            let title = a.title.as_deref().unwrap_or_default();
             Ok(format!(
                 "Saved to the inbox: {}",
-                fence_ref(Some(w.id), &w.rel, title, kind)
+                fence_ref(Some(w.id), &w.rel, &w.title, kind)
             ))
         })
         .await
@@ -261,16 +278,9 @@ impl Server {
     )]
     async fn correct(&self, Parameters(a): Parameters<CorrectArgs>) -> Result<String, String> {
         self.blocking(move |s| {
-            let index = s
-                .index
-                .lock()
-                .map_err(|_| anyhow::anyhow!("the index is unavailable"))?;
-            let target = index
-                .lookup(&a.target)?
-                .ok_or_else(|| anyhow::anyhow!("no note is {}", a.target))?;
             let w = capture::correct(
                 &s.vault,
-                &index,
+                &s.index(),
                 &s.me,
                 s.clock.today(),
                 &a.target,
@@ -284,12 +294,7 @@ impl Server {
             );
             Ok(format!(
                 "Saved the correction to the inbox: {}",
-                fence_ref(
-                    Some(w.id),
-                    &w.rel,
-                    &format!("Correction: {}", target.title),
-                    Some(Kind::Rule)
-                )
+                fence_ref(Some(w.id), &w.rel, &w.title, Some(Kind::Rule))
             ))
         })
         .await
@@ -300,11 +305,7 @@ impl Server {
         self.blocking(move |s| {
             let within = i64::from(a.within_days.unwrap_or(14).min(365));
             let by = s.clock.today().checked_add(within.days())?;
-            let due = s
-                .index
-                .lock()
-                .map_err(|_| anyhow::anyhow!("the index is unavailable"))?
-                .due(&s.me, by)?;
+            let due = s.index().due(&s.me, by)?;
             if due.is_empty() {
                 return Ok("Nothing of theirs is due.".into());
             }
