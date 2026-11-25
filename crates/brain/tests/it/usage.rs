@@ -716,3 +716,124 @@ fn the_install_key_is_private() {
     let mode = fs::metadata(&key).unwrap().permissions().mode();
     assert_eq!(mode & 0o077, 0, "{mode:o}");
 }
+
+#[test]
+fn a_day_of_brains_own_errors_has_no_people() {
+    let h = counted(&["2026-11-23"]);
+    let down = Endpoint::start(Answer::Status(503));
+    down.point(&h);
+    on(&h, "2026-11-24", &["usage", "send"]);
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    send(&h);
+    let quiet = e.got()[1].json();
+    assert_eq!(quiet["day"], "2026-11-24");
+    assert_eq!(quiet["counts"][0]["event"], "error_send", "{quiet}");
+    assert_eq!(quiet["people"], 0, "{quiet}");
+}
+
+#[test]
+fn the_install_key_is_stable_across_runs() {
+    let h = counted(&["2026-11-23"]);
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    on(&h, "2026-11-24", &["usage", "send"]);
+    send(&h);
+    let got = e.got();
+    assert_eq!(got.len(), 2);
+    let key: [u8; 32] = fs::read(h.home.path().join("data/usage.key"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let ours = brain_report::Report::new(
+        &ed25519_dalek::SigningKey::from_bytes(&key),
+        today(),
+        "",
+        0,
+        vec![],
+    )
+    .workspace;
+    for r in got {
+        assert_eq!(r.json()["workspace"], ours.as_str());
+    }
+}
+
+#[test]
+fn a_short_install_key_is_not_replaced() {
+    let h = counted(&["2026-11-24"]);
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    let key = h.home.path().join("data/usage.key");
+    fs::write(&key, b"0123456789").unwrap();
+    let out = h
+        .brain()
+        .args(["--now", &at(TODAY), "usage", "send"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage.key") && err.contains("delete"), "{err}");
+    assert_eq!(fs::read(&key).unwrap(), b"0123456789");
+    assert!(e.got().is_empty());
+    assert!(ledger(&h).is_empty());
+}
+
+#[test]
+fn switching_off_mid_run_stops_the_next_day() {
+    let h = counted(&["2026-11-23", "2026-11-24"]);
+    let home = h.home.path().to_path_buf();
+    let e = Endpoint::with(Answer::Status(204), move |_| {
+        let off = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+            .args(["usage", "off"])
+            .env("BRAIN_HOME", &home)
+            .output()
+            .unwrap();
+        assert!(off.status.success());
+    });
+    e.point(&h);
+    send(&h);
+    assert_eq!(e.got().len(), 1);
+}
+
+#[test]
+fn a_wrong_endpoint_path_keeps_the_day() {
+    for code in [403, 404, 405] {
+        let h = counted(&["2026-11-24"]);
+        let e = Endpoint::start(Answer::Status(code));
+        e.point(&h);
+        send(&h);
+        assert_eq!(ledger(&h)[0].3, format!("failed: {code}"));
+        send(&h);
+        assert_eq!(e.got().len(), 2, "{code}");
+    }
+}
+
+#[test]
+fn a_second_sender_says_another_is_sending() {
+    let h = counted(&["2026-11-24"]);
+    let e = Endpoint::with(Answer::Status(204), |_| {
+        std::thread::sleep(Duration::from_millis(1500))
+    });
+    e.point(&h);
+    let spawn = || {
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+            .args(["--now", &at(TODAY), "usage", "send"])
+            .env("BRAIN_HOME", h.home.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let (a, b) = (spawn(), spawn());
+    let outs = [a.wait_with_output().unwrap(), b.wait_with_output().unwrap()];
+    let said: Vec<String> = outs
+        .iter()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .collect();
+    assert_eq!(
+        said.iter()
+            .filter(|s| s.contains("another brain is sending"))
+            .count(),
+        1,
+        "{said:?}"
+    );
+}

@@ -116,12 +116,85 @@ fn accept_refuses_more_than_500_counts() {
         n,
     };
     let day = date(2026, 11, 24);
+    // 500 is under the cap; repeated pairs then make it malformed, never too many.
     let (body, signature) = sign(&report(day, vec![count(1); 500]), &key());
-    assert!(accept(&body, &signature, TODAY).is_ok());
+    assert_eq!(accept(&body, &signature, TODAY), Err(Refused::Malformed));
     let (body, signature) = sign(&report(day, vec![count(1); 501]), &key());
     assert_eq!(accept(&body, &signature, TODAY), Err(Refused::TooMany));
     let (body, signature) = sign(&report(day, vec![count(10_000_000)]), &key());
     assert!(accept(&body, &signature, TODAY).is_ok());
     let (body, signature) = sign(&report(day, vec![count(10_000_001)]), &key());
     assert_eq!(accept(&body, &signature, TODAY), Err(Refused::TooMany));
+}
+
+#[test]
+fn accept_refuses_a_weak_key() {
+    use base64::Engine;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    // The identity point as the key and a signature R = identity, s = 0: plain verify takes it
+    // for any message, verify_strict does not.
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut v = serde_json::to_value(report(date(2026, 11, 24), one())).unwrap();
+    v["workspace"] = b64(&identity).into();
+    let body = serde_json::to_vec(&v).unwrap();
+    let mut signature = [0u8; 64];
+    signature[0] = 1;
+    assert_eq!(
+        accept(&body, &b64(&signature), TODAY),
+        Err(Refused::BadSignature)
+    );
+}
+
+#[test]
+fn a_body_of_exactly_64_kib_is_accepted() {
+    let (body, _) = sign(&report(date(2026, 11, 24), one()), &key());
+    let mut body = body;
+    body.resize(65_536, b' ');
+    let signature = sign_bytes(&body);
+    assert!(accept(&body, &signature, TODAY).is_ok());
+}
+
+/// `report` with `edit` applied to its JSON, signed by the test key.
+fn edited(edit: impl FnOnce(&mut serde_json::Value)) -> (Vec<u8>, String) {
+    let mut v = serde_json::to_value(report(date(2026, 11, 24), one())).unwrap();
+    edit(&mut v);
+    let body = serde_json::to_vec(&v).unwrap();
+    let signature = sign_bytes(&body);
+    (body, signature)
+}
+
+#[test]
+fn accept_refuses_what_one_install_cannot_report() {
+    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>;
+    let cases: [(&str, Edit); 4] = [
+        ("people over 1", Box::new(|v| v["people"] = 2.into())),
+        (
+            "a version over 64 characters",
+            Box::new(|v| v["version"] = "9".repeat(65).into()),
+        ),
+        (
+            "one event and door twice",
+            Box::new(|v| {
+                let c = v["counts"][0].clone();
+                v["counts"].as_array_mut().unwrap().push(c);
+            }),
+        ),
+        (
+            "notes_due through a door",
+            Box::new(|v| {
+                v["counts"][0]["event"] = "notes_due".into();
+            }),
+        ),
+    ];
+    for (what, edit) in cases {
+        let (body, signature) = edited(edit);
+        assert_eq!(
+            accept(&body, &signature, TODAY),
+            Err(Refused::Malformed),
+            "{what}"
+        );
+    }
+    let (body, signature) = edited(|v| v["version"] = "9".repeat(64).into());
+    assert!(accept(&body, &signature, TODAY).is_ok());
 }

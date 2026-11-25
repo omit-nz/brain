@@ -115,10 +115,15 @@ pub struct Sent {
     pub refused: usize,
     /// The outcome that stopped the run, when a send failed.
     pub failed: Option<String>,
+    /// Another process held the send lock, so this run sent nothing.
+    pub busy: bool,
 }
 
 impl Sent {
     pub fn line(&self) -> String {
+        if self.busy {
+            return "usage: another brain is sending, so this run sent nothing".into();
+        }
         let mut line = format!("usage: {} sent, {} refused", self.sent, self.refused);
         if let Some(f) = &self.failed {
             line.push_str(&format!(", stopped at {f}"));
@@ -132,12 +137,9 @@ impl Sent {
 /// exactly. A day sent or refused is settled; a failure stops the run until the next one.
 pub fn send_due(dirs: &Dirs, index: &Index, clock: &dyn Clock) -> anyhow::Result<Sent> {
     let mut out = Sent::default();
-    let config = Config::load(dirs)?;
-    if !config.usage.send {
-        return Ok(out);
-    }
     // One sender at a time, so the daemon and `brain usage send` never send a day twice.
     let Some(_lock) = Lock::try_acquire(&dirs.data.join(SEND_LOCK))? else {
+        out.busy = true;
         return Ok(out);
     };
     let activity = Activity::open(&store(dirs))?;
@@ -152,6 +154,11 @@ pub fn send_due(dirs: &Dirs, index: &Index, clock: &dyn Clock) -> anyhow::Result
         .build()?;
     let mut key = None;
     while day < today {
+        // Read before every day, so `brain usage off` stops even a run already going.
+        let config = Config::load(dirs)?;
+        if !config.usage.send {
+            break;
+        }
         let row = match activity.send(day)? {
             Some(row) => row,
             None => {
@@ -197,7 +204,17 @@ fn report(
         .into_iter()
         .map(|(event, door, n)| Count { event, door, n })
         .collect();
-    let people = u32::from(!counts.is_empty());
+    // brain's own failures are not someone using it.
+    let people = u32::from(counts.iter().any(|c| {
+        !matches!(
+            c.event,
+            Event::ErrorIndex
+                | Event::ErrorEmbed
+                | Event::ErrorWatch
+                | Event::ErrorSend
+                | Event::ErrorUpdate
+        )
+    }));
     let due = index.due(me, day)?.len() as u64;
     if due > 0 {
         counts.push(Count {
@@ -224,7 +241,9 @@ fn post(client: &reqwest::blocking::Client, endpoint: &str, row: &activity::Send
             let status = r.status();
             if status.is_success() {
                 "sent".into()
-            } else if status.is_client_error() && !matches!(status.as_u16(), 408 | 429) {
+            } else if matches!(status.as_u16(), 400 | 401 | 413 | 422) {
+                // Only the endpoint's own refusals settle a day; a 403 or 404 from a proxy or a
+                // wrong path says nothing about the report.
                 format!("refused: {}", status.as_u16())
             } else {
                 format!("failed: {}", status.as_u16())
@@ -257,9 +276,12 @@ fn install_key(dirs: &Dirs) -> anyhow::Result<SigningKey> {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             let path = dirs.data.join(KEY);
-            bytes = std::fs::read(&path)?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("{} is not a 32-byte key", path.display()))?;
+            bytes = std::fs::read(&path)?.try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "{} is not a 32-byte key; delete it and brain makes a new one",
+                    path.display()
+                )
+            })?;
         }
         Err(e) => return Err(e).context("writing the usage key"),
     }

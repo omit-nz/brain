@@ -15,6 +15,7 @@ const MAX_BODY: usize = 65_536;
 const MAX_COUNTS: usize = 500;
 const MAX_N: u64 = 10_000_000;
 const MAX_AGE_DAYS: i64 = 30;
+const MAX_VERSION: usize = 64;
 
 /// One closed day of one install. `workspace` is the install's public key, URL-safe base64: it
 /// tells days of one install apart and names no one.
@@ -106,6 +107,20 @@ pub fn accept(body: &[u8], signature: &str, today: Date) -> Result<Report, Refus
     }
     if report.counts.len() > MAX_COUNTS || report.counts.iter().any(|c| c.n > MAX_N) {
         return Err(Refused::TooMany);
+    }
+    // Any key signs anything, so a report must also look like one install's day: at most one
+    // person, one count per event and door, and notes due through no door.
+    let mut pairs: Vec<_> = report.counts.iter().map(|c| (c.event, c.door)).collect();
+    pairs.sort();
+    let one_install = report.people <= 1
+        && report.version.chars().count() <= MAX_VERSION
+        && pairs.windows(2).all(|w| w[0] != w[1])
+        && report
+            .counts
+            .iter()
+            .all(|c| c.event != Event::NotesDue || c.door.is_none());
+    if !one_install {
+        return Err(Refused::Malformed);
     }
     Ok(report)
 }
