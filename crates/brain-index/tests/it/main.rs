@@ -341,8 +341,8 @@ fn the_index_rebuilds_from_the_vault_alone() {
     assert_eq!(links, vec!["b"]);
 }
 
-/// A note saved after `settled_before` is still being typed: its id is not written, so the note
-/// waits for a later pass, while a note that already has an id is indexed at once.
+/// A note saved after `settled_before` is still being typed: it is searchable at once, and its id
+/// is written by the first pass after it settles, however many passes come before.
 #[test]
 fn an_id_is_not_written_into_a_note_saved_moments_ago() {
     let f = Fixture::new();
@@ -359,16 +359,14 @@ fn an_id_is_not_written_into_a_note_saved_moments_ago() {
     let vault = Vault::open(f.vault.path()).unwrap();
     let mut idx = Index::open(&f.db()).unwrap();
 
-    let early = idx
-        .reindex_settled(&vault, saved - jiff::SignedDuration::from_secs(5), saved)
-        .unwrap();
-    assert_eq!(f.read("fresh.md"), "being typed\n");
-    assert_eq!((early.deferred, early.ids_written), (1, 0));
-    assert_eq!(
-        idx.note_count().unwrap(),
-        1,
-        "the note with an id is indexed"
-    );
+    for _ in 0..2 {
+        let early = idx
+            .reindex_settled(&vault, saved - jiff::SignedDuration::from_secs(5), saved)
+            .unwrap();
+        assert_eq!(f.read("fresh.md"), "being typed\n");
+        assert_eq!((early.deferred, early.ids_written), (1, 0));
+        assert_eq!(idx.note_count().unwrap(), 2, "both notes are indexed");
+    }
 
     let later = idx
         .reindex_settled(

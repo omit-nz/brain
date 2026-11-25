@@ -13,6 +13,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::Index;
 
 const BATCH: usize = 200;
+/// The mtime stored for a note indexed before its id was written. No file has it (`stat` gives
+/// none below 0), so the next pass always reads the note again.
+const UNSETTLED: i64 = -1;
 
 #[derive(Debug, Default)]
 pub struct Reindexed {
@@ -24,7 +27,8 @@ pub struct Reindexed {
     pub ids_reassigned: usize,
     /// Notes indexed with no id, because none can be written into their frontmatter.
     pub unidentified: Vec<String>,
-    /// Notes left for a later pass: they need an id but were saved too recently to write one.
+    /// Notes indexed with their id left for a later pass: they need one but were saved too
+    /// recently to write it.
     pub deferred: usize,
 }
 
@@ -219,8 +223,8 @@ impl Index {
             }
         }
         // A note whose id cannot be written (broken frontmatter, a read-only folder, a file held
-        // open) is indexed without one: searchable by its owner, never synced.
-        let mut young = HashSet::new();
+        // open) is indexed without one: searchable by its owner, never synced. So is a note still
+        // being typed, until the first pass after it settles writes its id.
         for w in &mut work {
             if w.note.id.is_none()
                 && typing.as_ref().is_some_and(|t| {
@@ -229,7 +233,8 @@ impl Index {
                     )
                 })
             {
-                young.insert(w.key.clone());
+                out.deferred += 1;
+                w.mtime_ns = UNSETTLED;
                 continue;
             }
             let root = &vault.root;
@@ -263,9 +268,6 @@ impl Index {
             }
             w.uuid = w.note.id.filter(|_| keeps_id).map(|u| u.to_string());
         }
-        out.deferred = young.len();
-        work.retain(|w| !young.contains(&w.key));
-
         let tx = self.conn.transaction()?;
         for key in existing.keys().filter(|k| !seen.contains(*k)) {
             tx.execute("DELETE FROM notes WHERE path = ?1", [key])?;

@@ -253,6 +253,11 @@ fn an_id_is_not_written_into_a_note_saved_moments_ago() {
     h.put("typing.md", typed);
     d.wait_for_passes(2);
     assert_eq!(
+        found(&h, "typed"),
+        ["typing.md"],
+        "searchable before its id"
+    );
+    assert_eq!(
         fs::read_to_string(h.vault.path().join("typing.md")).unwrap(),
         typed
     );

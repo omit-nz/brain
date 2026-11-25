@@ -53,7 +53,7 @@ pub fn summary(r: &Reindexed) -> String {
     );
     if r.deferred > 0 {
         line.push_str(&format!(
-            ", {} left until their owner stops typing",
+            ", {} waiting for their owner to stop typing to get an id",
             r.deferred
         ));
     }
