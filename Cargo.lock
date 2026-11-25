@@ -226,12 +226,15 @@ dependencies = [
  "brain-platform",
  "brain-report",
  "clap",
+ "ed25519-dalek",
  "flate2",
+ "getrandom 0.3.4",
  "globset",
  "jiff",
  "ll-core",
  "notify",
  "notify-debouncer-full",
+ "reqwest",
  "rmcp",
  "rusqlite",
  "schemars",
@@ -304,6 +307,9 @@ dependencies = [
 name = "brain-report"
 version = "0.1.1"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "jiff",
  "serde",
  "serde_json",
 ]

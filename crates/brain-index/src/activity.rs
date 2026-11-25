@@ -12,7 +12,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db;
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/activity/0001_activity.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/activity/0001_activity.sql"),
+    include_str!("../migrations/activity/0002_sends.sql"),
+];
 
 pub struct Activity {
     conn: Connection,
@@ -28,11 +31,84 @@ pub struct Gap {
     pub area: Option<String>,
 }
 
+/// A day's report as ledgered: the bytes sent, their signature and what came of sending them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Send {
+    pub day: Date,
+    pub at: Timestamp,
+    pub body: Vec<u8>,
+    pub signature: String,
+    pub outcome: String,
+}
+
 impl Activity {
     pub fn open(path: &Path) -> anyhow::Result<Activity> {
         Ok(Activity {
             conn: db::open(path, MIGRATIONS)?,
         })
+    }
+
+    /// Ledgers `day`'s report as pending unless the day has a row already: the first body
+    /// ledgered is the one every later send repeats.
+    pub fn ledger(
+        &self,
+        day: Date,
+        at: Timestamp,
+        body: &[u8],
+        signature: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO sends(day, at, body, signature, outcome) VALUES (?1, ?2, ?3, ?4, 'pending')
+             ON CONFLICT(day) DO NOTHING",
+            params![day.to_string(), at.to_string(), body, signature],
+        )?;
+        Ok(())
+    }
+
+    pub fn outcome(&self, day: Date, outcome: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE sends SET outcome = ?2 WHERE day = ?1",
+            params![day.to_string(), outcome],
+        )?;
+        Ok(())
+    }
+
+    /// Every ledgered send, oldest day first.
+    pub fn sends(&self) -> anyhow::Result<Vec<Send>> {
+        self.sends_where("", None)
+    }
+
+    /// `day`'s ledger row.
+    pub fn send(&self, day: Date) -> anyhow::Result<Option<Send>> {
+        Ok(self.sends_where("WHERE day = ?1", Some(day))?.pop())
+    }
+
+    fn sends_where(&self, filter: &str, day: Option<Date>) -> anyhow::Result<Vec<Send>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT day, at, body, signature, outcome FROM sends {filter} ORDER BY day"
+        ))?;
+        let args: Vec<String> = day.iter().map(Date::to_string).collect();
+        let rows = st.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (day, at, body, signature, outcome) = row?;
+            out.push(Send {
+                day: day.parse()?,
+                at: at.parse()?,
+                body,
+                signature,
+                outcome,
+            });
+        }
+        Ok(out)
     }
 
     /// Adds one to `event` on `day` through `door`, and remembers the first day anything was

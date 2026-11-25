@@ -30,6 +30,7 @@ const SETTLE: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(6);
 const EMBED_BATCH: usize = 32;
 const RECHECK_EVERY: Duration = Duration::from_secs(3600);
+const SEND_EVERY: Duration = Duration::from_secs(3600);
 
 pub fn writer_lock(dirs: &Dirs) -> PathBuf {
     dirs.data.join(WRITER_LOCK)
@@ -95,6 +96,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     let mut rewatch = false;
     let mut changed = false;
     let mut last_recheck: Option<Instant> = None;
+    let mut last_send: Option<Instant> = None;
     let mut next = Instant::now();
     loop {
         if due {
@@ -134,6 +136,14 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                 match filled {
                     Ok(n) => eprintln!("recheck: {n} gaps filled"),
                     Err(e) => eprintln!("{}", terminal(&format!("recheck failed: {e:#}"))),
+                }
+            }
+            // At start and hourly; a pass comes at least every BACKSTOP, so the hour holds.
+            if last_send.is_none_or(|t: Instant| t.elapsed() >= SEND_EVERY) {
+                last_send = Some(Instant::now());
+                match usage::send_due(dirs, &idx, clock) {
+                    Ok(s) => eprintln!("{}", s.line()),
+                    Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),
                 }
             }
         }

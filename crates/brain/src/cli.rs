@@ -200,6 +200,9 @@ enum UsageAction {
     On,
     /// Keep the counts on this machine only.
     Off,
+    /// Send the closed days' counts now; the daemon does this hourly.
+    #[command(hide = true)]
+    Send,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -289,6 +292,10 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             None => usage::show(dirs, clock.today()),
             Some(UsageAction::On) => usage::set(dirs, true),
             Some(UsageAction::Off) => usage::set(dirs, false),
+            Some(UsageAction::Send) => {
+                println!("{}", usage::send_due(dirs, &index(dirs)?, &*clock)?.line());
+                Ok(())
+            }
         },
         Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Mcp { door } => mcp::run(dirs, clock, door.into()),

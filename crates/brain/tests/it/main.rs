@@ -53,6 +53,17 @@ impl Home {
             "--vault",
             self.vault.path().to_str().unwrap(),
         ]);
+        // No test reaches the real endpoint: only the usage tests turn sending on, at their own
+        // listener.
+        self.usage("send = false");
+    }
+
+    /// Replaces the config's `[usage]` table with `table`.
+    fn usage(&self, table: &str) {
+        let path = self.home.path().join("config/config.toml");
+        let config = fs::read_to_string(&path).unwrap();
+        let rest = config.split("[usage]").next().unwrap().trim_end();
+        fs::write(&path, format!("{rest}\n\n[usage]\n{table}\n")).unwrap();
     }
 
     fn put(&self, rel: &str, text: &str) {

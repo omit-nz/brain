@@ -22,11 +22,14 @@ brain-note = { path = "../brain-note" }
 brain-platform = { path = "../brain-platform" }
 brain-report = { path = "../brain-report" }
 clap.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
 globset.workspace = true
 jiff.workspace = true
 ll-core.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
+reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
