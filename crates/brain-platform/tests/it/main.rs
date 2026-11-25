@@ -8,6 +8,7 @@ use brain_platform::fs::{
     Lock, Privacy, archive, create_dir_private, ensure_private_file, rename_within,
     replace_unchanged, write_atomic,
 };
+use brain_platform::service::plist;
 
 #[test]
 fn a_replace_refuses_a_file_changed_since_it_was_read() {
@@ -461,4 +462,96 @@ fn a_probe_never_takes_the_lock_from_a_writer() {
         p.join().unwrap();
     }
     assert_eq!(refused, 0, "a probe was read as a writer");
+}
+
+/// The element after `<key>{key}</key>` in a top-level dict, as its raw XML up to the next key
+/// or the dict's end.
+fn plist_value<'a>(plist: &'a str, key: &str) -> &'a str {
+    let open = format!("<key>{key}</key>");
+    let at = plist
+        .find(&open)
+        .unwrap_or_else(|| panic!("no {key}:\n{plist}"))
+        + open.len();
+    let rest = &plist[at..];
+    let end = ["<key>", "\n</dict>"]
+        .iter()
+        .filter_map(|m| rest.find(m))
+        .min()
+        .unwrap_or(rest.len());
+    rest[..end].trim()
+}
+
+#[test]
+fn the_plist_runs_the_daemon_and_restarts_it_on_a_crash() {
+    let p = plist(
+        Path::new("/Users/r/brain-current/brain"),
+        Path::new("/Users/r/Library/Logs/brain/daemon.log"),
+        None,
+    );
+    assert!(p.starts_with("<?xml"));
+    assert_eq!(plist_value(&p, "Label"), "<string>nz.omit.brain</string>");
+    assert_eq!(
+        plist_value(&p, "ProgramArguments")
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        [
+            "<array>",
+            "<string>/Users/r/brain-current/brain</string>",
+            "<string>daemon</string>",
+            "</array>"
+        ]
+    );
+    assert_eq!(plist_value(&p, "RunAtLoad"), "<true/>");
+    let flat = p.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("<key>KeepAlive</key> <dict> <key>SuccessfulExit</key> <false/> </dict>"),
+        "{p}"
+    );
+    assert_eq!(
+        plist_value(&p, "ProcessType"),
+        "<string>Background</string>"
+    );
+    for key in ["StandardErrorPath", "StandardOutPath"] {
+        assert_eq!(
+            plist_value(&p, key),
+            "<string>/Users/r/Library/Logs/brain/daemon.log</string>"
+        );
+    }
+    assert!(!p.contains("EnvironmentVariables"));
+    let with_home = plist(Path::new("/b"), Path::new("/l"), Some(Path::new("/h")));
+    let flat = with_home.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "<key>EnvironmentVariables</key> <dict> <key>BRAIN_HOME</key> <string>/h</string> </dict>"
+        ),
+        "{with_home}"
+    );
+    #[cfg(target_os = "macos")]
+    for text in [&p, &with_home] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.plist");
+        fs::write(&file, text).unwrap();
+        let lint = std::process::Command::new("/usr/bin/plutil")
+            .arg("-lint")
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(
+            lint.status.success(),
+            "{}",
+            String::from_utf8_lossy(&lint.stdout)
+        );
+    }
+}
+
+#[test]
+fn a_path_with_xml_characters_is_escaped() {
+    let p = plist(
+        Path::new("/Users/a&b/<x>/\"q\"/brain"),
+        Path::new("/l"),
+        Some(Path::new("/h&<")),
+    );
+    assert!(p.contains("<string>/Users/a&amp;b/&lt;x&gt;/&quot;q&quot;/brain</string>"));
+    assert!(p.contains("<string>/h&amp;&lt;</string>"));
+    assert!(!p.contains("a&b"));
 }

@@ -9,18 +9,18 @@ use zipsign_api::SigningKey;
 
 const NEW: &str = "9.9.9";
 
-fn key(seed: u8) -> SigningKey {
+pub(crate) fn key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
-fn public(k: &SigningKey) -> [u8; 32] {
+pub(crate) fn public(k: &SigningKey) -> [u8; 32] {
     k.verifying_key().to_bytes()
 }
 
 /// `brain-<version>-<target>.tar.gz` holding `brain-<version>/brain` and its runtime library,
 /// signed by every key in `signers` (none: unsigned), with the archive's file name as the signing
 /// context.
-fn archive(dir: &Path, version: &str, signers: &[SigningKey]) -> PathBuf {
+pub(crate) fn archive(dir: &Path, version: &str, signers: &[SigningKey]) -> PathBuf {
     let name = format!("brain-{version}-{}.tar.gz", update::host_target().unwrap());
     let unsigned = dir.join(format!("unsigned-{name}"));
     {
@@ -104,6 +104,8 @@ impl ReleaseSource for Local {
         ])
     }
 }
+
+impl update::Source for Local {}
 
 /// An install of the current version, and the update path pointed at `archive`.
 fn install_and_update(

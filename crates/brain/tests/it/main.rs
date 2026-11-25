@@ -1,5 +1,6 @@
 mod daemon;
 mod import;
+mod service;
 mod update;
 
 use std::fs;

@@ -271,6 +271,7 @@ dependencies = [
  "anyhow",
  "directories",
  "jiff",
+ "rustix",
  "tempfile",
 ]
 

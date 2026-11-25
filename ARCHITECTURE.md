@@ -18,3 +18,5 @@ One process writes the index: whoever holds `writer.lock` in the data folder, wh
 ## Platforms
 
 CI builds and tests every push on macOS, Linux and Windows, on GitHub-hosted runners only. A test that means something only on Unix (file modes) asserts the Unix fact under `cfg(unix)` and the Windows fact under `cfg(windows)` inside `brain-platform`'s tests; neither is skipped. `.gitattributes` fixes LF line ends everywhere, so byte-compared files mean the same on every platform. Every job stages ONNX Runtime from NuGet with `scripts/fetch-ort.sh` and sets `ORT_DYLIB_PATH`, because GitHub's copy has been gone since November 2026.
+
+`brain start` and `brain stop` run the daemon as a launchd agent, so they work on macOS only in Phase 1; on Linux and Windows they say so, `brain daemon` runs by hand, and an update finds no agent to restart. Their launchd tests run on macOS only, against a `launchctl` stub named by `BRAIN_LAUNCHCTL`; `start_outside_macos_says_so` runs on the other two.

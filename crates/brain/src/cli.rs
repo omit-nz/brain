@@ -6,6 +6,7 @@ use brain_note::{Frontmatter, Kind, Split, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Lock, Privacy, create_dir_private, write_atomic};
+use brain_platform::service::{self, Launchctl};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use jiff::ToSpan;
 use serde_json::json;
@@ -90,7 +91,14 @@ enum Command {
         /// Only say whether a newer release exists.
         #[arg(long)]
         check: bool,
+        /// Read releases from this folder instead of GitHub (for tests).
+        #[arg(long, hide = true)]
+        from_dir: Option<PathBuf>,
     },
+    /// Run the daemon at every login, and now (macOS).
+    Start,
+    /// Stop the daemon, and keep it from starting at login.
+    Stop,
     /// Check a release archive's signature against this build's release key.
     #[command(hide = true)]
     ReleaseVerify { archive: PathBuf },
@@ -204,7 +212,16 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         }
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
-        Command::Update { check } => update(dirs, check),
+        Command::Update { check, from_dir } => match from_dir {
+            Some(dir) => update(dirs, check, update::LocalDir(dir)),
+            None => update(dirs, check, update::GitHub),
+        },
+        Command::Start => start(dirs),
+        Command::Stop => {
+            launchctl().stop()?;
+            println!("brain's daemon is stopped and will not start at login");
+            Ok(())
+        }
         Command::ReleaseVerify { archive } => {
             update::verify(&archive, &update::release_keys())?;
             println!(
@@ -438,10 +455,47 @@ fn show(dirs: &Dirs, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn update(dirs: &Dirs, check: bool) -> anyhow::Result<()> {
+/// `launchctl` as `BRAIN_LAUNCHCTL` names it, so a test can hand brain a stub.
+fn launchctl() -> Launchctl {
+    Launchctl(
+        std::env::var_os("BRAIN_LAUNCHCTL")
+            .map_or_else(|| PathBuf::from("/bin/launchctl"), PathBuf::from),
+    )
+}
+
+/// Loads the daemon as a launchd agent, once everything it needs is in place, so launchd is never
+/// handed a daemon that exits at once and restarts every ten seconds.
+fn start(dirs: &Dirs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        service::SUPPORTED,
+        "brain start runs the daemon as a launchd agent, which is macOS only in this release; run `brain daemon` in a terminal instead"
+    );
+    let exe = update::install_dir(&dirs.bin).join(update::exe_name());
+    anyhow::ensure!(
+        exe.is_file(),
+        "no install at {}; install brain with scripts/install.sh first",
+        exe.display()
+    );
+    Config::load(dirs)?;
+    index(dirs)?;
+    let home = std::env::home_dir().context("no home folder for the launch agent")?;
+    let log = home.join("Library/Logs/brain/daemon.log");
+    let brain_home = std::env::var_os("BRAIN_HOME").map(PathBuf::from);
+    launchctl().start(&home, &service::plist(&exe, &log, brain_home.as_deref()))?;
+    println!(
+        "{}",
+        terminal(&format!(
+            "brain's daemon is running and starts at every login; its log is {}",
+            log.display()
+        ))
+    );
+    Ok(())
+}
+
+fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     if check {
-        match update::check(update::GitHub, version)? {
+        match update::check(source, version)? {
             Some(newer) => {
                 println!("brain {newer} is out; you have {version}. Run `brain update`.")
             }
@@ -455,11 +509,14 @@ fn update(dirs: &Dirs, check: bool) -> anyhow::Result<()> {
         "no install at {}; brain updates only what scripts/install.sh installed",
         current.display()
     );
-    let installed = update::run(update::GitHub, &update::release_keys(), &current, version)?;
+    let installed = update::run(source, &update::release_keys(), &current, version)?;
     if installed == version {
         println!("brain {version} is the newest release.");
     } else {
         println!("brain {installed} installed over {version}.");
+        if launchctl().restart_if_loaded()? {
+            println!("restarted the daemon");
+        }
     }
     Ok(())
 }
