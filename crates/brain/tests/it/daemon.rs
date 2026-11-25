@@ -439,3 +439,114 @@ fn status_says_whether_the_daemon_runs() {
     assert_eq!(h.json(&["status", "--json"])["daemon"], true);
     assert!(h.run(&["status"]).contains("daemon: running"));
 }
+
+// The daemon's own updates. Each home's install holds a copy of this build, so a daemon run from
+// there is the install; the releases are signed locally and trusted through BRAIN_TEST_RELEASE_KEY.
+
+/// A home whose `brain-current` holds a copy of this build; returns the copy's path.
+fn installed_home() -> (Home, std::path::PathBuf) {
+    let h = Home::new();
+    h.init();
+    let current = h.home.path().join("data/bin/brain-current");
+    std::fs::create_dir_all(current.join("lib")).unwrap();
+    let exe = current.join(brain::update::exe_name());
+    std::fs::copy(assert_cmd::cargo::cargo_bin("brain"), &exe).unwrap();
+    (h, exe)
+}
+
+/// A release folder with 9.9.9 signed by `signer`, and the hex of the key the daemon trusts.
+fn releases(signer: u8) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    super::update::archive(dir.path(), "9.9.9", &[super::update::key(signer)]);
+    let trusted = super::update::public(&super::update::key(7));
+    (dir, trusted.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// `exe daemon --from-dir releases`, its stderr in the home's `daemon.err`.
+fn updating_daemon(
+    h: &Home,
+    exe: &std::path::Path,
+    releases: &std::path::Path,
+    hex: &str,
+) -> std::process::Child {
+    std::process::Command::new(exe)
+        .args(["daemon", "--from-dir", releases.to_str().unwrap()])
+        .env("BRAIN_HOME", h.home.path())
+        .env("BRAIN_TEST_RELEASE_KEY", hex)
+        .env_remove("ORT_DYLIB_PATH")
+        .env_remove("LL_MODELS_DIR")
+        .stderr(std::fs::File::create(h.home.path().join("daemon.err")).unwrap())
+        .spawn()
+        .unwrap()
+}
+
+/// Waits up to 60 s for `line` in the daemon's stderr, and returns all of it.
+fn stderr_with(h: &Home, line: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let err = std::fs::read_to_string(h.home.path().join("daemon.err")).unwrap_or_default();
+        if err.contains(line) {
+            return err;
+        }
+        assert!(std::time::Instant::now() < deadline, "no {line:?} in {err}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+// Replacing the folder a running binary lives in is a Unix move; the daemon updates itself under
+// launchd, on macOS.
+#[cfg(unix)]
+#[test]
+fn the_daemon_installs_a_newer_release_and_exits_for_a_restart() {
+    let (h, exe) = installed_home();
+    let (dir, hex) = releases(7);
+    let mut d = updating_daemon(&h, &exe, dir.path(), &hex);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = d.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon never exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(75));
+    stderr_with(&h, "installed brain 9.9.9; exiting for launchd to restart");
+    assert_eq!(std::fs::read_to_string(&exe).unwrap(), "binary 9.9.9");
+}
+
+#[test]
+fn the_daemon_refuses_an_unsigned_release_and_keeps_running() {
+    let (h, exe) = installed_home();
+    let before = std::fs::read(&exe).unwrap();
+    let (dir, hex) = releases(8);
+    let mut d = updating_daemon(&h, &exe, dir.path(), &hex);
+    let err = stderr_with(&h, "update failed");
+    assert!(err.to_lowercase().contains("signature"), "{err}");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let alive = d.try_wait().unwrap().is_none();
+    let _ = d.kill();
+    let _ = d.wait();
+    assert!(alive, "the daemon keeps running the old version");
+    assert!(
+        std::fs::read(&exe).unwrap() == before,
+        "the install is unchanged"
+    );
+}
+
+#[test]
+fn a_daemon_outside_the_install_never_updates() {
+    let (h, exe) = installed_home();
+    let before = std::fs::read(&exe).unwrap();
+    let (dir, hex) = releases(7);
+    let mut d = updating_daemon(&h, &assert_cmd::cargo::cargo_bin("brain"), dir.path(), &hex);
+    stderr_with(&h, "not run from its install, so it never updates itself");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let alive = d.try_wait().unwrap().is_none();
+    let _ = d.kill();
+    let _ = d.wait();
+    assert!(alive);
+    assert!(std::fs::read(&exe).unwrap() == before);
+}

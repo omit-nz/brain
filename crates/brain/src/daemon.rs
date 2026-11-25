@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use brain::update;
 use brain_index::activity::Activity;
 use brain_index::{Index, Reindexed, embed};
 use brain_note::Vault;
@@ -31,6 +32,9 @@ const RETRY: Duration = Duration::from_secs(6);
 const EMBED_BATCH: usize = 32;
 const RECHECK_EVERY: Duration = Duration::from_secs(3600);
 const SEND_EVERY: Duration = Duration::from_secs(3600);
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// The exit that tells launchd (KeepAlive, SuccessfulExit false) to start the new binary.
+const EXIT_UPDATED: i32 = 75;
 
 pub fn writer_lock(dirs: &Dirs) -> PathBuf {
     dirs.data.join(WRITER_LOCK)
@@ -56,7 +60,52 @@ pub fn summary(r: &Reindexed) -> String {
     line
 }
 
-pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
+/// Installs a newer signed release over the install this daemon runs from, through the same
+/// checks `brain update` makes, then exits for launchd to start it. A failure leaves this version
+/// running; a brain run from anywhere but its install (a dev build) never replaces anything.
+fn update_self(dirs: &Dirs, store: &Path, clock: &dyn Clock, from_dir: Option<&Path>) {
+    let current = update::install_dir(&dirs.bin);
+    let from_install = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .ok()
+        .zip(current.canonicalize().ok())
+        .is_some_and(|(exe, install)| exe.starts_with(install));
+    if !from_install {
+        eprintln!("update: this brain was not run from its install, so it never updates itself");
+        return;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let installed = match from_dir {
+        Some(dir) => newer(|| update::LocalDir(dir.to_path_buf()), &current, version),
+        None => newer(|| update::GitHub, &current, version),
+    };
+    match installed {
+        Ok(None) => {}
+        Ok(Some(v)) => {
+            eprintln!("installed brain {v}; exiting for launchd to restart");
+            std::process::exit(EXIT_UPDATED);
+        }
+        Err(e) => {
+            eprintln!("{}", terminal(&format!("update failed: {e:#}")));
+            usage::count(store, clock.today(), Event::ErrorUpdate, None);
+        }
+    }
+}
+
+/// The version installed over `current`, when a newer one was out.
+fn newer<S: update::Source>(
+    source: impl Fn() -> S,
+    current: &Path,
+    version: &str,
+) -> anyhow::Result<Option<String>> {
+    if update::check(source(), version)?.is_none() {
+        return Ok(None);
+    }
+    let v = update::run(source(), &update::release_keys(), current, version)?;
+    Ok((v != version).then_some(v))
+}
+
+pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<()> {
     let path = writer_lock(dirs);
     let _lock = match Lock::try_acquire(&path)? {
         Some(lock) => lock,
@@ -97,6 +146,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     let mut changed = false;
     let mut last_recheck: Option<Instant> = None;
     let mut last_send: Option<Instant> = None;
+    let mut last_update: Option<Instant> = None;
     let mut next = Instant::now();
     loop {
         if due {
@@ -145,6 +195,10 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
                     Ok(s) => eprintln!("{}", s.line()),
                     Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),
                 }
+            }
+            if last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY) {
+                last_update = Some(Instant::now());
+                update_self(dirs, &store, clock, from_dir);
             }
         }
         // One batch a turn, so a save made during a long first embed waits for one batch only.

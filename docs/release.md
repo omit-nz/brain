@@ -22,6 +22,10 @@ The first install trusts HTTPS from GitHub and `SHA256SUMS` from the same releas
 
 Every later update is checked by the brain already installed, before anything is replaced: `brain update` downloads the archive and refuses it unless its signature verifies against the key that brain was built with. A build whose key file is the all-zero placeholder ships no key, and refuses to update or to verify anything.
 
+## How the daemon updates itself
+
+The daemon checks for a newer release when it starts and then once a day. It installs one only through the same path as `brain update`: the archive's signature must verify against the release key built into the running brain (and, once releases are notarised, Apple's signature must name omit's Team ID), and the install folder is replaced whole. Then it prints `installed brain <version>; exiting for launchd to restart` and exits with code 75; launchd's `KeepAlive` (restart unless the exit was clean) starts the new binary. A failed check or install prints one line, is counted as an update error, and leaves the old version running until the next day's check. A brain run from anywhere but its install, such as a `cargo build`, says so at start and never updates itself.
+
 ## Cutting a release
 
 1. Set `version` under `[workspace.package]` in `Cargo.toml`; every crate takes the workspace version (`every_crate_takes_the_workspace_version`). Commit through a PR.

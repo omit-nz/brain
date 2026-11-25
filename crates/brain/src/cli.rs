@@ -51,7 +51,11 @@ enum Command {
     /// Bring the index up to date with the vault, and embed what is new.
     Index,
     /// Keep the index up to date as notes change, until stopped.
-    Daemon,
+    Daemon {
+        /// Read releases from this folder instead of GitHub (for tests).
+        #[arg(long, hide = true)]
+        from_dir: Option<PathBuf>,
+    },
     /// Search your notes.
     Search {
         #[arg(required = true, num_args = 1..)]
@@ -251,7 +255,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
         Command::Index => reindex(dirs, &*clock),
-        Command::Daemon => daemon::run(dirs, &*clock),
+        Command::Daemon { from_dir } => daemon::run(dirs, &*clock, from_dir.as_deref()),
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
         Command::Add { text, title, kind } => {
