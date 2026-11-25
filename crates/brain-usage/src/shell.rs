@@ -1,6 +1,6 @@
 //! The Worker around the statements: `POST /v1/day` takes a report of at most 64 KiB, checks it
 //! with `accept` against today's UTC date, and writes its rows to D1. Nothing else of the request
-//! (address, headers, timing) is kept.
+//! (address, headers, timing) is kept; the address only keys the rate limit.
 
 use brain_report::{MAX_BODY, accept};
 use futures_util::StreamExt;
@@ -13,6 +13,11 @@ use crate::{Param, statements, status, utc_date};
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() != Method::Post || req.path() != "/v1/day" {
         return Ok(Response::empty()?.with_status(404));
+    }
+    let address = req.headers().get("cf-connecting-ip")?.unwrap_or_default();
+    let limit = env.rate_limiter("USAGE_LIMIT")?;
+    if !limit.limit(address).await?.success {
+        return Ok(Response::empty()?.with_status(429));
     }
     let mut body = Vec::new();
     // A request with no body has no stream; accept refuses the empty body as malformed.

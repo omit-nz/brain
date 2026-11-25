@@ -43,6 +43,8 @@ One report per closed day, a JSON object with these fields and no others:
 
 The report is signed with the install's key, and the signature travels beside it in a `brain-signature` header, so omit can tell a report was not changed on the way.
 
+omit's endpoint keeps the report's counts and nothing else of the request: no request logs, no address. Your address is used only for a rate limit: more than 10 requests in a minute from one address are answered 429, and brain tries the day again at the next run.
+
 The daemon sends at start and then hourly; today is never sent, only days that have ended. A run looks back seven days at most, from the first day anything was counted, so a laptop that was offline for a week sends each missed day once when it is back. Older days are never sent.
 
 Before a report is sent, it is written to a usage ledger in `activity.db`, and a day is only ever sent as those ledgered bytes, so a retry repeats exactly what you can read in `brain usage`. A day omit accepted, or refused as a bad report (400, 401, 413 or 422), is never sent again; if brain stops after omit accepted a day but before it recorded that, the next run sends the same bytes again, and omit keeps them once. Any other answer, or none, leaves the day to be tried again at the next run, and that run stops at the first failure, waiting at most 10 seconds. A day that keeps failing holds back the days after it, and once it is more than seven days old it is never sent. brain follows no redirect, so a report reaches only the endpoint in your config.

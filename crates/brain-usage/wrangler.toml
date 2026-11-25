@@ -1,18 +1,31 @@
 name = "brain-usage"
 main = "build/index.js"
 compatibility_date = "2026-11-01"
+# brain sends to https://usage.brain.omit.nz/v1/day (config.rs); nothing else serves the Worker.
+routes = [{ pattern = "usage.brain.omit.nz", custom_domain = true }]
+workers_dev = false
+preview_urls = false
 
 [build]
 # worker-build 0.9.0, as CI's wasm job pins it: `cargo install worker-build --version 0.9.0 --locked`.
 command = "worker-build --release"
 
-# No request logs: they would keep the sender's address, which the endpoint never needs.
+# No request logs: they would keep the sender's address, which the endpoint never keeps.
 [observability]
 enabled = false
 
 [[d1_databases]]
 binding = "USAGE_DB"
 database_name = "brain-usage"
-# Set when the database is created at deploy.
-database_id = "create-at-deploy"
+database_id = "9ef3aeda-d5de-4660-835f-2d328adf16f5"
 migrations_dir = "migrations"
+
+# Any key's signed report is accepted, so each address gets 10 requests a minute per Cloudflare
+# location. An install catching up on a week sends 7; the zone's one free WAF rate-limit rule is taken.
+[[ratelimits]]
+name = "USAGE_LIMIT"
+namespace_id = "20001"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
