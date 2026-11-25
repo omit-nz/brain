@@ -31,6 +31,23 @@ pub(crate) fn archive_holding(
     signers: &[SigningKey],
     exe: &str,
 ) -> PathBuf {
+    archive_of(
+        dir,
+        version,
+        signers,
+        exe.as_bytes(),
+        format!("runtime {version}").as_bytes(),
+    )
+}
+
+/// `archive`, with `exe` as the release's brain and `runtime` as its runtime library.
+fn archive_of(
+    dir: &Path,
+    version: &str,
+    signers: &[SigningKey],
+    exe: &[u8],
+    runtime: &[u8],
+) -> PathBuf {
     let name = format!("brain-{version}-{}.tar.gz", update::host_target().unwrap());
     let unsigned = dir.join(format!("unsigned-{name}"));
     {
@@ -40,20 +57,17 @@ pub(crate) fn archive_holding(
         );
         let mut tar = tar::Builder::new(gz);
         for (path, body) in [
-            (
-                format!("brain-{version}/{}", update::exe_name()),
-                exe.to_string(),
-            ),
+            (format!("brain-{version}/{}", update::exe_name()), exe),
             (
                 format!("brain-{version}/lib/{}", update::runtime_name()),
-                format!("runtime {version}"),
+                runtime,
             ),
         ] {
             let mut h = tar::Header::new_gnu();
             h.set_size(body.len() as u64);
             h.set_mode(0o755);
             h.set_cksum();
-            tar.append_data(&mut h, path, body.as_bytes()).unwrap();
+            tar.append_data(&mut h, path, body).unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap();
     }
@@ -117,10 +131,26 @@ impl ReleaseSource for Local {
 
 impl update::Source for Local {}
 
+/// Trusting releases signed by any of `keys`, with no code signature asked for.
+fn trusting(keys: &[[u8; 32]]) -> update::Trust {
+    update::Trust {
+        keys: keys.to_vec(),
+        requirement: None,
+    }
+}
+
 /// An install of the current version, and the update path pointed at `archive`.
 fn install_and_update(
     archive: &Path,
     keys: &[[u8; 32]],
+) -> (tempfile::TempDir, anyhow::Result<String>) {
+    install_and_update_with(archive, &trusting(keys))
+}
+
+/// `install_and_update`, checking the release against `trust`.
+fn install_and_update_with(
+    archive: &Path,
+    trust: &update::Trust,
 ) -> (tempfile::TempDir, anyhow::Result<String>) {
     let root = tempfile::tempdir().unwrap();
     let current = root.path().join("brain-current");
@@ -137,7 +167,7 @@ fn install_and_update(
         Local {
             assets: vec![(name, url)],
         },
-        keys,
+        trust,
         &current,
         "0.1.0",
     );
@@ -276,7 +306,7 @@ fn the_shipped_key_set_is_the_committed_key() {
     let committed =
         fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/keys/release.pub")).unwrap();
     assert_eq!(committed.len(), 32);
-    let keys = update::release_keys();
+    let keys = update::shipped_trust().keys;
     if committed.iter().all(|b| *b == 0) {
         assert!(keys.is_empty(), "the all-zero placeholder must ship no key");
     } else {
@@ -304,7 +334,7 @@ fn version_prints_the_protocol() {
 fn release_verify_without_a_key_exits_1() {
     let dir = tempfile::tempdir().unwrap();
     let a = archive(dir.path(), NEW, &[key(1)]);
-    if !update::release_keys().is_empty() {
+    if !update::shipped_trust().keys.is_empty() {
         return;
     }
     let out = assert_cmd::Command::cargo_bin("brain")
@@ -378,7 +408,12 @@ fn update_picks_the_host_archive_among_every_asset() {
         "runtime old",
     )
     .unwrap();
-    let r = update::run(Local { assets }, &[public(&k)], &current, "0.1.0");
+    let r = update::run(
+        Local { assets },
+        &trusting(&[public(&k)]),
+        &current,
+        "0.1.0",
+    );
     assert_eq!(r.unwrap(), NEW);
     assert_eq!(
         installed(root.path()),
@@ -488,7 +523,12 @@ fn a_silent_release_host_times_out() {
     fs::create_dir_all(&current).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let r = update::run(Silent { url }, &[public(&key(1))], &current, "0.1.0");
+        let r = update::run(
+            Silent { url },
+            &trusting(&[public(&key(1))]),
+            &current,
+            "0.1.0",
+        );
         let _ = tx.send(r.is_err());
     });
     let failed = rx
@@ -515,7 +555,7 @@ fn an_update_waits_for_one_already_running() {
             Local {
                 assets: vec![(name, url)],
             },
-            &[public(&key(1))],
+            &trusting(&[public(&key(1))]),
             &target,
             "0.1.0",
         );
@@ -529,4 +569,108 @@ fn an_update_waits_for_one_already_running() {
     let r = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
     assert_eq!(r.unwrap(), NEW);
     assert_eq!(installed(root.path()).0, format!("binary {NEW}"));
+}
+
+/// An install whose update is checked against `requirement`, offered a release of `exe` and
+/// `runtime` signed by the trusted key.
+#[cfg(target_os = "macos")]
+fn update_to(exe: &[u8], runtime: &[u8], requirement: &str) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let a = archive_of(dir.path(), NEW, std::slice::from_ref(&k), exe, runtime);
+    let (root, r) = install_and_update_with(
+        &a,
+        &update::Trust {
+            keys: vec![public(&k)],
+            requirement: Some(requirement.to_string()),
+        },
+    );
+    (
+        root,
+        r.map_err(|e| format!("{e:#}")).err().unwrap_or_default(),
+    )
+}
+
+/// An Apple-signed binary every Mac has: signed, but not by omit's team.
+#[cfg(target_os = "macos")]
+fn apple_signed() -> Vec<u8> {
+    fs::read("/bin/ls").unwrap()
+}
+
+#[cfg(target_os = "macos")]
+fn shipped_requirement() -> String {
+    update::shipped_trust().requirement.unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shipped_trust_on_macos_asks_for_omits_team() {
+    let team =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/keys/team_id")).unwrap();
+    assert_eq!(team, "5BCNYRT23U");
+    assert_eq!(
+        shipped_requirement(),
+        r#"anchor apple generic and certificate leaf[subject.OU] = "5BCNYRT23U""#
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_shipped_trust_elsewhere_asks_for_no_code_signature() {
+    assert_eq!(update::shipped_trust().requirement, None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unsigned_update_is_refused_on_macos() {
+    let (root, err) = update_to(b"binary 9.9.9", b"runtime 9.9.9", &shipped_requirement());
+    assert!(err.contains("not signed by omit's Apple team"), "{err:?}");
+    assert_eq!(
+        installed(root.path()),
+        ("binary old".into(), "runtime old".into())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_update_signed_by_another_team_is_refused() {
+    let (root, err) = update_to(&apple_signed(), &apple_signed(), &shipped_requirement());
+    assert!(err.contains("not signed by omit's Apple team"), "{err:?}");
+    assert_eq!(
+        installed(root.path()),
+        ("binary old".into(), "runtime old".into())
+    );
+}
+
+/// `/bin/ls` meets `anchor apple`, which stands in for omit's team: no test holds its Developer ID.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_update_whose_brain_and_runtime_meet_the_requirement_is_installed() {
+    let (root, err) = update_to(&apple_signed(), &apple_signed(), "anchor apple");
+    assert_eq!(err, "");
+    let current = root.path().join("brain-current");
+    assert_eq!(
+        fs::read(current.join(update::exe_name())).unwrap(),
+        apple_signed()
+    );
+    assert_eq!(
+        fs::read(current.join("lib").join(update::runtime_name())).unwrap(),
+        apple_signed()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_update_with_one_unsigned_file_is_refused() {
+    for (exe, runtime) in [
+        (apple_signed(), b"runtime 9.9.9".to_vec()),
+        (b"binary 9.9.9".to_vec(), apple_signed()),
+    ] {
+        let (root, err) = update_to(&exe, &runtime, "anchor apple");
+        assert!(err.contains("not signed by omit's Apple team"), "{err:?}");
+        assert_eq!(
+            installed(root.path()),
+            ("binary old".into(), "runtime old".into())
+        );
+    }
 }

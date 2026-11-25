@@ -341,7 +341,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             Ok(())
         }
         Command::ReleaseVerify { archive } => {
-            update::verify(&archive, &update::release_keys())?;
+            update::verify(&archive, &update::release_trust().keys)?;
             println!(
                 "{}: signed by the brain release key",
                 terminal(&archive.display().to_string())
@@ -704,7 +704,7 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Resu
         current.display(),
         service::HOW_TO_INSTALL
     );
-    let installed = update::run(source, &update::release_keys(), &current, version)?;
+    let installed = update::run(source, &update::release_trust(), &current, version)?;
     if installed == version {
         println!("brain {version} is the newest release.");
     } else {

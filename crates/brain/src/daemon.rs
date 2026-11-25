@@ -97,7 +97,7 @@ fn newer<S: update::Source>(
     if update::check(source(), version)?.is_none() {
         return Ok(None);
     }
-    let v = update::run(source(), &update::release_keys(), current, version)?;
+    let v = update::run(source(), &update::release_trust(), current, version)?;
     Ok((v != version).then_some(v))
 }
 

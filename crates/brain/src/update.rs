@@ -3,7 +3,8 @@
 //! A release archive is `brain-<version>-<target>.tar.gz` holding one folder, `brain-<version>/`,
 //! with the binary and `lib/` beside it. The folder replaces the install's `brain-current` folder
 //! whole, so the binary and the runtime library it loads always come from one release. Nothing is
-//! replaced until the archive's zipsign signature checks against a key this build was shipped with.
+//! replaced until the archive's zipsign signature checks against a key this build was shipped with
+//! and, on macOS, the binary and the library inside it are signed by omit's Apple team.
 
 use std::collections::BTreeMap;
 use std::env::consts::{ARCH, DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX, OS};
@@ -22,6 +23,9 @@ use self_update::{Release, ReleaseAsset, ReleaseSource};
 pub const PROTOCOL: u32 = 1;
 
 const RELEASE_KEY: [u8; 32] = *include_bytes!("keys/release.pub");
+
+/// omit's Apple Developer team, whose Developer ID signs every macOS release.
+const TEAM_ID: &str = include_str!("keys/team_id").trim_ascii();
 
 /// A release archive is tens of megabytes; five minutes is under 1 Mbit/s for it.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -69,21 +73,45 @@ pub fn runtime_name() -> String {
     format!("{DLL_PREFIX}onnxruntime{DLL_SUFFIX}")
 }
 
-/// The keys a release must be signed by. The committed placeholder (all zero bytes) ships none,
-/// so a build made before the release key existed can check nothing and installs nothing.
-pub fn release_keys() -> Vec<[u8; 32]> {
-    if let Some(key) = test_key() {
-        return vec![key];
+/// What a release must carry before it is installed: a zipsign signature by one of `keys`, and,
+/// when `requirement` is set, a code signature on its binary and runtime library meeting that
+/// code requirement (`codesign -R`).
+pub struct Trust {
+    pub keys: Vec<[u8; 32]>,
+    pub requirement: Option<String>,
+}
+
+/// The trust this build checks releases against: the shipped trust, or a test's key alone.
+pub fn release_trust() -> Trust {
+    match test_key() {
+        Some(key) => Trust {
+            keys: vec![key],
+            requirement: None,
+        },
+        None => shipped_trust(),
     }
-    if RELEASE_KEY == [0; 32] {
-        Vec::new()
-    } else {
-        vec![RELEASE_KEY]
+}
+
+/// The trust this build was shipped with. The committed key placeholder (all zero bytes) ships no
+/// key, so a build made before the release key existed can check nothing and installs nothing. On
+/// macOS a release is also signed with omit's Developer ID, so holding the release key alone
+/// cannot put code on a Mac.
+pub fn shipped_trust() -> Trust {
+    Trust {
+        keys: if RELEASE_KEY == [0; 32] {
+            Vec::new()
+        } else {
+            vec![RELEASE_KEY]
+        },
+        requirement: cfg!(target_os = "macos").then(|| {
+            format!(r#"anchor apple generic and certificate leaf[subject.OU] = "{TEAM_ID}""#)
+        }),
     }
 }
 
 /// The key a test signs its releases with, in hex in `BRAIN_TEST_RELEASE_KEY`, so the commands
-/// that install can be tested whole; release builds never read it.
+/// that install can be tested whole; release builds never read it. A test release is checked
+/// against that key alone: no test can sign with omit's Developer ID.
 fn test_key() -> Option<[u8; 32]> {
     if !cfg!(debug_assertions) {
         return None;
@@ -115,36 +143,65 @@ pub fn verify(archive: &Path, keys: &[[u8; 32]]) -> anyhow::Result<()> {
 
 /// The newest release `source` offers that is newer than `version`, if any.
 pub fn check(source: impl Source, version: &str) -> anyhow::Result<Option<String>> {
-    let newer = configure(source, &[], Path::new("."), version)?.is_update_available()?;
+    let nothing = Trust {
+        keys: Vec::new(),
+        requirement: None,
+    };
+    let newer = configure(source, &nothing, Path::new("."), version)?.is_update_available()?;
     Ok(newer.map(|r| r.version().to_string()))
 }
 
 /// Installs the newest release `source` offers over `current`, the install's `brain-current`
-/// folder, once its signature checks against `keys`. Returns the version now installed.
+/// folder, once it meets `trust`. Returns the version now installed.
 pub fn run(
     source: impl Source,
-    keys: &[[u8; 32]],
+    trust: &Trust,
     current: &Path,
     version: &str,
 ) -> anyhow::Result<String> {
-    require(keys)?;
+    require(&trust.keys)?;
     let install = current
         .parent()
         .context("the install folder has no parent")?;
     let _lock = Lock::acquire(&install.join(UPDATE_LOCK)).context("waiting for another update")?;
-    let status = configure(source, keys, current, version)?.update()?;
+    let status = configure(source, trust, current, version)?.update()?;
     Ok(status.version().to_string())
+}
+
+/// Whether the binary and the runtime library in the release folder `release`, unpacked and not
+/// yet installed, are signed as `requirement` asks.
+fn meets(release: &Path, requirement: &str) -> self_update::errors::Result<()> {
+    for file in [
+        release.join(exe_name()),
+        release.join("lib").join(runtime_name()),
+    ] {
+        let out = std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict", &format!("-R={requirement}")])
+            .arg(&file)
+            .output()?;
+        if !out.status.success() {
+            return Err(self_update::errors::Error::verification_rejected(format!(
+                "{} is not signed by omit's Apple team ({TEAM_ID}): {}",
+                file.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn configure(
     source: impl Source,
-    keys: &[[u8; 32]],
+    trust: &Trust,
     current: &Path,
     version: &str,
 ) -> anyhow::Result<self_update::backends::custom::Update> {
     let mut b = self_update::backends::custom::Update::configure();
     if let Some(client) = source.client() {
         b.http_client(client);
+    }
+    if let Some(requirement) = trust.requirement.clone() {
+        b.verify_binary(move |release| meets(release, &requirement));
     }
     b.timeout(source.timeout());
     Ok(b.source(source)
@@ -153,7 +210,7 @@ fn configure(
         .current_version(version)
         .bundle_path_in_archive("brain-{{ version }}")
         .bundle_install_path(current)
-        .verifying_keys(keys.to_vec())
+        .verifying_keys(trust.keys.clone())
         .no_confirm(true)
         .show_output(false)
         .show_download_progress(false)
