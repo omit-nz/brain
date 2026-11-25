@@ -348,7 +348,7 @@ fn a_gap_with_close_hits_lists_them_after_the_gap_line() {
     assert_eq!(
         lines[..3],
         [
-            "brain's daemon is not running, so notes changed since the last index are missing; run brain start.",
+            NO_DAEMON,
             "Nothing in your brain answers this yet; it is logged as a gap.",
             "Closest notes, which may not answer it:",
         ],
@@ -487,7 +487,7 @@ fn a_punctuation_query_answers_without_an_error() {
 
 #[test]
 fn a_search_without_the_daemon_says_the_index_may_be_behind() {
-    let notice = "brain's daemon is not running, so notes changed since the last index are missing; run brain start.";
+    let notice = NO_DAEMON;
     let h = indexed(&[("a.md", "mailbox\n")]);
     let mut m = Mcp::start(&h);
     let (text, _) = m.text("search_my_brain", json!({"query": "mailbox"}));
@@ -523,3 +523,9 @@ fn the_mcp_server_never_writes_the_index() {
     h.run(&["index"]);
     assert_eq!(h.json(&["status", "--json"])["notes"], 2);
 }
+
+/// The notice names a command that runs on this platform: `brain start` refuses outside macOS.
+#[cfg(target_os = "macos")]
+const NO_DAEMON: &str = "brain's daemon is not running, so notes changed since the last index are missing; run brain start.";
+#[cfg(not(target_os = "macos"))]
+const NO_DAEMON: &str = "brain's daemon is not running, so notes changed since the last index are missing; run brain daemon in a terminal.";

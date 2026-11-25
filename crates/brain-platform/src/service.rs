@@ -20,6 +20,13 @@ pub const HOW_TO_INSTALL: &str = if cfg!(target_os = "macos") {
     "install brain with scripts/install.sh"
 };
 
+/// What a message tells a person to do to get the daemon running here.
+pub const HOW_TO_START: &str = if SUPPORTED {
+    "run brain start"
+} else {
+    "run brain daemon in a terminal"
+};
+
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
