@@ -1,4 +1,7 @@
 mod capture;
+// The doors run on macOS; their stubs are shell scripts.
+#[cfg(unix)]
+mod connect;
 mod daemon;
 mod gaps;
 mod import;

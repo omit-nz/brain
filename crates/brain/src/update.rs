@@ -36,6 +36,17 @@ pub fn install_dir(bin: &Path) -> PathBuf {
     bin.join("brain-current")
 }
 
+/// Whether this process runs the brain inside `install`. Both paths are canonicalized, so a link
+/// into the install (install.sh's `~/.local/bin/brain`) counts; a path that cannot be resolved
+/// does not.
+pub fn runs_from(install: &Path) -> bool {
+    std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .ok()
+        .zip(install.canonicalize().ok())
+        .is_some_and(|(exe, install)| exe.starts_with(install))
+}
+
 /// The binary's file name inside a release folder.
 pub fn exe_name() -> String {
     format!("brain{EXE_SUFFIX}")

@@ -3,6 +3,7 @@
 mod capture;
 mod cli;
 mod config;
+mod connect;
 mod daemon;
 mod gaps;
 mod import;

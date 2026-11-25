@@ -11,3 +11,10 @@ curl --proto '=https' -fsSL https://raw.githubusercontent.com/omit-nz/brain/main
 ```
 
 Then `brain update` moves you to each new release once its signature checks. [docs/release.md](docs/release.md) says what is trusted and when.
+
+## Connect your AI
+
+- Claude Code: `brain connect claude-code`. It runs Claude Code's own `claude mcp add` for the installed brain, and writes no file itself; start a new session afterwards.
+- Claude Desktop: open `brain-<version>.mcpb` from the release page. The extension's copy of brain hands every connection to the brain you installed, so it needs the install above first.
+
+Both reach your notes through the same five tools: search your brain, search what your team shares, capture, correct and due.

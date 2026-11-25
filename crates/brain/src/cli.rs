@@ -17,6 +17,7 @@ use brain::update;
 
 use crate::capture::{self, Capture};
 use crate::config::Config;
+use crate::connect;
 use crate::daemon::{self, writer_lock};
 use crate::gaps;
 use crate::import::{self, Blocklist, Ledger, Written};
@@ -92,6 +93,15 @@ enum Command {
         /// The AI tool this server answers, as its counts name it.
         #[arg(long, value_enum, default_value = "other")]
         door: DoorArg,
+        /// Hand over to the installed brain when this copy is not it (the Claude Desktop
+        /// extension's bundled copy).
+        #[arg(long, hide = true)]
+        hand_over: bool,
+    },
+    /// Connect an AI tool to the installed brain.
+    Connect {
+        #[arg(value_enum)]
+        tool: ConnectTool,
     },
     /// Your kept notes whose review has come, oldest first.
     Due {
@@ -210,6 +220,12 @@ enum UsageAction {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum ConnectTool {
+    /// Claude Code, through `claude mcp add`.
+    ClaudeCode,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum DoorArg {
     ClaudeCode,
     ClaudeDesktop,
@@ -302,7 +318,16 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             }
         },
         Command::Due { within, json } => due(dirs, &*clock, within, json),
-        Command::Mcp { door } => mcp::run(dirs, clock, door.into()),
+        Command::Mcp { door, hand_over } => {
+            if hand_over {
+                let name = door.to_possible_value().expect("every door has a name");
+                mcp::hand_over(dirs, name.get_name())?;
+            }
+            mcp::run(dirs, clock, door.into())
+        }
+        Command::Connect {
+            tool: ConnectTool::ClaudeCode,
+        } => connect::claude_code(dirs),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {

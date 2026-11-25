@@ -3,8 +3,12 @@
 //! vault; the daemon alone writes the index. Note text reaches the AI only inside `<note>` fences,
 //! escaped, with control characters stripped.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+
+use brain::update;
+use brain_platform::process;
 
 use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
@@ -27,7 +31,28 @@ use crate::daemon::writer_lock;
 use crate::out::terminal;
 use crate::usage;
 
-pub const INSTRUCTIONS: &str = "brain holds this person's own notes and what their team shares, kept on this computer.
+/// `brain mcp --hand-over`, the Claude Desktop extension's door: the extension's bundled copy hands
+/// the connection to the installed brain, so every door runs the one brain updates replace. The
+/// installed brain is started without `--hand-over`, so it cannot hand over again. Returns when
+/// this process is the installed brain, which then serves.
+pub fn hand_over(dirs: &Dirs, door: &str) -> anyhow::Result<()> {
+    let install = update::install_dir(&dirs.bin);
+    if update::runs_from(&install) {
+        return Ok(());
+    }
+    let exe = install.join(update::exe_name());
+    if !exe.is_file() {
+        eprintln!(
+            "brain is not installed on this Mac; install it with scripts/install.sh, then run brain init"
+        );
+        std::process::exit(1);
+    }
+    let args = ["mcp", "--door", door].map(OsString::from);
+    Err(anyhow::Error::new(process::replace(&exe, &args))
+        .context(format!("starting {}", exe.display())))
+}
+
+pub const INSTRUCTIONS: &str ="brain holds this person's own notes and what their team shares, kept on this computer.
 Before you answer a question about their work, their business, their clients or how something is done here, call search_my_brain (or search_company for what the team shares), answer from the notes you find, and name the note you used.
 When the conversation settles something worth keeping (a decision, a fact, how a job is done, a preference), offer to save it with capture, and save it only if they agree.
 When they tell you a note is wrong, use correct. When they ask what needs their attention, call due.

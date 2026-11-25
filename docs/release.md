@@ -6,7 +6,9 @@ One release carries one version for every part of brain, signed once. This page 
 
 A release is the GitHub release for tag `v<version>` on `omit-nz/brain`. For each target (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`) it holds `brain-<version>-<target>.tar.gz`, with one folder inside, `brain-<version>/`, holding `brain` (or `brain.exe`) and `lib/` with ONNX Runtime 1.24.2 from NuGet (`scripts/fetch-ort.sh`). Each archive carries its zipsign signature inside it, made with the archive's file name as the signing context, so a signed archive renamed to another version or target no longer verifies.
 
-Beside the archives: `SHA256SUMS`, and `release.json`, which reads `{version, protocol: 1, targets: {<target>: {url, sha256}}}`.
+Beside the archives: `brain-<version>.mcpb`, `SHA256SUMS` (every archive and the `.mcpb`), and `release.json`, which reads `{version, protocol: 1, targets: {<target>: {url, sha256}}}` for the archives only.
+
+`brain-<version>.mcpb` is the Claude Desktop extension: `manifest.json` (its version filled from the tag), `icon.png`, and `server/brain`, byte for byte the `brain` of the macOS archive. Its only job is to hand over: Claude Desktop runs it as `brain mcp --door claude-desktop --hand-over`, and it starts the installed brain in its place, or exits saying to install brain first. So the extension never serves from its own, possibly older, copy, and an update to the install reaches it at once. `verify` refuses to publish unless that `brain` matches the signed archive's and the manifest's args end in `--hand-over`. It ships unsigned until the Developer ID secrets (`MCPB_CERT`, `MCPB_KEY`) exist; `mcpb sign` then signs it in the same job.
 
 `brain --version` prints `brain <version> (protocol 1)`. The protocol changes only when two brains of different releases can no longer work together.
 

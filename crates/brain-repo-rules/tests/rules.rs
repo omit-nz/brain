@@ -261,3 +261,54 @@ fn self_hosted_labels_are_refused() {
     assert!(hosted_only(matrix).is_err());
     assert_eq!(hosted_only(ok), Ok(()));
 }
+
+/// Every `.rs` file under `dir`, as (path, text).
+fn rust_files(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text = fs::read_to_string(&path).unwrap();
+            out.push((path, text));
+        }
+    }
+}
+
+/// The files that name `CLAUDE.md`: brain reaches an AI tool through its MCP door and its own
+/// `claude mcp` command, never by writing the person's instructions file.
+fn naming_claude_md(files: &[(PathBuf, String)]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(_, text)| text.contains("CLAUDE.md"))
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+#[test]
+fn nothing_writes_claude_md() {
+    let mut files = Vec::new();
+    for krate in fs::read_dir(root().join("crates")).unwrap() {
+        let src = krate.unwrap().path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    assert!(!files.is_empty());
+    assert_eq!(naming_claude_md(&files), Vec::<String>::new());
+}
+
+#[test]
+fn a_file_naming_claude_md_is_caught() {
+    let files = [
+        (
+            PathBuf::from("crates/brain/src/connect.rs"),
+            "fs::write(home.join(\"CLAUDE.md\"), rules)".to_string(),
+        ),
+        (
+            PathBuf::from("crates/brain/src/ok.rs"),
+            "fn ok() {}".to_string(),
+        ),
+    ];
+    assert_eq!(naming_claude_md(&files), ["crates/brain/src/connect.rs"]);
+}

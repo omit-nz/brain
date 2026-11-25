@@ -65,12 +65,7 @@ pub fn summary(r: &Reindexed) -> String {
 /// running; a brain run from anywhere but its install (a dev build) never replaces anything.
 fn update_self(dirs: &Dirs, store: &Path, clock: &dyn Clock, from_dir: Option<&Path>) {
     let current = update::install_dir(&dirs.bin);
-    let from_install = std::env::current_exe()
-        .and_then(|exe| exe.canonicalize())
-        .ok()
-        .zip(current.canonicalize().ok())
-        .is_some_and(|(exe, install)| exe.starts_with(install));
-    if !from_install {
+    if !update::runs_from(&current) {
         eprintln!("update: this brain was not run from its install, so it never updates itself");
         return;
     }

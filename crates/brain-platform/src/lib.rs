@@ -3,4 +3,5 @@
 pub mod clock;
 pub mod dirs;
 pub mod fs;
+pub mod process;
 pub mod service;
