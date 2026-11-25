@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use brain_index::activity::Activity;
 use brain_index::{Index, Query, Scope, embed, is_gap};
-use brain_note::{Frontmatter, Kind, Split, Vault};
+use brain_note::{Kind, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{Lock, Privacy, create_dir_private, write_atomic};
+use brain_platform::fs::{Lock, create_dir_private};
 use brain_platform::service::{self, Launchctl};
 use brain_report::{Door, Event};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
@@ -15,7 +15,8 @@ use serde_json::json;
 
 use brain::update;
 
-use crate::config::{Config, REVIEW_DAYS};
+use crate::capture::{self, Capture};
+use crate::config::Config;
 use crate::daemon::{self, writer_lock};
 use crate::gaps;
 use crate::import::{self, Blocklist, Ledger, Written};
@@ -68,6 +69,20 @@ enum Command {
         title: Option<String>,
         #[arg(long, value_enum)]
         kind: Option<KindArg>,
+    },
+    /// Write a rule note that corrects another note, which is left as it is.
+    Correct {
+        /// The note's id or its path in the vault.
+        target: String,
+        text: String,
+    },
+    /// Your kept notes whose review has come, oldest first.
+    Due {
+        /// Also list notes due within this many days.
+        #[arg(long, default_value_t = 14)]
+        within: i64,
+        #[arg(long)]
+        json: bool,
     },
     /// Print a note, by id or by its path in the vault.
     Show { target: String },
@@ -187,24 +202,6 @@ fn index(dirs: &Dirs) -> anyhow::Result<Index> {
     Index::open(&dirs.data.join("index.db"))
 }
 
-/// Lowercase words of `text` joined by `-`, at most 60 characters.
-fn slug(text: &str) -> String {
-    let mut s = String::new();
-    for word in text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-    {
-        if s.len() + word.len() > 60 {
-            break;
-        }
-        if !s.is_empty() {
-            s.push('-');
-        }
-        s.push_str(&word.to_lowercase());
-    }
-    if s.is_empty() { "note".into() } else { s }
-}
-
 pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     let clock: Box<dyn Clock> = match cli.now {
         Some(t) => Box::new(FixedClock(t)),
@@ -217,8 +214,27 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
         Command::Add { text, title, kind } => {
-            add(dirs, &*clock, &text, title, kind.map(Kind::from))
+            let config = Config::load(dirs)?;
+            let vault = Vault::open(&config.vault)?;
+            let c = Capture {
+                text: &text,
+                title: title.as_deref(),
+                kind: kind.map(Kind::from),
+                corrects: None,
+            };
+            let rel = capture::write(&vault, &config.me, clock.today(), &c)?;
+            println!("{}", terminal(&rel));
+            Ok(())
         }
+        Command::Correct { target, text } => {
+            let config = Config::load(dirs)?;
+            let vault = Vault::open(&config.vault)?;
+            let today = clock.today();
+            let rel = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
+            println!("{}", terminal(&rel));
+            Ok(())
+        }
+        Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {
@@ -474,50 +490,34 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     Ok(())
 }
 
-fn add(
-    dirs: &Dirs,
-    clock: &dyn Clock,
-    text: &str,
-    title: Option<String>,
-    kind: Option<Kind>,
-) -> anyhow::Result<()> {
+fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
-    let vault = Vault::open(&config.vault)?;
-    let today = clock.today();
-    let review = today.checked_add(REVIEW_DAYS.days())?;
-    let mut fm = Frontmatter::new_with("id", &uuid::Uuid::now_v7().to_string(), "\n")
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let mut fields = Vec::new();
-    if let Some(t) = &title {
-        fields.push(("title", t.clone()));
+    let by = clock.today().checked_add(within.days())?;
+    let due = index(dirs)?.due(&config.me, by)?;
+    if as_json {
+        let rows: Vec<_> = due
+            .iter()
+            .map(|d| {
+                json!({
+                    "id": d.note_uuid.map(|u| u.to_string()),
+                    "path": d.path,
+                    "title": d.title,
+                    "review": d.review.to_string(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
     }
-    fields.push(("date", today.to_string()));
-    fields.push(("owner", config.me.clone()));
-    fields.push(("review", review.to_string()));
-    if let Some(k) = kind {
-        fields.push(("kind", k.as_str().to_string()));
+    if due.is_empty() {
+        println!("nothing of yours is due");
     }
-    for (key, value) in fields {
-        fm.set(key, &value)
-            .map_err(|_| anyhow::anyhow!("{key} cannot hold a line break"))?;
+    for d in &due {
+        println!(
+            "{}",
+            terminal(&format!("{}  {}  {}", d.review, d.path, d.title))
+        );
     }
-    let body = format!("{}\n", text.trim_end());
-    let note = Split {
-        bom: false,
-        fm: Ok(Some(fm)),
-        body: &body,
-    }
-    .render();
-    let base = slug(title.as_deref().unwrap_or(text));
-    let inbox = &vault.layout.inbox;
-    let mut rel = inbox.join(format!("{base}.md"));
-    let mut n = 0;
-    while vault.root.join(&rel).exists() {
-        n += 1;
-        rel = inbox.join(format!("{base}-{n}.md"));
-    }
-    write_atomic(&vault.root, &rel, note.as_bytes(), Privacy::Normal)?;
-    println!("{}", terminal(&brain_note::rel_key(&rel)));
     Ok(())
 }
 

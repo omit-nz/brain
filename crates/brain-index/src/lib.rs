@@ -74,6 +74,75 @@ impl Index {
             )
             .optional()?)
     }
+
+    /// The indexed note `target` names, by id or by vault path; only notes the index holds,
+    /// never another file in the vault.
+    pub fn lookup(&self, target: &str) -> anyhow::Result<Option<Noted>> {
+        let by = if uuid::Uuid::parse_str(target).is_ok() {
+            "note_uuid"
+        } else {
+            "path"
+        };
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT note_uuid, path, title FROM notes WHERE {by} = ?1"),
+                [target],
+                |r| {
+                    Ok(Noted {
+                        note_uuid: r.get::<_, Option<String>>(0)?.and_then(|u| u.parse().ok()),
+                        path: r.get(1)?,
+                        title: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// `owner`'s kept notes whose review falls on or before `by`, oldest review first.
+    pub fn due(&self, owner: &str, by: jiff::civil::Date) -> anyhow::Result<Vec<Due>> {
+        let mut st = self.conn.prepare(
+            "SELECT note_uuid, path, title, review FROM notes
+             WHERE place = 'kept' AND owner = ?1 AND review <= ?2
+             ORDER BY review, path",
+        )?;
+        let rows = st.query_map([owner, &by.to_string()], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (uuid, path, title, review) = row?;
+            out.push(Due {
+                note_uuid: uuid.and_then(|u| u.parse().ok()),
+                path,
+                title,
+                review: review.parse()?,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// An indexed note, named.
+#[derive(Debug, Clone)]
+pub struct Noted {
+    pub note_uuid: Option<uuid::Uuid>,
+    pub path: String,
+    pub title: String,
+}
+
+/// A kept note whose review has come.
+#[derive(Debug, Clone)]
+pub struct Due {
+    pub note_uuid: Option<uuid::Uuid>,
+    pub path: String,
+    pub title: String,
+    pub review: jiff::civil::Date,
 }
 
 /// What the index holds, for `brain status`.

@@ -1,3 +1,4 @@
+mod capture;
 mod daemon;
 mod gaps;
 mod import;

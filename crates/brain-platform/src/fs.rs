@@ -96,6 +96,18 @@ pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> 
     Ok(())
 }
 
+/// Writes a new file at `rel`, whole or not at all, and never over one that exists: a file that
+/// appeared at `rel` first is `AlreadyExists`, so two writers choosing one name both keep their
+/// bytes once the second picks another.
+pub fn create_new(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> io::Result<()> {
+    let path = checked(root, rel)?;
+    let mut tmp = temp_in(parent_dirs(&path)?, privacy)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist_noclobber(&path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 /// A temporary file beside its target, created with the mode `privacy` asks for.
 fn temp_in(parent: &Path, privacy: Privacy) -> io::Result<tempfile::NamedTempFile> {
     let mut builder = tempfile::Builder::new();

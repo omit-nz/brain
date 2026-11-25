@@ -5,9 +5,27 @@ use std::path::Path;
 use brain_platform::clock::{Clock, FixedClock};
 use brain_platform::dirs::{Dirs, parse_brain_home};
 use brain_platform::fs::{
-    Lock, Privacy, archive, create_dir_private, ensure_private_file, rename_within,
+    Lock, Privacy, archive, create_dir_private, create_new, ensure_private_file, rename_within,
     replace_unchanged, write_atomic,
 };
+
+#[test]
+fn create_new_never_replaces_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("inbox/note.md");
+    create_new(root.path(), rel, b"first", Privacy::Normal).unwrap();
+    let err = create_new(root.path(), rel, b"second", Privacy::Normal).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(root.path().join(rel)).unwrap(), b"first");
+    let leftovers = fs::read_dir(root.path().join("inbox")).unwrap().count();
+    assert_eq!(leftovers, 1, "no temp file is left behind");
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("x")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("linked")).unwrap();
+    #[cfg(unix)]
+    assert!(create_new(root.path(), Path::new("linked/n.md"), b"x", Privacy::Normal).is_err());
+}
 use brain_platform::service::plist;
 
 #[test]

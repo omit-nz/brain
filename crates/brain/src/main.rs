@@ -1,5 +1,6 @@
 //! `brain`: exit 0 when it worked, 1 on an error, 2 on a usage mistake.
 
+mod capture;
 mod cli;
 mod config;
 mod daemon;

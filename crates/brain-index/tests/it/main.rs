@@ -529,6 +529,27 @@ fn a_newer_schema_is_refused() {
 }
 
 #[test]
+fn due_lists_my_kept_notes_by_review_date() {
+    let f = Fixture::new();
+    let note = |owner: &str, review: &str| {
+        format!("---\ntitle: t {owner} {review}\nowner: {owner}\nreview: {review}\n---\nbody\n")
+    };
+    f.put("later.md", &note("robin", "2026-12-01"));
+    f.put("sooner.md", &note("robin", "2026-11-20"));
+    f.put("hers.md", &note("dana", "2026-11-01"));
+    f.put("0-inbox/new.md", &note("robin", "2026-11-01"));
+    f.put("not-yet.md", &note("robin", "2027-01-01"));
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let due = idx.due("robin", jiff::civil::date(2026, 12, 1)).unwrap();
+    let paths: Vec<&str> = due.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, vec!["sooner.md", "later.md"]);
+    assert_eq!(due[0].review, jiff::civil::date(2026, 11, 20));
+    assert_eq!(due[0].title, "t robin 2026-11-20");
+    assert!(due[0].note_uuid.is_some());
+}
+
+#[test]
 fn the_index_file_is_private() {
     let f = Fixture::new();
     f.put("a.md", "x\n");
