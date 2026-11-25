@@ -550,3 +550,66 @@ fn a_daemon_outside_the_install_never_updates() {
     assert!(alive);
     assert!(std::fs::read(&exe).unwrap() == before);
 }
+
+/// Saves a note and waits for the pass it wakes, `pass N:` in the daemon's stderr.
+fn wake_pass(h: &Home, n: u32) {
+    h.put(&format!("wake-{n}.md"), "a save that wakes a pass\n");
+    stderr_with(h, &format!("pass {n}:"));
+}
+
+#[test]
+fn a_failed_update_is_counted_and_tried_once_a_day_not_once_a_pass() {
+    let (h, exe) = installed_home();
+    let (dir, hex) = releases(8);
+    let mut d = updating_daemon(&h, &exe, dir.path(), &hex);
+    stderr_with(&h, "update failed");
+    wake_pass(&h, 2);
+    wake_pass(&h, 3);
+    let err = std::fs::read_to_string(h.home.path().join("daemon.err")).unwrap();
+    let _ = d.kill();
+    let _ = d.wait();
+    assert_eq!(err.matches("update failed").count(), 1, "{err}");
+    let usage = h.run(&["usage"]);
+    assert!(
+        usage
+            .lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["error_update", "-", "1"]),
+        "{usage}"
+    );
+}
+
+#[test]
+fn a_daemon_outside_the_install_says_so_once() {
+    let (h, _) = installed_home();
+    let (dir, hex) = releases(7);
+    let mut d = updating_daemon(&h, &assert_cmd::cargo::cargo_bin("brain"), dir.path(), &hex);
+    stderr_with(&h, "never updates itself");
+    wake_pass(&h, 2);
+    let err = std::fs::read_to_string(h.home.path().join("daemon.err")).unwrap();
+    let _ = d.kill();
+    let _ = d.wait();
+    assert_eq!(err.matches("never updates itself").count(), 1, "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_daemon_started_through_a_link_into_the_install_still_updates() {
+    let (h, exe) = installed_home();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("brain");
+    std::os::unix::fs::symlink(&exe, &link).unwrap();
+    let (dir, hex) = releases(7);
+    let mut d = updating_daemon(&h, &link, dir.path(), &hex);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = d.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon never exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(75));
+}

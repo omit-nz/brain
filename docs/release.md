@@ -24,7 +24,7 @@ Every later update is checked by the brain already installed, before anything is
 
 ## How the daemon updates itself
 
-The daemon checks for a newer release when it starts and then once a day. It installs one only through the same path as `brain update`: the archive's signature must verify against the release key built into the running brain (and, once releases are notarised, Apple's signature must name omit's Team ID), and the install folder is replaced whole. Then it prints `installed brain <version>; exiting for launchd to restart` and exits with code 75; launchd's `KeepAlive` (restart unless the exit was clean) starts the new binary. A failed check or install prints one line, is counted as an update error, and leaves the old version running until the next day's check. A brain run from anywhere but its install, such as a `cargo build`, says so at start and never updates itself.
+The daemon checks for a newer release after its first pass at start, and then once a day. It installs one only through the same path as `brain update`: the archive's signature must verify against the release key built into the running brain (and, once releases are notarised, Apple's signature must name omit's Team ID), and the install folder is replaced whole. Then it prints `installed brain <version>; exiting for launchd to restart` and exits with code 75; launchd's `KeepAlive` (restart unless the exit was clean) starts the new binary. A failed check or install prints one line, is counted as an update error, and leaves the old version running until the next day's check. A brain run from anywhere but its install, such as a `cargo build`, says so at each daily check and never updates itself.
 
 ## Cutting a release
 
