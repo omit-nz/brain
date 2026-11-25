@@ -242,7 +242,7 @@ fn update_from_a_build_with_no_install_is_refused() {
     assert_eq!(out.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("updates only what scripts/install.sh installed"),
+            .contains("brain updates only an installed brain, so install brain"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

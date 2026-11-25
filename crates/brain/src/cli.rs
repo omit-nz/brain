@@ -431,6 +431,20 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             vault.root.display()
         ))
     );
+    // The installed brain starts its own daemon; a build run from anywhere else leaves it to the
+    // person, so a dev build never registers a launch agent.
+    if service::SUPPORTED && update::runs_from(&update::install_dir(&dirs.bin)) {
+        if let Err(e) = start(dirs) {
+            eprintln!(
+                "{}",
+                terminal(&format!(
+                    "brain's daemon did not start: {e:#}; run `brain start`"
+                ))
+            );
+        }
+    } else {
+        println!("To keep the index up to date as notes change, run `brain daemon` in a terminal.");
+    }
     Ok(())
 }
 
@@ -645,8 +659,9 @@ fn start(dirs: &Dirs) -> anyhow::Result<()> {
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());
     anyhow::ensure!(
         exe.is_file(),
-        "no install at {}; install brain with scripts/install.sh first",
-        exe.display()
+        "no install at {}; {} first",
+        exe.display(),
+        service::HOW_TO_INSTALL
     );
     Config::load(dirs)?;
     index(dirs)?;
@@ -678,8 +693,9 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Resu
     let current = update::install_dir(&dirs.bin);
     anyhow::ensure!(
         current.join(update::exe_name()).is_file(),
-        "no install at {}; brain updates only what scripts/install.sh installed",
-        current.display()
+        "no install at {}; brain updates only an installed brain, so {} first",
+        current.display(),
+        service::HOW_TO_INSTALL
     );
     let installed = update::run(source, &update::release_keys(), &current, version)?;
     if installed == version {

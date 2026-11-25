@@ -12,6 +12,14 @@ pub const LABEL: &str = "nz.omit.brain";
 /// Whether this system runs the daemon as a service.
 pub const SUPPORTED: bool = cfg!(target_os = "macos");
 
+/// What a "not installed" message tells a person to do: the signed package on macOS, the install
+/// script where there is no package yet.
+pub const HOW_TO_INSTALL: &str = if cfg!(target_os = "macos") {
+    "install brain from brain.pkg"
+} else {
+    "install brain with scripts/install.sh"
+};
+
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

@@ -7,14 +7,16 @@ use std::process::{Command, Stdio};
 use anyhow::Context;
 use brain::update;
 use brain_platform::dirs::Dirs;
+use brain_platform::service;
 
 /// The installed brain, which every door runs, so an update reaches every door at once.
 pub fn installed(dirs: &Dirs) -> anyhow::Result<PathBuf> {
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());
     anyhow::ensure!(
         exe.is_file(),
-        "brain is not installed at {}; install it with scripts/install.sh first",
-        exe.display()
+        "brain is not installed at {}; {} first",
+        exe.display(),
+        service::HOW_TO_INSTALL
     );
     Ok(exe)
 }

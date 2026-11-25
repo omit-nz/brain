@@ -314,3 +314,80 @@ fn a_file_naming_claude_md_is_caught() {
     ];
     assert_eq!(naming_claude_md(&files), ["crates/brain/src/connect.rs"]);
 }
+
+/// Why a package distribution file could install beyond the person's own home, if it could.
+fn user_only(distribution: &str) -> Result<(), String> {
+    for needed in [
+        "enable_currentUserHome=\"true\"",
+        "enable_localSystem=\"false\"",
+        "enable_anywhere=\"false\"",
+        "auth=\"none\"",
+    ] {
+        if !distribution.contains(needed) {
+            return Err(format!("pkg/distribution.xml lacks {needed}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_pkg_installs_for_the_user_only() {
+    let text = fs::read_to_string(root().join("pkg/distribution.xml")).unwrap();
+    assert_eq!(user_only(&text), Ok(()));
+}
+
+#[test]
+fn a_pkg_that_asks_for_an_admin_is_caught() {
+    let admin = r#"<domains enable_currentUserHome="true" enable_localSystem="true" enable_anywhere="false"/><pkg-ref id="x" auth="root"/>"#;
+    assert!(user_only(admin).is_err());
+}
+
+/// The `src` files with `install.sh` inside a string literal. How to install differs by platform
+/// (brain.pkg on macOS, the script elsewhere), so the words live in brain-platform alone.
+fn naming_install_sh(files: &[(PathBuf, String)]) -> Vec<String> {
+    // Between a line's quotes: the odd pieces of a split on `"`.
+    let in_literal = |text: &str| {
+        text.lines().any(|line| {
+            line.split('"')
+                .skip(1)
+                .step_by(2)
+                .any(|s| s.contains("install.sh"))
+        })
+    };
+    files
+        .iter()
+        .filter(|(_, text)| in_literal(text))
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+#[test]
+fn no_message_names_install_sh() {
+    let mut files = Vec::new();
+    for krate in fs::read_dir(root().join("crates")).unwrap() {
+        let krate = krate.unwrap().path();
+        if krate.ends_with("brain-platform") {
+            continue;
+        }
+        let src = krate.join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    assert_eq!(naming_install_sh(&files), Vec::<String>::new());
+}
+
+#[test]
+fn a_message_naming_install_sh_is_caught() {
+    let files = [
+        (
+            PathBuf::from("crates/brain/src/cli.rs"),
+            "bail!(\"install brain with scripts/install.sh first\")".to_string(),
+        ),
+        (
+            PathBuf::from("crates/brain/src/ok.rs"),
+            "// install.sh lays the install out this way".to_string(),
+        ),
+    ];
+    assert_eq!(naming_install_sh(&files), ["crates/brain/src/cli.rs"]);
+}

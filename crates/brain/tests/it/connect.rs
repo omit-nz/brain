@@ -9,6 +9,14 @@ use std::path::{Path, PathBuf};
 
 use super::Home;
 
+/// What every "not installed" message tells a person to do: the package on macOS, the script
+/// elsewhere.
+const HOW_TO_INSTALL: &str = if cfg!(target_os = "macos") {
+    "install brain from brain.pkg"
+} else {
+    "install brain with scripts/install.sh"
+};
+
 /// An executable shell script at `path`.
 fn script(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -81,7 +89,7 @@ fn connect_refuses_without_an_install() {
     let out = connect(&h, stub.path(), home.path());
     assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("scripts/install.sh"),
+        String::from_utf8_lossy(&out.stderr).contains(HOW_TO_INSTALL),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -131,7 +139,7 @@ fn hand_over_without_an_install_says_how_to_install() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr).trim(),
-        "brain is not installed on this Mac; install it with scripts/install.sh, then run brain init"
+        format!("brain is not installed on this computer; {HOW_TO_INSTALL}, then run brain init")
     );
 }
 

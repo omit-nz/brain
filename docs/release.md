@@ -46,6 +46,12 @@ shasum -a 256 -c SHA256SUMS
 brain release-verify brain-<version>-<target>.tar.gz   # exit 0 when signed by the release key
 ```
 
+## The macOS package
+
+`brain.pkg` installs a release into the current person's home only, with no admin password: the release folder becomes `brain-current` in brain's data folder (`~/Library/Application Support/nz.omit.brain/bin/`), and its postinstall links `~/.local/bin/brain` to the binary, the same link `scripts/install.sh` makes. It starts nothing; `brain init`, run from the installed brain, starts the daemon. `pkg/distribution.xml` and `pkg/scripts/postinstall` define it, `scripts/build-pkg.sh` builds it, and CI's `pkg` job builds it unsigned, checks its payload carries no `._` files, installs it into the runner's home as an unprivileged user and runs the installed `brain`. A repository rule keeps the package home-only (`the_pkg_installs_for_the_user_only`).
+
+Releases do not carry `brain.pkg` yet. It ships once it can be signed with omit's Developer ID Installer identity, notarised and stapled, so Gatekeeper checks it on open; an unsigned package would only teach people to click past macOS's warning. Until then, a Mac installs with `scripts/install.sh`, and the messages that say to install from `brain.pkg` are ahead of the release by that one step.
+
 ## Rolling back
 
 `brain update` only moves to a newer version. To roll back, cut a new release from the last good commit with a higher version number, so every install moves forward onto it. To take a bad release away before many installs reach it, mark it a draft again in GitHub; installs and updates then see the release before it as the newest.

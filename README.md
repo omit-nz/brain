@@ -4,13 +4,15 @@ Leave a brain at home. brain is the shared context layer of a business: the know
 
 ## Install
 
-On macOS (Apple silicon) or Linux (x86_64):
+On a Mac (Apple silicon): download `brain.pkg` and open it. It installs for you alone, with no admin password, and macOS checks omit's signature before it runs. Then run `brain init --me <your name>` in your notes folder, which also starts the daemon. Releases carry `brain.pkg` once its Developer ID signing is in place; until then, use the script below.
+
+On Linux (x86_64), for CI and for scripted installs:
 
 ```bash
 curl --proto '=https' -fsSL https://raw.githubusercontent.com/omit-nz/brain/main/scripts/install.sh | bash
 ```
 
-Then `brain update` moves you to each new release once its signature checks. [docs/release.md](docs/release.md) says what is trusted and when.
+Then `brain update` moves you to each new release once its signature checks. [docs/release.md](docs/release.md) says what is trusted and when, and [SECURITY.md](SECURITY.md) answers the questions a security review asks.
 
 ## Connect your AI
 

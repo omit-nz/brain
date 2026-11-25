@@ -155,7 +155,7 @@ fn start_refuses_without_an_install() {
     s.h.init();
     let out = s.brain(&["start"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("scripts/install.sh"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("install brain from brain.pkg"));
     assert!(s.stub.calls().is_empty());
 }
 
@@ -281,4 +281,63 @@ fn an_update_outside_macos_restarts_nothing_and_succeeds() {
     );
     assert!(stdout.contains("9.9.9 installed"), "{stdout}");
     assert!(!stdout.contains("restarted"), "{stdout}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn init_starts_the_daemon_when_installed() {
+    let s = Setup::new(true);
+    let exe =
+        s.h.home
+            .path()
+            .join("data/bin/brain-current")
+            .join(brain::update::exe_name());
+    fs::copy(assert_cmd::cargo::cargo_bin("brain"), &exe).unwrap();
+    let out = std::process::Command::new(&exe)
+        .args(["init", "--me", "robin", "--vault"])
+        .arg(s.h.vault.path())
+        .env("BRAIN_HOME", s.h.home.path())
+        .env("HOME", s.user.path())
+        .env("BRAIN_LAUNCHCTL", s.stub.path())
+        .env_remove("ORT_DYLIB_PATH")
+        .env_remove("LL_MODELS_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let uid = uid();
+    assert!(
+        s.stub
+            .calls()
+            .contains(&format!("enable gui/{uid}/nz.omit.brain")),
+        "{:?}",
+        s.stub.calls()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("brain's daemon is running"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn init_from_a_build_outside_the_install_starts_nothing() {
+    let s = Setup::new(true);
+    let out = s.brain(&[
+        "init",
+        "--me",
+        "robin",
+        "--vault",
+        s.h.vault.path().to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(s.stub.calls().is_empty(), "{:?}", s.stub.calls());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("run `brain daemon`"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }

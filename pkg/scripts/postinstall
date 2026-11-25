@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs as the person installing, with HOME their own, since the package installs into their home
+# only. Puts brain on their PATH through the link scripts/install.sh makes. It starts nothing: the
+# daemon starts when `brain init` sets up the notes folder.
+set -eu
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$HOME/Library/Application Support/nz.omit.brain/bin/brain-current/brain" "$HOME/.local/bin/brain"

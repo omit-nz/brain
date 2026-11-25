@@ -42,7 +42,8 @@ pub fn hand_over(dirs: &Dirs, door: &str) -> anyhow::Result<()> {
     let exe = install.join(update::exe_name());
     if !exe.is_file() {
         eprintln!(
-            "brain is not installed on this Mac; install it with scripts/install.sh, then run brain init"
+            "brain is not installed on this computer; {}, then run brain init",
+            brain_platform::service::HOW_TO_INSTALL
         );
         std::process::exit(1);
     }

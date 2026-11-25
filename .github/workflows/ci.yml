@@ -48,6 +48,31 @@ jobs:
       - run: cargo nextest run --workspace --locked
       - run: cargo test --doc --workspace --locked
 
+  # brain.pkg, unsigned, built from pkg/ and installed the way a person installs it: into the
+  # runner's own home, with no admin password.
+  pkg:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo build --locked -p brain
+      - name: Build, check and install
+        run: |
+          set -euo pipefail
+          release="$RUNNER_TEMP/brain-0.0.1"
+          mkdir -p "$release/lib"
+          cp target/debug/brain "$release/"
+          scripts/build-pkg.sh "$release" 0.0.1 "$RUNNER_TEMP/brain.pkg"
+          pkgutil --expand "$RUNNER_TEMP/brain.pkg" "$RUNNER_TEMP/expanded"
+          if lsbom "$RUNNER_TEMP/expanded/brain-component.pkg/Bom" | grep -q '/\._'; then
+            echo "the payload carries ._ files" >&2
+            exit 1
+          fi
+          installer -pkg "$RUNNER_TEMP/brain.pkg" -target CurrentUserHomeDirectory
+          "$HOME/.local/bin/brain" --version
+          test "$("$HOME/.local/bin/brain" install-dir)" = "$HOME/Library/Application Support/nz.omit.brain/bin/brain-current"
+
   wasm:
     runs-on: ubuntu-24.04
     steps:
@@ -79,7 +104,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - run: shellcheck scripts/*.sh
+      - run: shellcheck scripts/*.sh pkg/scripts/postinstall
       - run: bash scripts/release-key.test.sh
       - run: bash scripts/install.test.sh
 
