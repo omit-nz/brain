@@ -5,9 +5,26 @@ use std::path::Path;
 use brain_platform::clock::{Clock, FixedClock};
 use brain_platform::dirs::{Dirs, parse_brain_home};
 use brain_platform::fs::{
-    Privacy, archive, create_dir_private, ensure_private_file, rename_within, replace_unchanged,
-    write_atomic,
+    Lock, Privacy, archive, create_dir_private, create_new, ensure_private_file, rename_within,
+    replace_unchanged, write_atomic,
 };
+
+#[test]
+fn create_new_never_replaces_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = Path::new("inbox/note.md");
+    create_new(root.path(), rel, b"first", Privacy::Normal).unwrap();
+    let err = create_new(root.path(), rel, b"second", Privacy::Normal).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(root.path().join(rel)).unwrap(), b"first");
+    let leftovers = fs::read_dir(root.path().join("inbox")).unwrap().count();
+    assert_eq!(leftovers, 1, "no temp file is left behind");
+    let elsewhere = tempfile::tempdir().unwrap();
+    link_dir(elsewhere.path(), &root.path().join("linked"));
+    assert!(create_new(root.path(), Path::new("linked/n.md"), b"x", Privacy::Normal).is_err());
+    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+}
+use brain_platform::service::plist;
 
 #[test]
 fn a_replace_refuses_a_file_changed_since_it_was_read() {
@@ -358,4 +375,199 @@ fn fixed_clock_is_fixed() {
     assert_eq!(c.now(), t);
     assert_eq!(c.now(), c.now());
     assert_eq!(c.today(), jiff::civil::date(2026, 11, 25));
+}
+
+/// Run by `Holder`: takes the lock named by `BRAIN_TEST_LOCK`, says so, and holds it until killed.
+#[test]
+#[ignore]
+fn lock_holder_child() {
+    let path = std::env::var_os("BRAIN_TEST_LOCK").unwrap();
+    let _held = Lock::acquire(Path::new(&path)).unwrap();
+    println!("held");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+/// Another process holding the lock, until dropped or killed.
+struct Holder(std::process::Child);
+
+impl Holder {
+    fn start(lock: &Path) -> Holder {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["lock_holder_child", "--exact", "--ignored", "--nocapture"])
+            .env("BRAIN_TEST_LOCK", lock)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while line.trim() != "held" {
+            line.clear();
+            assert_ne!(
+                std::io::BufRead::read_line(&mut out, &mut line).unwrap(),
+                0,
+                "the holder exited before taking the lock"
+            );
+        }
+        Holder(child)
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_lock_is_exclusive_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("writer.lock");
+    assert!(!Lock::is_held(&lock));
+    let _holder = Holder::start(&lock);
+    assert!(Lock::is_held(&lock));
+    assert!(Lock::try_acquire(&lock).unwrap().is_none());
+}
+
+#[test]
+fn a_killed_holder_frees_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("writer.lock");
+    let mut holder = Holder::start(&lock);
+    holder.0.kill().unwrap();
+    holder.0.wait().unwrap();
+    // Windows releases a dead process's lock "depending upon available system resources".
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let taken = loop {
+        if let Some(l) = Lock::try_acquire(&lock).unwrap() {
+            break l;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still held 10 s after its holder died"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    drop(taken);
+    assert!(!Lock::is_held(&lock));
+}
+
+#[test]
+fn a_probe_never_takes_the_lock_from_a_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("writer.lock");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probers: Vec<_> = (0..4)
+        .map(|_| {
+            let (lock, stop) = (lock.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    Lock::is_held(&lock);
+                }
+            })
+        })
+        .collect();
+    let refused = (0..500)
+        .filter(|_| Lock::try_acquire(&lock).unwrap().is_none())
+        .count();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for p in probers {
+        p.join().unwrap();
+    }
+    assert_eq!(refused, 0, "a probe was read as a writer");
+}
+
+/// The element after `<key>{key}</key>` in a top-level dict, as its raw XML up to the next key
+/// or the dict's end.
+fn plist_value<'a>(plist: &'a str, key: &str) -> &'a str {
+    let open = format!("<key>{key}</key>");
+    let at = plist
+        .find(&open)
+        .unwrap_or_else(|| panic!("no {key}:\n{plist}"))
+        + open.len();
+    let rest = &plist[at..];
+    let end = ["<key>", "\n</dict>"]
+        .iter()
+        .filter_map(|m| rest.find(m))
+        .min()
+        .unwrap_or(rest.len());
+    rest[..end].trim()
+}
+
+#[test]
+fn the_plist_runs_the_daemon_and_restarts_it_on_a_crash() {
+    let p = plist(
+        Path::new("/Users/r/brain-current/brain"),
+        Path::new("/Users/r/Library/Logs/brain/daemon.log"),
+        None,
+    );
+    assert!(p.starts_with("<?xml"));
+    assert_eq!(plist_value(&p, "Label"), "<string>nz.omit.brain</string>");
+    assert_eq!(
+        plist_value(&p, "ProgramArguments")
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        [
+            "<array>",
+            "<string>/Users/r/brain-current/brain</string>",
+            "<string>daemon</string>",
+            "</array>"
+        ]
+    );
+    assert_eq!(plist_value(&p, "RunAtLoad"), "<true/>");
+    let flat = p.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("<key>KeepAlive</key> <dict> <key>SuccessfulExit</key> <false/> </dict>"),
+        "{p}"
+    );
+    assert_eq!(
+        plist_value(&p, "ProcessType"),
+        "<string>Background</string>"
+    );
+    for key in ["StandardErrorPath", "StandardOutPath"] {
+        assert_eq!(
+            plist_value(&p, key),
+            "<string>/Users/r/Library/Logs/brain/daemon.log</string>"
+        );
+    }
+    assert!(!p.contains("EnvironmentVariables"));
+    let with_home = plist(Path::new("/b"), Path::new("/l"), Some(Path::new("/h")));
+    let flat = with_home.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "<key>EnvironmentVariables</key> <dict> <key>BRAIN_HOME</key> <string>/h</string> </dict>"
+        ),
+        "{with_home}"
+    );
+    #[cfg(target_os = "macos")]
+    for text in [&p, &with_home] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.plist");
+        fs::write(&file, text).unwrap();
+        let lint = std::process::Command::new("/usr/bin/plutil")
+            .arg("-lint")
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(
+            lint.status.success(),
+            "{}",
+            String::from_utf8_lossy(&lint.stdout)
+        );
+    }
+}
+
+#[test]
+fn a_path_with_xml_characters_is_escaped() {
+    let p = plist(
+        Path::new("/Users/a&b/<x>/\"q\"/brain"),
+        Path::new("/l"),
+        Some(Path::new("/h&<")),
+    );
+    assert!(p.contains("<string>/Users/a&amp;b/&lt;x&gt;/&quot;q&quot;/brain</string>"));
+    assert!(p.contains("<string>/h&amp;&lt;</string>"));
+    assert!(!p.contains("a&b"));
 }

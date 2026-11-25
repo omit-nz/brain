@@ -1,0 +1,27 @@
+{
+  "manifest_version": "0.3",
+  "name": "brain",
+  "display_name": "brain, by omit",
+  "version": "0.0.0",
+  "description": "Search and capture into your own brain, kept on this computer.",
+  "author": {
+    "name": "omit"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omit-nz/brain"
+  },
+  "icon": "icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/brain",
+    "mcp_config": {
+      "command": "${__dirname}/server/brain",
+      "args": ["mcp", "--door", "claude-desktop", "--hand-over"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}

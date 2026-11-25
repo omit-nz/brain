@@ -27,7 +27,8 @@ pub fn sources(src: &Vault, skipped: &mut Vec<(String, Skip)>) -> Vec<Source> {
 
 /// The copy of a vault note. Broken frontmatter is copied as it is: brain reads it as private
 /// and never writes into it. A source with no id gets `prior_id`, the id its copy was given
-/// before, so updating it keeps the copy's id.
+/// before, so updating it keeps the copy's id, or else a fresh one, so the copy is final as
+/// written and no index has to write into it.
 pub fn to_note(s: &Source, w: &Written<'_>, prior_id: Option<&str>) -> anyhow::Result<String> {
     let mut split = Split::parse(&s.raw);
     let crlf = split
@@ -45,8 +46,9 @@ pub fn to_note(s: &Source, w: &Written<'_>, prior_id: Option<&str>) -> anyhow::R
     {
         let fm = split.fm.as_ref().ok().and_then(Option::as_ref);
         let has = |k: &str| fm.is_some_and(|f| f.get(k).is_some() || f.misplaced(k));
-        if let Some(prior) = prior_id.filter(|_| !has("id")) {
-            adds.push(("id", prior.to_string()));
+        if !has("id") {
+            let fresh = || uuid::Uuid::now_v7().to_string();
+            adds.push(("id", prior_id.map_or_else(fresh, str::to_string)));
         }
         if !has("visibility") {
             adds.push(("visibility", w.visibility(&s.dst_rel).into()));

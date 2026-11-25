@@ -1,3 +1,4 @@
+mod activity;
 mod edges;
 mod embed;
 mod search;
@@ -340,6 +341,128 @@ fn the_index_rebuilds_from_the_vault_alone() {
     assert_eq!(links, vec!["b"]);
 }
 
+/// A note saved after `settled_before` is still being typed: it is searchable at once, and its id
+/// is written by the first pass after it settles, however many passes come before.
+#[test]
+fn an_id_is_not_written_into_a_note_saved_moments_ago() {
+    let f = Fixture::new();
+    f.put("fresh.md", "being typed\n");
+    f.put(
+        "held.md",
+        "---\nid: 0192f0c0-0000-7000-8000-000000000001\n---\nalready kept\n",
+    );
+    let mtime = fs::metadata(f.vault.path().join("fresh.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let saved = jiff::Timestamp::try_from(mtime).unwrap();
+    let vault = Vault::open(f.vault.path()).unwrap();
+    let mut idx = Index::open(&f.db()).unwrap();
+
+    for _ in 0..2 {
+        let early = idx
+            .reindex_settled(&vault, saved - jiff::SignedDuration::from_secs(5), saved)
+            .unwrap();
+        assert_eq!(f.read("fresh.md"), "being typed\n");
+        assert_eq!((early.deferred, early.ids_written), (1, 0));
+        assert_eq!(idx.note_count().unwrap(), 2, "both notes are indexed");
+    }
+
+    let later = idx
+        .reindex_settled(
+            &vault,
+            saved + jiff::SignedDuration::from_secs(5),
+            saved + jiff::SignedDuration::from_secs(10),
+        )
+        .unwrap();
+    assert_eq!((later.deferred, later.ids_written), (0, 1));
+    assert!(f.read("fresh.md").starts_with("---\nid: "));
+    assert_eq!(idx.note_count().unwrap(), 2);
+}
+
+/// While the daemon holds a long write, a reader (`brain status`, a search) still opens the
+/// index at once: opening an up-to-date index takes no write lock.
+#[test]
+fn opening_an_up_to_date_index_waits_for_no_writer() {
+    let f = Fixture::new();
+    drop(f.index());
+    let writer = f.sql();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let opened = Index::open(&f.db());
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(opened.is_ok(), "{:?}", opened.err());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "open waited {:?}",
+        started.elapsed()
+    );
+}
+
+/// A reader opening the index must not write it, so a status probe never takes a write lock.
+#[test]
+fn opening_the_index_twice_writes_nothing() {
+    let f = Fixture::new();
+    drop(f.index());
+    let snapshot = || {
+        let mut files: Vec<(String, Vec<u8>)> = fs::read_dir(f.data.path())
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                (p.display().to_string(), fs::read(&p).unwrap())
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    let before = snapshot();
+    drop(f.index());
+    assert_eq!(snapshot(), before);
+}
+
+/// A clock behind the file's (a sync, a restore) must not leave a note unindexed for good.
+#[test]
+fn a_note_saved_in_the_future_is_not_young_forever() {
+    let f = Fixture::new();
+    f.put("ahead.md", "from a machine whose clock runs ahead\n");
+    let now = jiff::Timestamp::try_from(
+        fs::metadata(f.vault.path().join("ahead.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+    )
+    .unwrap();
+    let ahead = std::time::SystemTime::from(now + jiff::SignedDuration::from_hours(1));
+    fs::File::options()
+        .write(true)
+        .open(f.vault.path().join("ahead.md"))
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    let mut idx = f.index();
+    let r = idx
+        .reindex_settled(&f.vault(), now - jiff::SignedDuration::from_secs(5), now)
+        .unwrap();
+    assert_eq!((r.deferred, r.ids_written), (0, 1));
+    assert_eq!(idx.note_count().unwrap(), 1);
+}
+
+/// A vault folder that is gone (unmounted, renamed) is an error, never a vault with no notes.
+#[test]
+fn a_missing_vault_folder_removes_nothing() {
+    let f = Fixture::new();
+    f.put("a.md", "kept\n");
+    let vault = f.vault();
+    let mut idx = f.index();
+    idx.reindex(&vault).unwrap();
+    let away = f.vault.path().with_extension("away");
+    fs::rename(f.vault.path(), &away).unwrap();
+    let r = idx.reindex(&vault);
+    fs::rename(&away, f.vault.path()).unwrap();
+    assert!(r.is_err(), "{:?}", r.map(|r| r.removed));
+    assert_eq!(idx.note_count().unwrap(), 1);
+}
+
 /// Run only as a child of `a_killed_reindex_resumes_clean`, which sets the paths and the abort.
 #[test]
 #[ignore]
@@ -401,6 +524,27 @@ fn a_newer_schema_is_refused() {
         err.contains("schema version 99") && err.contains("brain's 1"),
         "{err}"
     );
+}
+
+#[test]
+fn due_lists_my_kept_notes_by_review_date() {
+    let f = Fixture::new();
+    let note = |owner: &str, review: &str| {
+        format!("---\ntitle: t {owner} {review}\nowner: {owner}\nreview: {review}\n---\nbody\n")
+    };
+    f.put("later.md", &note("robin", "2026-12-01"));
+    f.put("sooner.md", &note("robin", "2026-11-20"));
+    f.put("hers.md", &note("dana", "2026-11-01"));
+    f.put("0-inbox/new.md", &note("robin", "2026-11-01"));
+    f.put("not-yet.md", &note("robin", "2027-01-01"));
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let due = idx.due("robin", jiff::civil::date(2026, 12, 1)).unwrap();
+    let paths: Vec<&str> = due.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, vec!["sooner.md", "later.md"]);
+    assert_eq!(due[0].review, jiff::civil::date(2026, 11, 20));
+    assert_eq!(due[0].title, "t robin 2026-11-20");
+    assert!(due[0].note_uuid.is_some());
 }
 
 #[test]

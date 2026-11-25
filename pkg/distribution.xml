@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- brain.pkg installs into the current person's home only, with no admin password:
+     the release folder into brain's data folder, and a link onto their PATH. -->
+<installer-gui-script minSpecVersion="2">
+    <title>brain, by omit</title>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <domains enable_currentUserHome="true" enable_localSystem="false" enable_anywhere="false"/>
+    <choices-outline>
+        <line choice="nz.omit.brain"/>
+    </choices-outline>
+    <choice id="nz.omit.brain" visible="false">
+        <pkg-ref id="nz.omit.brain"/>
+    </choice>
+    <pkg-ref id="nz.omit.brain" version="0.0.0" auth="none" onConclusion="none">brain-component.pkg</pkg-ref>
+</installer-gui-script>

@@ -13,6 +13,9 @@ directories.workspace = true
 jiff.workspace = true
 tempfile.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
+
 [[test]]
 name = "it"
 path = "tests/it/main.rs"

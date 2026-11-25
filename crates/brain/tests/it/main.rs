@@ -1,5 +1,14 @@
+mod capture;
+// The doors run on macOS; their stubs are shell scripts.
+#[cfg(unix)]
+mod connect;
+mod daemon;
+mod gaps;
 mod import;
+mod mcp;
+mod service;
 mod update;
+mod usage;
 
 use std::fs;
 use std::path::Path;
@@ -47,6 +56,17 @@ impl Home {
             "--vault",
             self.vault.path().to_str().unwrap(),
         ]);
+        // No test reaches the real endpoint: only the usage tests turn sending on, at their own
+        // listener.
+        self.usage("send = false");
+    }
+
+    /// Replaces the config's `[usage]` table with `table`.
+    fn usage(&self, table: &str) {
+        let path = self.home.path().join("config/config.toml");
+        let config = fs::read_to_string(&path).unwrap();
+        let rest = config.split("[usage]").next().unwrap().trim_end();
+        fs::write(&path, format!("{rest}\n\n[usage]\n{table}\n")).unwrap();
     }
 
     fn put(&self, rel: &str, text: &str) {
@@ -222,7 +242,7 @@ fn index_then_search_finds_the_added_note() {
     ]);
     h.run(&["index"]);
     let hits = h.json(&["search", "mailbox", "--json"]);
-    let hits = hits.as_array().unwrap();
+    let hits = hits["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["path"], "0-inbox/gate.md");
     assert_eq!(hits[0]["title"], "Gate");
@@ -245,9 +265,9 @@ fn shared_only_hides_private_and_inbox_notes() {
     h.put("0-inbox/i.md", "quokka inbox\n");
     h.run(&["index"]);
     let all = h.json(&["search", "quokka", "--json"]);
-    assert_eq!(all.as_array().unwrap().len(), 4);
+    assert_eq!(all["hits"].as_array().unwrap().len(), 4);
     let shared = h.json(&["search", "quokka", "--json", "--shared-only"]);
-    let paths: Vec<&str> = shared
+    let paths: Vec<&str> = shared["hits"]
         .as_array()
         .unwrap()
         .iter()
@@ -408,15 +428,15 @@ fn a_kept_note_can_be_shared() {
     h.run(&["index"]);
     let shared = h.json(&["search", "numbat", "--json", "--shared-only"]);
     assert_eq!(
-        shared.as_array().unwrap().len(),
+        shared["hits"].as_array().unwrap().len(),
         0,
         "an inbox note is never shared"
     );
     h.run(&["inbox", "keep", "0-inbox/numbat.md", "--to", "permanent"]);
     h.run(&["index"]);
     let shared = h.json(&["search", "numbat", "--json", "--shared-only"]);
-    assert_eq!(shared[0]["path"], "3-permanent/numbat.md");
-    assert_eq!(shared[0]["disclosure"], "shared");
+    assert_eq!(shared["hits"][0]["path"], "3-permanent/numbat.md");
+    assert_eq!(shared["hits"][0]["disclosure"], "shared");
 }
 
 #[test]

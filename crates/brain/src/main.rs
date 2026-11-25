@@ -1,11 +1,17 @@
 //! `brain`: exit 0 when it worked, 1 on an error, 2 on a usage mistake.
 
+mod capture;
 mod cli;
 mod config;
+mod connect;
+mod daemon;
+mod gaps;
 mod import;
 mod inbox;
+mod mcp;
 mod out;
 mod runtime;
+mod usage;
 
 use std::process::ExitCode;
 

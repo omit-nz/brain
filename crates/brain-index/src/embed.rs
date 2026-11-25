@@ -37,11 +37,25 @@ pub fn runtime() -> anyhow::Result<PathBuf> {
     Ok(ort)
 }
 
-/// The bge-small provider over the ONNX Runtime brain ships.
+/// The bge-small provider over the ONNX Runtime brain ships. A debug build given
+/// `BRAIN_TEST_EMBEDDER` gets the hash embedder instead, so a test can drive the commands that
+/// embed without a model download; release builds never read it.
 pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+    load_with_threads(None)
+}
+
+/// `load`, with ONNX Runtime held to `threads` cores (`None`: every core), so a process that
+/// searches beside others (an AI tool's `brain mcp`) does not take the whole machine.
+pub fn load_with_threads(threads: Option<usize>) -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+    if cfg!(debug_assertions) && std::env::var_os("BRAIN_TEST_EMBEDDER").is_some() {
+        // Wide enough that unrelated texts land far apart, as a real model's do.
+        return Ok(Box::new(HashEmbedder::new(256)));
+    }
     runtime()?;
     let (model, tokenizer) = ensure_model()?;
-    Ok(Box::new(BgeSmallProvider::from_files(&model, &tokenizer)?))
+    Ok(Box::new(BgeSmallProvider::from_files_with_threads(
+        &model, &tokenizer, threads,
+    )?))
 }
 
 /// A text every working embedder takes, used to tell a failing embedder from failing notes.
@@ -124,9 +138,27 @@ impl Index {
         provider: &dyn EmbeddingProvider,
         batch: usize,
     ) -> anyhow::Result<Embedded> {
+        self.embed_rounds(provider, batch, usize::MAX)
+    }
+
+    /// One batch of `embed_pending`, so a long first embed can stop between batches.
+    pub fn embed_batch(
+        &mut self,
+        provider: &dyn EmbeddingProvider,
+        batch: usize,
+    ) -> anyhow::Result<Embedded> {
+        self.embed_rounds(provider, batch, 1)
+    }
+
+    fn embed_rounds(
+        &mut self,
+        provider: &dyn EmbeddingProvider,
+        batch: usize,
+        rounds: usize,
+    ) -> anyhow::Result<Embedded> {
         let model = provider.config().model_id.clone();
         let mut out = Embedded::default();
-        loop {
+        for _ in 0..rounds {
             let pending: Vec<(i64, String, String)> = {
                 let mut st = self.conn.prepare(
                     "SELECT n.id, n.path, c.title, c.tags, c.body

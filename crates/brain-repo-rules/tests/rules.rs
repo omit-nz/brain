@@ -261,3 +261,166 @@ fn self_hosted_labels_are_refused() {
     assert!(hosted_only(matrix).is_err());
     assert_eq!(hosted_only(ok), Ok(()));
 }
+
+/// Every `.rs` file under `dir`, as (path, text).
+fn rust_files(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text = fs::read_to_string(&path).unwrap();
+            out.push((path, text));
+        }
+    }
+}
+
+/// The files that name `CLAUDE.md`, exactly as written: brain reaches an AI tool through its MCP
+/// door and its own `claude mcp` command, never by writing the person's instructions file. Naming
+/// the file is the proxy for writing it; a path built from pieces would slip past, and review
+/// catches that.
+fn naming_claude_md(files: &[(PathBuf, String)]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(_, text)| text.contains("CLAUDE.md"))
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+#[test]
+fn nothing_writes_claude_md() {
+    let mut files = Vec::new();
+    for krate in fs::read_dir(root().join("crates")).unwrap() {
+        let src = krate.unwrap().path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    assert!(!files.is_empty());
+    assert_eq!(naming_claude_md(&files), Vec::<String>::new());
+}
+
+#[test]
+fn a_file_naming_claude_md_is_caught() {
+    let files = [
+        (
+            PathBuf::from("crates/brain/src/connect.rs"),
+            "fs::write(home.join(\"CLAUDE.md\"), rules)".to_string(),
+        ),
+        (
+            PathBuf::from("crates/brain/src/ok.rs"),
+            "fn ok() {}".to_string(),
+        ),
+    ];
+    assert_eq!(naming_claude_md(&files), ["crates/brain/src/connect.rs"]);
+}
+
+/// Why a package distribution file could install beyond the person's own home, if it could.
+fn user_only(distribution: &str) -> Result<(), String> {
+    for needed in [
+        "enable_currentUserHome=\"true\"",
+        "enable_localSystem=\"false\"",
+        "enable_anywhere=\"false\"",
+        "auth=\"none\"",
+    ] {
+        if !distribution.contains(needed) {
+            return Err(format!("pkg/distribution.xml lacks {needed}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_pkg_installs_for_the_user_only() {
+    let text = fs::read_to_string(root().join("pkg/distribution.xml")).unwrap();
+    assert_eq!(user_only(&text), Ok(()));
+}
+
+#[test]
+fn a_pkg_that_asks_for_an_admin_is_caught() {
+    let admin = r#"<domains enable_currentUserHome="true" enable_localSystem="true" enable_anywhere="false"/><pkg-ref id="x" auth="root"/>"#;
+    assert!(user_only(admin).is_err());
+}
+
+/// The `src` files with `install.sh` inside a string literal. How to install differs by platform
+/// (brain.pkg on macOS, the script elsewhere), so the words live in brain-platform alone.
+fn naming_install_sh(files: &[(PathBuf, String)]) -> Vec<String> {
+    // Between a line's quotes: the odd pieces of a split on `"`.
+    let in_literal = |text: &str| {
+        text.lines().any(|line| {
+            line.split('"')
+                .skip(1)
+                .step_by(2)
+                .any(|s| s.contains("install.sh"))
+        })
+    };
+    files
+        .iter()
+        .filter(|(_, text)| in_literal(text))
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+#[test]
+fn no_message_names_install_sh() {
+    let mut files = Vec::new();
+    for krate in fs::read_dir(root().join("crates")).unwrap() {
+        let krate = krate.unwrap().path();
+        if krate.ends_with("brain-platform") {
+            continue;
+        }
+        let src = krate.join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    assert_eq!(naming_install_sh(&files), Vec::<String>::new());
+}
+
+#[test]
+fn a_message_naming_install_sh_is_caught() {
+    let files = [
+        (
+            PathBuf::from("crates/brain/src/cli.rs"),
+            "bail!(\"install brain with scripts/install.sh first\")".to_string(),
+        ),
+        (
+            PathBuf::from("crates/brain/src/ok.rs"),
+            "// install.sh lays the install out this way".to_string(),
+        ),
+    ];
+    assert_eq!(naming_install_sh(&files), ["crates/brain/src/cli.rs"]);
+}
+
+/// The spec's one plain line (spec:353), in every page a person reads about what brain sends.
+#[test]
+fn the_privacy_line_is_on_every_page_about_what_brain_sends() {
+    let missing: Vec<&str> = ["README.md", "SECURITY.md", "docs/usage.md"]
+        .into_iter()
+        .filter(|page| {
+            !fs::read_to_string(root().join(page))
+                .unwrap()
+                .contains("omit looks at usage, never at notes.")
+        })
+        .collect();
+    assert_eq!(missing, Vec::<&str>::new());
+}
+
+/// The release job checks the macOS build against what an installed brain asks of an update
+/// (brain_platform::codesign::developer_id, with brain's own identifier for brain), so a build the
+/// release passes is a build every Mac takes. Both scripts write the team as `\"$team\"`.
+#[test]
+fn the_release_checks_what_an_update_checks() {
+    let developer_id = brain_platform::codesign::developer_id("$team").replace('"', "\\\"");
+    for file in ["scripts/sign-macos.sh", ".github/workflows/release.yml"] {
+        let text = fs::read_to_string(root().join(file)).unwrap();
+        assert!(
+            text.contains(&format!("developer_id=\"{developer_id}\"")),
+            "{file} does not ask for {developer_id}"
+        );
+        assert!(
+            text.contains(r#"-R=identifier \"nz.omit.brain\" and $developer_id"#),
+            "{file} does not ask for brain's identifier"
+        );
+    }
+}

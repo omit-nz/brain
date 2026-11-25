@@ -1,0 +1,298 @@
+//! `brain daemon`: the index's one writer. It holds the writer lock for as long as it runs,
+//! watches the vault and brings the index up to date after any change that can matter, so a
+//! saved note is searchable seconds later. `brain index` and `brain import` defer to it.
+
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+use brain::update;
+use brain_index::activity::Activity;
+use brain_index::{Index, Reindexed, embed};
+use brain_note::Vault;
+use brain_platform::clock::Clock;
+use brain_platform::dirs::Dirs;
+use brain_platform::fs::Lock;
+use brain_platform::process;
+use brain_report::Event;
+use notify::event::ModifyKind;
+use notify::{EventKind, EventKindMask, RecursiveMode};
+use notify_debouncer_full::{DebounceEventResult, NoCache};
+
+use crate::config::Config;
+use crate::out::terminal;
+use crate::{gaps, usage};
+
+pub const WRITER_LOCK: &str = "writer.lock";
+/// A full pass this long after the last, for whatever the watcher missed.
+const BACKSTOP: Duration = Duration::from_secs(600);
+/// A note saved this recently gets no id written into it yet: its owner may still be typing.
+const SETTLE: Duration = Duration::from_secs(5);
+/// When a pass left a young note without its id, the next pass comes this soon.
+const RETRY: Duration = Duration::from_secs(6);
+const EMBED_BATCH: usize = 32;
+const RECHECK_EVERY: Duration = Duration::from_secs(3600);
+const SEND_EVERY: Duration = Duration::from_secs(3600);
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+pub fn writer_lock(dirs: &Dirs) -> PathBuf {
+    dirs.data.join(WRITER_LOCK)
+}
+
+/// The line a pass prints, and `brain index` too.
+pub fn summary(r: &Reindexed) -> String {
+    let mut line = format!(
+        "{} added, {} changed, {} removed, {} skipped, {} ids written, {} without an id",
+        r.added,
+        r.changed,
+        r.removed,
+        r.skipped.len(),
+        r.ids_written,
+        r.unidentified.len()
+    );
+    if r.deferred > 0 {
+        line.push_str(&format!(
+            ", {} waiting for their owner to stop typing to get an id",
+            r.deferred
+        ));
+    }
+    line
+}
+
+/// Installs a newer signed release over the install this daemon runs from, through the same
+/// checks `brain update` makes, and returns its version. A failure leaves this version running; a
+/// brain run from anywhere but its install (a dev build) never replaces anything.
+fn update_self(
+    dirs: &Dirs,
+    store: &Path,
+    clock: &dyn Clock,
+    from_dir: Option<&Path>,
+) -> Option<String> {
+    let current = update::install_dir(&dirs.bin);
+    if !update::runs_from(&current) {
+        eprintln!("update: this brain was not run from its install, so it never updates itself");
+        return None;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let installed = match from_dir {
+        Some(dir) => newer(|| update::LocalDir(dir.to_path_buf()), &current, version),
+        None => newer(|| update::GitHub, &current, version),
+    };
+    installed
+        .map_err(|e| {
+            eprintln!("{}", terminal(&format!("update failed: {e:#}")));
+            usage::count(store, clock.today(), Event::ErrorUpdate, None);
+        })
+        .ok()
+        .flatten()
+}
+
+/// The version installed over `current`, when a newer one was out.
+fn newer<S: update::Source>(
+    source: impl Fn() -> S,
+    current: &Path,
+    version: &str,
+) -> anyhow::Result<Option<String>> {
+    if update::check(source(), version)?.is_none() {
+        return Ok(None);
+    }
+    let v = update::run(source(), &update::release_trust(), current, version)?;
+    Ok((v != version).then_some(v))
+}
+
+/// Runs the daemon until it installs a newer release, then runs that release in its place with
+/// the same arguments: the same process under launchd, and the same terminal elsewhere.
+pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<()> {
+    let v = serve(dirs, clock, from_dir)?;
+    eprintln!("installed brain {v}; starting it");
+    let exe = update::install_dir(&dirs.bin).join(update::exe_name());
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    Err(anyhow::Error::new(process::replace(&exe, &args))
+        .context(format!("starting {}", exe.display())))
+}
+
+/// The daemon's work, holding the writer lock and the vault watcher, which it lets go of when it
+/// returns the version it installed.
+fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<String> {
+    let path = writer_lock(dirs);
+    let _lock = match Lock::try_acquire(&path)? {
+        Some(lock) => lock,
+        None => {
+            eprintln!("waiting for another brain writer to finish");
+            Lock::acquire(&path)?
+        }
+    };
+    // A vault on a disk not yet mounted at login is waited for, not exited on, so launchd never
+    // restarts the daemon into the same failure every few seconds.
+    let root = Config::load(dirs)?.vault;
+    let mut said = false;
+    while !root.exists() {
+        if !said {
+            eprintln!(
+                "{}",
+                terminal(&format!(
+                    "no vault at {} yet; waiting for it",
+                    root.display()
+                ))
+            );
+            said = true;
+        }
+        std::thread::sleep(RETRY);
+    }
+    let vault = Vault::open(&root)?;
+    let mut idx = Index::open(&dirs.data.join("index.db"))?;
+    let provider = embed::load()
+        .map_err(|e| {
+            eprintln!(
+                "{}",
+                terminal(&format!(
+                    "embeddings off, search uses words and links: {e:#}"
+                ))
+            )
+        })
+        .ok();
+    let (tx, rx) = mpsc::channel();
+    // The default file-id cache walks the tree following links; the daemon needs no rename
+    // pairing, so it keeps none, and the watcher itself follows no link, as the vault walk does not.
+    let config = notify_debouncer_full::Config::default().with_notify_config(
+        notify::Config::default()
+            .with_event_kinds(EventKindMask::CORE)
+            .with_follow_symlinks(false),
+    );
+    let mut watcher = notify_debouncer_full::new_debouncer_opt::<_, notify::RecommendedWatcher, _>(
+        config, tx, NoCache,
+    )?;
+    watcher.watch(&vault.root, RecursiveMode::Recursive)?;
+    let store = usage::store(dirs);
+    let mut passes = 0u64;
+    let mut due = true;
+    let mut embedding = false;
+    let mut rewatch = false;
+    let mut changed = false;
+    let mut last_recheck: Option<Instant> = None;
+    let mut last_send: Option<Instant> = None;
+    let mut last_update: Option<Instant> = None;
+    let mut next = Instant::now();
+    loop {
+        if due {
+            passes += 1;
+            if rewatch && watcher.watch(&vault.root, RecursiveMode::Recursive).is_ok() {
+                rewatch = false;
+            }
+            match clock
+                .now()
+                .checked_sub(SETTLE)
+                .map_err(anyhow::Error::from)
+                .and_then(|settled| idx.reindex_settled(&vault, settled, clock.now()))
+            {
+                Ok(r) => {
+                    eprintln!("{}", terminal(&format!("pass {passes}: {}", summary(&r))));
+                    next = Instant::now() + if r.deferred > 0 { RETRY } else { BACKSTOP };
+                    changed |= r.added + r.changed + r.removed > 0;
+                }
+                Err(e) => {
+                    eprintln!("{}", terminal(&format!("pass {passes} failed: {e:#}")));
+                    usage::count(&store, clock.today(), Event::ErrorIndex, None);
+                    next = Instant::now() + RETRY;
+                    // A vault folder that went away and came back is a new folder to the
+                    // watcher on some systems; watching it again costs nothing when it is not.
+                    let _ = watcher.unwatch(&vault.root);
+                    rewatch = true;
+                }
+            }
+            embedding = provider.is_some();
+            // Each recheck searches every open gap, so it waits for a pass that changed notes and
+            // runs at most once an hour, never once per save.
+            if changed && last_recheck.is_none_or(|t: Instant| t.elapsed() >= RECHECK_EVERY) {
+                changed = false;
+                last_recheck = Some(Instant::now());
+                let filled = Activity::open(&store)
+                    .and_then(|a| gaps::recheck(&idx, &a, provider.as_deref(), clock));
+                match filled {
+                    Ok(n) => eprintln!("recheck: {n} gaps filled"),
+                    Err(e) => eprintln!("{}", terminal(&format!("recheck failed: {e:#}"))),
+                }
+            }
+            // At start and hourly; a pass comes at least every BACKSTOP, so the hour holds.
+            if last_send.is_none_or(|t: Instant| t.elapsed() >= SEND_EVERY) {
+                last_send = Some(Instant::now());
+                match usage::send_due(dirs, &idx, clock) {
+                    Ok(s) => eprintln!("{}", s.line()),
+                    Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),
+                }
+            }
+            if last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY) {
+                last_update = Some(Instant::now());
+                if let Some(v) = update_self(dirs, &store, clock, from_dir) {
+                    return Ok(v);
+                }
+            }
+        }
+        // One batch a turn, so a save made during a long first embed waits for one batch only.
+        if embedding && let Some(p) = &provider {
+            embedding = match idx.embed_batch(&**p, EMBED_BATCH) {
+                Ok(e) => {
+                    if let Some(why) = &e.stopped {
+                        eprintln!("{}", terminal(&format!("embedding stopped: {why}")));
+                        usage::count(&store, clock.today(), Event::ErrorEmbed, None);
+                    }
+                    e.pending > 0 && e.stopped.is_none()
+                }
+                Err(e) => {
+                    eprintln!("{}", terminal(&format!("embedding failed: {e:#}")));
+                    usage::count(&store, clock.today(), Event::ErrorEmbed, None);
+                    false
+                }
+            };
+        }
+        let wait = if embedding {
+            Duration::ZERO
+        } else {
+            next.saturating_duration_since(Instant::now())
+        };
+        let mut events = Vec::new();
+        match rx.recv_timeout(wait) {
+            Ok(event) => events.push(event),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the vault watcher stopped"),
+        }
+        events.extend(rx.try_iter());
+        due = Instant::now() >= next;
+        for event in &events {
+            if event.is_err() {
+                usage::count(&store, clock.today(), Event::ErrorWatch, None);
+            }
+            due |= matters(&vault.root, event);
+        }
+    }
+}
+
+/// Whether a batch of watcher events can change the index. The exact events an editor's save
+/// makes differ by system and editor, so any `.md` path counts, and so does any creation, rename
+/// or removal, which can bring or take a folder of notes (Windows reports a folder moved in as
+/// one creation); nothing inside a hidden folder does.
+fn matters(root: &Path, result: &DebounceEventResult) -> bool {
+    let Ok(events) = result else {
+        return true;
+    };
+    events.iter().any(|e| {
+        e.need_rescan()
+            || e.paths.iter().any(|p| {
+                let Ok(rel) = p.strip_prefix(root) else {
+                    return true;
+                };
+                let hidden = rel.components().any(
+                    |c| matches!(c, Component::Normal(n) if n.to_string_lossy().starts_with('.')),
+                );
+                !hidden
+                    && (p.extension().is_some_and(|x| x == "md")
+                        || matches!(
+                            e.kind,
+                            EventKind::Create(_)
+                                | EventKind::Modify(ModifyKind::Name(_))
+                                | EventKind::Remove(_)
+                        ))
+            })
+    })
+}

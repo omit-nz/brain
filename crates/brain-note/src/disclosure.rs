@@ -24,6 +24,15 @@ impl Place {
             Place::Kept => "kept",
         }
     }
+
+    /// The place `as_str` wrote; anything else reads as private, the place that shares nothing.
+    pub fn parse(v: &str) -> Place {
+        match v {
+            "inbox" => Place::Inbox,
+            "kept" => Place::Kept,
+            _ => Place::Private,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

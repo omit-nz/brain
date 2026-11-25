@@ -96,6 +96,18 @@ pub fn write_atomic(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> 
     Ok(())
 }
 
+/// Writes a new file at `rel`, whole or not at all, and never over one that exists: a file that
+/// appeared at `rel` first is `AlreadyExists`, so two writers choosing one name both keep their
+/// bytes once the second picks another.
+pub fn create_new(root: &Path, rel: &Path, bytes: &[u8], privacy: Privacy) -> io::Result<()> {
+    let path = checked(root, rel)?;
+    let mut tmp = temp_in(parent_dirs(&path)?, privacy)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist_noclobber(&path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 /// A temporary file beside its target, created with the mode `privacy` asks for.
 fn temp_in(parent: &Path, privacy: Privacy) -> io::Result<tempfile::NamedTempFile> {
     let mut builder = tempfile::Builder::new();
@@ -201,4 +213,57 @@ pub fn archive(root: &Path, rel: &Path, archive_dir: &Path) -> io::Result<PathBu
     }
     rename_within(root, rel, &target)?;
     Ok(target)
+}
+
+/// An exclusive lock on an owner-only file, held until it is dropped or its process dies (`flock`
+/// on Unix, `LockFileEx` on Windows). One process writes the index; others only probe.
+pub struct Lock {
+    _file: fs::File,
+}
+
+impl Lock {
+    /// Waits for the lock.
+    pub fn acquire(path: &Path) -> io::Result<Lock> {
+        let file = lock_file(path)?;
+        file.lock()?;
+        Ok(Lock { _file: file })
+    }
+
+    /// Takes the lock, or `None` while a writer holds it. A reader's probe holds the lock shared
+    /// for an instant, so a refusal while a shared lock can still be taken is a probe, not a
+    /// writer, and the lock is tried again.
+    pub fn try_acquire(path: &Path) -> io::Result<Option<Lock>> {
+        let file = lock_file(path)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(Lock { _file: file })),
+                Err(fs::TryLockError::Error(e)) => return Err(e),
+                Err(fs::TryLockError::WouldBlock) => {
+                    let probe = fs::File::open(path)?;
+                    if probe.try_lock_shared().is_err() || std::time::Instant::now() > deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    /// Whether a writer holds the lock, by a shared probe that never blocks one.
+    pub fn is_held(path: &Path) -> bool {
+        match fs::File::open(path) {
+            Ok(file) => matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)),
+            Err(_) => false,
+        }
+    }
+}
+
+fn lock_file(path: &Path) -> io::Result<fs::File> {
+    let (dir, name) = match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => (dir, name),
+        _ => return Err(io::Error::new(ErrorKind::InvalidInput, "not a file path")),
+    };
+    ensure_private_file(dir, Path::new(name))?;
+    fs::OpenOptions::new().read(true).write(true).open(path)
 }

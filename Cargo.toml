@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -33,3 +33,12 @@ zipsign-api = { version = "=0.2.2", default-features = false, features = ["sign-
 tar = "0.4"
 libloading = "0.9"
 flate2 = "1"
+notify = "9"
+notify-debouncer-full = "0.8"
+rmcp = { version = "3.11", features = ["server", "macros", "transport-io", "schemars"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+schemars = "1"
+ed25519-dalek = "2"
+base64 = "0.22"
+getrandom = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }

@@ -6,7 +6,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The crates in layer order; each may depend only on crates before it.
-const LAYERS: &[&str] = &["brain-platform", "brain-note", "brain-index", "brain"];
+const LAYERS: &[&str] = &[
+    "brain-report",
+    "brain-platform",
+    "brain-note",
+    "brain-index",
+    "brain",
+    "brain-usage",
+];
+const DB_RS: &str = "crates/brain-index/src/db.rs";
 
 const PLATFORM: &str = "brain-platform";
 const FS_RS: &str = "crates/brain-platform/src/fs.rs";
@@ -286,6 +294,29 @@ fn file_writes(sources: &[Source]) -> Vec<String> {
         }
     }
     out
+}
+
+/// One function opens every SQLite database, so every store gets the same privacy, WAL and
+/// migration rules.
+fn connection_openers(sources: &[Source]) -> Vec<String> {
+    sources
+        .iter()
+        .filter(|s| s.path != DB_RS && s.text.contains("Connection::open"))
+        .map(|s| format!("{}: Connection::open outside {DB_RS}", s.path))
+        .collect()
+}
+
+#[test]
+fn one_connection_opener() {
+    assert_eq!(connection_openers(&repo_sources()), Vec::<String>::new());
+    let stray = [src(
+        "brain",
+        "crates/brain/src/usage.rs",
+        "let c = rusqlite::Connection::open(path)?;",
+    )];
+    assert_eq!(connection_openers(&stray).len(), 1);
+    let home = [src("brain-index", DB_RS, "Connection::open(path)")];
+    assert_eq!(connection_openers(&home), Vec::<String>::new());
 }
 
 fn clock_allows(sources: &[Source]) -> Vec<String> {

@@ -1,21 +1,30 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use brain_index::{Index, Query, Scope, embed};
-use brain_note::{Frontmatter, Kind, Split, Vault};
+use brain_index::activity::Activity;
+use brain_index::{Index, Query, Scope, embed, is_gap};
+use brain_note::{Kind, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{Privacy, create_dir_private, write_atomic};
+use brain_platform::fs::{Lock, create_dir_private};
+use brain_platform::service::{self, Launchctl};
+use brain_report::{Door, Event};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use jiff::ToSpan;
 use serde_json::json;
 
 use brain::update;
 
-use crate::config::{Config, REVIEW_DAYS};
+use crate::capture::{self, Capture};
+use crate::config::Config;
+use crate::connect;
+use crate::daemon::{self, writer_lock};
+use crate::gaps;
 use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
+use crate::mcp;
 use crate::out::terminal;
+use crate::usage;
 
 #[derive(Parser)]
 #[command(
@@ -42,20 +51,23 @@ enum Command {
     },
     /// Bring the index up to date with the vault, and embed what is new.
     Index,
+    /// Keep the index up to date as notes change, until stopped.
+    Daemon {
+        /// Read releases from this folder instead of GitHub (for tests).
+        #[arg(long, hide = true)]
+        from_dir: Option<PathBuf>,
+    },
     /// Search your notes.
     Search {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
+        #[command(flatten)]
+        s: SearchArgs,
+    },
+    /// Questions no note answered yet, newest first.
+    Gaps {
         #[arg(long)]
         json: bool,
-        /// Reorder the top results with the cross-encoder.
-        #[arg(long)]
-        rerank: bool,
-        /// Only what a colleague could see.
-        #[arg(long)]
-        shared_only: bool,
     },
     /// Write a new note into the inbox.
     Add {
@@ -64,6 +76,40 @@ enum Command {
         title: Option<String>,
         #[arg(long, value_enum)]
         kind: Option<KindArg>,
+    },
+    /// Write a rule note that corrects another note, which is left as it is.
+    Correct {
+        /// The note's id or its path in the vault.
+        target: String,
+        text: String,
+    },
+    /// What brain counts about its own use, and whether the day's counts go to omit.
+    Usage {
+        #[command(subcommand)]
+        action: Option<UsageAction>,
+    },
+    /// Serve brain to an AI tool over MCP on stdin and stdout.
+    Mcp {
+        /// The AI tool this server answers, as its counts name it.
+        #[arg(long, value_enum, default_value = "other")]
+        door: DoorArg,
+        /// Hand over to the installed brain when this copy is not it (the Claude Desktop
+        /// extension's bundled copy).
+        #[arg(long, hide = true)]
+        hand_over: bool,
+    },
+    /// Connect an AI tool to the installed brain.
+    Connect {
+        #[arg(value_enum)]
+        tool: ConnectTool,
+    },
+    /// Your kept notes whose review has come, oldest first.
+    Due {
+        /// Also list notes due within this many days.
+        #[arg(long, default_value_t = 14)]
+        within: i64,
+        #[arg(long)]
+        json: bool,
     },
     /// Print a note, by id or by its path in the vault.
     Show { target: String },
@@ -87,13 +133,34 @@ enum Command {
         /// Only say whether a newer release exists.
         #[arg(long)]
         check: bool,
+        /// Read releases from this folder instead of GitHub (for tests).
+        #[arg(long, hide = true)]
+        from_dir: Option<PathBuf>,
     },
+    /// Run the daemon at every login, and now (macOS).
+    Start,
+    /// Stop the daemon, and keep it from starting at login.
+    Stop,
     /// Check a release archive's signature against this build's release key.
     #[command(hide = true)]
     ReleaseVerify { archive: PathBuf },
     /// Print the folder an install lives in, for scripts/install.sh.
     #[command(hide = true)]
     InstallDir,
+}
+
+#[derive(Args)]
+struct SearchArgs {
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+    /// Reorder the top results with the cross-encoder.
+    #[arg(long)]
+    rerank: bool,
+    /// Only what a colleague could see.
+    #[arg(long)]
+    shared_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +208,40 @@ enum InboxAction {
     },
 }
 
+#[derive(Subcommand)]
+enum UsageAction {
+    /// Send the day's counts to omit (the default).
+    On,
+    /// Keep the counts on this machine only.
+    Off,
+    /// Send the closed days' counts now; the daemon does this hourly.
+    #[command(hide = true)]
+    Send,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ConnectTool {
+    /// Claude Code, through `claude mcp add`.
+    ClaudeCode,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DoorArg {
+    ClaudeCode,
+    ClaudeDesktop,
+    Other,
+}
+
+impl From<DoorArg> for Door {
+    fn from(d: DoorArg) -> Door {
+        match d {
+            DoorArg::ClaudeCode => Door::ClaudeCode,
+            DoorArg::ClaudeDesktop => Door::ClaudeDesktop,
+            DoorArg::Other => Door::Other,
+        }
+    }
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum KindArg {
     Knowledge,
@@ -162,24 +263,6 @@ fn index(dirs: &Dirs) -> anyhow::Result<Index> {
     Index::open(&dirs.data.join("index.db"))
 }
 
-/// Lowercase words of `text` joined by `-`, at most 60 characters.
-fn slug(text: &str) -> String {
-    let mut s = String::new();
-    for word in text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-    {
-        if s.len() + word.len() > 60 {
-            break;
-        }
-        if !s.is_empty() {
-            s.push('-');
-        }
-        s.push_str(&word.to_lowercase());
-    }
-    if s.is_empty() { "note".into() } else { s }
-}
-
 pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     let clock: Box<dyn Clock> = match cli.now {
         Some(t) => Box::new(FixedClock(t)),
@@ -187,22 +270,78 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     };
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
-        Command::Index => reindex(dirs),
-        Command::Search {
-            text,
-            limit,
-            json,
-            rerank,
-            shared_only,
-        } => search(dirs, &text.join(" "), limit, json, rerank, shared_only),
+        Command::Index => reindex(dirs, &*clock),
+        Command::Daemon { from_dir } => daemon::run(dirs, &*clock, from_dir.as_deref()),
+        Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
+        Command::Gaps { json } => list_gaps(dirs, &*clock, json),
         Command::Add { text, title, kind } => {
-            add(dirs, &*clock, &text, title, kind.map(Kind::from))
+            let config = Config::load(dirs)?;
+            let vault = Vault::open(&config.vault)?;
+            let c = Capture {
+                text: &text,
+                title: title.as_deref(),
+                kind: kind.map(Kind::from),
+                corrects: None,
+            };
+            let w = capture::write(&vault, &config.me, clock.today(), &c)?;
+            println!("{}", terminal(&w.rel));
+            let cli = Some(Door::Cli);
+            usage::count(
+                &usage::store(dirs),
+                clock.today(),
+                Event::CaptureWritten,
+                cli,
+            );
+            Ok(())
         }
+        Command::Correct { target, text } => {
+            let config = Config::load(dirs)?;
+            let vault = Vault::open(&config.vault)?;
+            let today = clock.today();
+            let w = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
+            println!("{}", terminal(&w.rel));
+            usage::count(
+                &usage::store(dirs),
+                today,
+                Event::Correction,
+                Some(Door::Cli),
+            );
+            Ok(())
+        }
+        Command::Usage { action } => match action {
+            None => usage::show(dirs, clock.today()),
+            Some(UsageAction::On) => usage::set(dirs, &*clock, true),
+            Some(UsageAction::Off) => usage::set(dirs, &*clock, false),
+            Some(UsageAction::Send) => {
+                println!("{}", usage::send_due(dirs, &index(dirs)?, &*clock)?.line());
+                Ok(())
+            }
+        },
+        Command::Due { within, json } => due(dirs, &*clock, within, json),
+        Command::Mcp { door, hand_over } => {
+            if hand_over {
+                let name = door.to_possible_value().expect("every door has a name");
+                mcp::hand_over(dirs, name.get_name())?;
+            }
+            mcp::run(dirs, clock, door.into())
+        }
+        Command::Connect {
+            tool: ConnectTool::ClaudeCode,
+        } => connect::claude_code(dirs),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
-        Command::Update { check } => update(dirs, check),
+        Command::Update { check, from_dir } => match from_dir {
+            Some(dir) => update(dirs, check, update::LocalDir(dir)),
+            None => update(dirs, check, update::GitHub),
+        },
+        Command::Start => start(dirs),
+        Command::Stop => {
+            launchctl().stop()?;
+            println!("brain's daemon is stopped and will not start at login");
+            Ok(())
+        }
         Command::ReleaseVerify { archive } => {
-            update::verify(&archive, &update::release_keys())?;
+            update::verify(&archive, &update::release_trust().keys)?;
             println!(
                 "{}: signed by the brain release key",
                 terminal(&archive.display().to_string())
@@ -218,11 +357,18 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         } => import_learning_loop(dirs, clock.today(), args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
-            match action {
-                None => inbox::list(&vault),
-                Some(InboxAction::Keep { target, to }) => inbox::keep(&vault, &target, to),
-                Some(InboxAction::Skip { target }) => inbox::skip(&vault, &target),
-            }
+            let (result, event) = match action {
+                None => return inbox::list(&vault),
+                Some(InboxAction::Keep { target, to }) => {
+                    (inbox::keep(&vault, &target, to), Event::CaptureKept)
+                }
+                Some(InboxAction::Skip { target }) => {
+                    (inbox::skip(&vault, &target), Event::CaptureSkipped)
+                }
+            };
+            result?;
+            usage::count(&usage::store(dirs), clock.today(), event, Some(Door::Cli));
+            Ok(())
         }
     }
 }
@@ -272,9 +418,17 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             create_dir_private(&path)?;
         }
     }
+    // A second init keeps the person's usage choice; an unreadable config fails rather than
+    // quietly switching sending back on.
+    let usage = if dirs.config.join(crate::config::FILE).exists() {
+        Config::load(dirs)?.usage
+    } else {
+        Default::default()
+    };
     Config {
         vault: vault.root.clone(),
         me: me.clone(),
+        usage,
     }
     .save(dirs)?;
     println!(
@@ -284,24 +438,36 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             vault.root.display()
         ))
     );
+    // The installed brain starts its own daemon; a build run from anywhere else leaves it to the
+    // person, so a dev build never registers a launch agent.
+    if service::SUPPORTED && update::runs_from(&update::install_dir(&dirs.bin)) {
+        if let Err(e) = start(dirs) {
+            eprintln!(
+                "{}",
+                terminal(&format!(
+                    "brain's daemon did not start: {e:#}; run `brain start`"
+                ))
+            );
+        }
+    } else {
+        println!("To keep the index up to date as notes change, run `brain daemon` in a terminal.");
+    }
     Ok(())
 }
 
-fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
+fn reindex(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let vault = Vault::open(&config.vault)?;
+    let Some(_lock) = Lock::try_acquire(&writer_lock(dirs))? else {
+        println!(
+            "brain's daemon keeps the index up to date, or another brain command is updating it now"
+        );
+        return Ok(());
+    };
     let mut idx = index(dirs)?;
     let r = idx.reindex(&vault)?;
-    println!(
-        "{} added, {} changed, {} removed, {} skipped, {} ids written, {} without an id",
-        r.added,
-        r.changed,
-        r.removed,
-        r.skipped.len(),
-        r.ids_written,
-        r.unidentified.len()
-    );
-    match embed::load() {
+    println!("{}", daemon::summary(&r));
+    let provider = match embed::load() {
         Ok(provider) => {
             let e = idx.embed_pending(&*provider, 32)?;
             println!(
@@ -311,41 +477,94 @@ fn reindex(dirs: &Dirs) -> anyhow::Result<()> {
             if let Some(why) = e.stopped {
                 println!("{}", terminal(&format!("embedding stopped: {why}")));
             }
+            Some(provider)
         }
-        Err(e) => println!(
-            "{}",
-            terminal(&format!(
-                "embeddings skipped, search uses words and links: {e:#}"
-            ))
-        ),
+        Err(e) => {
+            println!(
+                "{}",
+                terminal(&format!(
+                    "embeddings skipped, search uses words and links: {e:#}"
+                ))
+            );
+            None
+        }
+    };
+    if r.added + r.changed + r.removed > 0 {
+        let filled = gaps::recheck(&idx, &activity(dirs)?, provider.as_deref(), clock)?;
+        if filled > 0 {
+            println!("{}", plural(filled, "gap") + " filled");
+        }
     }
     Ok(())
 }
 
-fn search(
-    dirs: &Dirs,
-    text: &str,
-    limit: usize,
-    as_json: bool,
-    rerank: bool,
-    shared_only: bool,
-) -> anyhow::Result<()> {
+pub fn activity(dirs: &Dirs) -> anyhow::Result<Activity> {
+    Activity::open(&dirs.data.join("activity.db"))
+}
+
+fn list_gaps(dirs: &Dirs, clock: &dyn Clock, as_json: bool) -> anyhow::Result<()> {
+    Config::load(dirs)?;
+    let a = activity(dirs)?;
+    let open = a.open_gaps(usize::MAX)?;
+    let filled = a.filled_since(clock.now() - jiff::SignedDuration::from_hours(30 * 24))?;
+    if as_json {
+        let rows: Vec<_> = open
+            .iter()
+            .map(|g| {
+                json!({
+                    "at": g.at.to_string(),
+                    "door": g.door.as_str(),
+                    "area": g.area,
+                    "query": g.query,
+                })
+            })
+            .collect();
+        let v = json!({ "open": rows, "filled_last_30_days": filled });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let mut lines: Vec<String> = open
+        .iter()
+        .map(|g| {
+            format!(
+                "{}  {}  {}  {}",
+                g.at.strftime("%Y-%m-%d"),
+                g.door.as_str(),
+                g.area.as_deref().unwrap_or("-"),
+                g.query
+            )
+        })
+        .collect();
+    if open.is_empty() {
+        lines.push("no open gaps".into());
+    }
+    lines.push(format!("{filled} filled in the last 30 days"));
+    println!("{}", terminal(&lines.join("\n")));
+    Ok(())
+}
+
+fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::Result<()> {
     Config::load(dirs)?;
     let idx = index(dirs)?;
     let provider = embed::load().ok();
     let q = Query {
         text,
-        limit,
+        limit: s.limit,
         kinds: None,
-        scope: if shared_only {
+        scope: if s.shared_only {
             Scope::SharedOnly
         } else {
             Scope::Mine
         },
-        rerank,
+        rerank: s.rerank,
     };
-    let hits = idx.search(&q, provider.as_deref())?;
-    if as_json {
+    let started = std::time::Instant::now();
+    let found = idx.search(&q, provider.as_deref())?;
+    let ms = started.elapsed().as_millis();
+    usage::searched(&usage::store(dirs), clock, Door::Cli, text, &found, ms);
+    let gap = is_gap(&found);
+    let hits = found.hits;
+    if s.json {
         let rows: Vec<_> = hits
             .iter()
             .map(|h| {
@@ -360,10 +579,17 @@ fn search(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let v = json!({
+            "gap": gap,
+            "best_similarity": found.best_similarity,
+            "hits": rows,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    if hits.is_empty() {
+    if gap {
+        println!("no note answers this; logged as a gap");
+    } else if hits.is_empty() {
         println!("nothing found");
     }
     for h in &hits {
@@ -375,50 +601,34 @@ fn search(
     Ok(())
 }
 
-fn add(
-    dirs: &Dirs,
-    clock: &dyn Clock,
-    text: &str,
-    title: Option<String>,
-    kind: Option<Kind>,
-) -> anyhow::Result<()> {
+fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
-    let vault = Vault::open(&config.vault)?;
-    let today = clock.today();
-    let review = today.checked_add(REVIEW_DAYS.days())?;
-    let mut fm = Frontmatter::new_with("id", &uuid::Uuid::now_v7().to_string(), "\n")
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let mut fields = Vec::new();
-    if let Some(t) = &title {
-        fields.push(("title", t.clone()));
+    let by = clock.today().checked_add(within.days())?;
+    let due = index(dirs)?.due(&config.me, by)?;
+    if as_json {
+        let rows: Vec<_> = due
+            .iter()
+            .map(|d| {
+                json!({
+                    "id": d.note_uuid.map(|u| u.to_string()),
+                    "path": d.path,
+                    "title": d.title,
+                    "review": d.review.to_string(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
     }
-    fields.push(("date", today.to_string()));
-    fields.push(("owner", config.me.clone()));
-    fields.push(("review", review.to_string()));
-    if let Some(k) = kind {
-        fields.push(("kind", k.as_str().to_string()));
+    if due.is_empty() {
+        println!("nothing of yours is due");
     }
-    for (key, value) in fields {
-        fm.set(key, &value)
-            .map_err(|_| anyhow::anyhow!("{key} cannot hold a line break"))?;
+    for d in &due {
+        println!(
+            "{}",
+            terminal(&format!("{}  {}  {}", d.review, d.path, d.title))
+        );
     }
-    let body = format!("{}\n", text.trim_end());
-    let note = Split {
-        bom: false,
-        fm: Ok(Some(fm)),
-        body: &body,
-    }
-    .render();
-    let base = slug(title.as_deref().unwrap_or(text));
-    let inbox = &vault.layout.inbox;
-    let mut rel = inbox.join(format!("{base}.md"));
-    let mut n = 0;
-    while vault.root.join(&rel).exists() {
-        n += 1;
-        rel = inbox.join(format!("{base}-{n}.md"));
-    }
-    write_atomic(&vault.root, &rel, note.as_bytes(), Privacy::Normal)?;
-    println!("{}", terminal(&brain_note::rel_key(&rel)));
     Ok(())
 }
 
@@ -438,10 +648,48 @@ fn show(dirs: &Dirs, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn update(dirs: &Dirs, check: bool) -> anyhow::Result<()> {
+/// `launchctl` as `BRAIN_LAUNCHCTL` names it, so a test can hand brain a stub.
+fn launchctl() -> Launchctl {
+    Launchctl(
+        std::env::var_os("BRAIN_LAUNCHCTL")
+            .map_or_else(|| PathBuf::from("/bin/launchctl"), PathBuf::from),
+    )
+}
+
+/// Loads the daemon as a launchd agent, once everything it needs is in place, so launchd is never
+/// handed a daemon that exits at once and restarts every ten seconds.
+fn start(dirs: &Dirs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        service::SUPPORTED,
+        "brain start runs the daemon as a launchd agent, which is macOS only in this release; run `brain daemon` in a terminal instead"
+    );
+    let exe = update::install_dir(&dirs.bin).join(update::exe_name());
+    anyhow::ensure!(
+        exe.is_file(),
+        "no install at {}; {} first",
+        exe.display(),
+        service::HOW_TO_INSTALL
+    );
+    Config::load(dirs)?;
+    index(dirs)?;
+    let home = std::env::home_dir().context("no home folder for the launch agent")?;
+    let log = home.join("Library/Logs/brain/daemon.log");
+    let brain_home = std::env::var_os("BRAIN_HOME").map(PathBuf::from);
+    launchctl().start(&home, &service::plist(&exe, &log, brain_home.as_deref()))?;
+    println!(
+        "{}",
+        terminal(&format!(
+            "brain's daemon is running and starts at every login; its log is {}",
+            log.display()
+        ))
+    );
+    Ok(())
+}
+
+fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     if check {
-        match update::check(update::GitHub, version)? {
+        match update::check(source, version)? {
             Some(newer) => {
                 println!("brain {newer} is out; you have {version}. Run `brain update`.")
             }
@@ -452,14 +700,18 @@ fn update(dirs: &Dirs, check: bool) -> anyhow::Result<()> {
     let current = update::install_dir(&dirs.bin);
     anyhow::ensure!(
         current.join(update::exe_name()).is_file(),
-        "no install at {}; brain updates only what scripts/install.sh installed",
-        current.display()
+        "no install at {}; brain updates only an installed brain, so {} first",
+        current.display(),
+        service::HOW_TO_INSTALL
     );
-    let installed = update::run(update::GitHub, &update::release_keys(), &current, version)?;
+    let installed = update::run(source, &update::release_trust(), &current, version)?;
     if installed == version {
         println!("brain {version} is the newest release.");
     } else {
         println!("brain {installed} installed over {version}.");
+        if launchctl().restart_if_loaded()? {
+            println!("restarted the daemon");
+        }
     }
     Ok(())
 }
@@ -469,8 +721,10 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let s = index(dirs)?.stats()?;
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
+    let daemon = Lock::is_held(&writer_lock(dirs));
     if as_json {
         let v = json!({
+            "daemon": daemon,
             "runtime": runtime,
             "notes": s.notes,
             "embedded": s.embedded,
@@ -494,6 +748,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             Some(lib) => format!("ONNX Runtime: {}", lib.display()),
             None => "ONNX Runtime: none, so search uses words and links only".into(),
         },
+        format!("daemon: {}", if daemon { "running" } else { "not running" }),
     ];
     for (reason, n) in &s.skipped {
         lines.push(format!("skipped, {reason}: {n}"));
@@ -531,6 +786,12 @@ fn import_learning_loop(
         share: &share,
         blocklist: blocklist.as_ref(),
         layout: &dst.layout,
+    };
+    // Held through the copy too, so a daemon started mid-import waits for it.
+    let lock = if a.dry_run {
+        None
+    } else {
+        Lock::try_acquire(&writer_lock(dirs))?
     };
     let (plan, written) = if a.dry_run {
         (
@@ -577,10 +838,17 @@ fn import_learning_loop(
     if a.dry_run {
         return Ok(());
     }
-    let reindexed = index(dirs).and_then(|mut ix| ix.reindex(&dst));
+    let reindexed = match lock {
+        Some(_) => index(dirs).and_then(|mut ix| ix.reindex(&dst)).map(Some),
+        None => Ok(None),
+    };
     import::settle(&mut ledger, &dst, &written)?;
     ledger.save(dirs)?;
-    reindexed?;
+    if reindexed?.is_none() {
+        println!(
+            "brain's daemon will index them; with no daemon running, run `brain index` once the other brain command finishes\n"
+        );
+    }
     println!("{}", terminal(&import::report(&dst, today).to_string()));
     Ok(())
 }

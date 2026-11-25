@@ -9,12 +9,37 @@ use serde::{Deserialize, Serialize};
 /// Days from a note's creation to its first review.
 pub const REVIEW_DAYS: i64 = 90;
 
-const FILE: &str = "config.toml";
+pub(crate) const FILE: &str = "config.toml";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub vault: PathBuf,
     pub me: String,
+    #[serde(default, skip_serializing_if = "UsageConfig::is_default")]
+    pub usage: UsageConfig,
+}
+
+/// Whether the day's usage counts go to omit, and where. On unless the owner switches it off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageConfig {
+    pub send: bool,
+    pub endpoint: String,
+}
+
+impl Default for UsageConfig {
+    fn default() -> UsageConfig {
+        UsageConfig {
+            send: true,
+            endpoint: "https://usage.brain.omit.nz/v1/day".into(),
+        }
+    }
+}
+
+impl UsageConfig {
+    fn is_default(&self) -> bool {
+        *self == UsageConfig::default()
+    }
 }
 
 impl Config {
