@@ -109,7 +109,21 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::R
             Lock::acquire(&path)?
         }
     };
-    let vault = Vault::open(&Config::load(dirs)?.vault)?;
+    // A vault on a disk not yet mounted at login is waited for, not exited on, so launchd never
+    // restarts the daemon into the same failure every few seconds.
+    let root = Config::load(dirs)?.vault;
+    let mut said = false;
+    while !root.exists() {
+        if !said {
+            eprintln!(
+                "{}",
+                terminal(&format!("no vault at {} yet; waiting for it", root.display()))
+            );
+            said = true;
+        }
+        std::thread::sleep(RETRY);
+    }
+    let vault = Vault::open(&root)?;
     let mut idx = Index::open(&dirs.data.join("index.db"))?;
     let provider = embed::load()
         .map_err(|e| {

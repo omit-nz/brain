@@ -613,3 +613,24 @@ fn a_daemon_started_through_a_link_into_the_install_still_updates() {
     };
     assert_eq!(status.code(), Some(75));
 }
+
+/// A vault on a disk not yet mounted at login: the daemon waits for it rather than exiting into
+/// a supervisor's restart loop.
+#[test]
+fn a_daemon_started_before_its_vault_waits_for_it() {
+    let h = Home::new();
+    h.init();
+    h.put("a.md", &note_with_id(1, "waited"));
+    let away = h.vault.path().with_extension("away");
+    fs::rename(h.vault.path(), &away).unwrap();
+    let mut d = Daemon::start(&h);
+    until(
+        "the waiting line",
+        || d.stderr().contains("waiting for it"),
+        || d.stderr(),
+    );
+    assert!(d.child.try_wait().unwrap().is_none(), "{}", d.stderr());
+    fs::rename(&away, h.vault.path()).unwrap();
+    wait_for_notes(&h, &d, 1);
+    assert_eq!(d.stderr().matches("waiting for it").count(), 1, "{}", d.stderr());
+}
