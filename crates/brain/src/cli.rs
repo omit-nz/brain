@@ -21,6 +21,7 @@ use crate::daemon::{self, writer_lock};
 use crate::gaps;
 use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
+use crate::mcp;
 use crate::out::terminal;
 
 #[derive(Parser)]
@@ -75,6 +76,12 @@ enum Command {
         /// The note's id or its path in the vault.
         target: String,
         text: String,
+    },
+    /// Serve brain to an AI tool over MCP on stdin and stdout.
+    Mcp {
+        /// The AI tool this server answers, as its counts name it.
+        #[arg(long, value_enum, default_value = "other")]
+        door: DoorArg,
     },
     /// Your kept notes whose review has come, oldest first.
     Due {
@@ -182,6 +189,23 @@ enum InboxAction {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum DoorArg {
+    ClaudeCode,
+    ClaudeDesktop,
+    Other,
+}
+
+impl From<DoorArg> for Door {
+    fn from(d: DoorArg) -> Door {
+        match d {
+            DoorArg::ClaudeCode => Door::ClaudeCode,
+            DoorArg::ClaudeDesktop => Door::ClaudeDesktop,
+            DoorArg::Other => Door::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum KindArg {
     Knowledge,
     Rule,
@@ -222,19 +246,20 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
                 kind: kind.map(Kind::from),
                 corrects: None,
             };
-            let rel = capture::write(&vault, &config.me, clock.today(), &c)?;
-            println!("{}", terminal(&rel));
+            let w = capture::write(&vault, &config.me, clock.today(), &c)?;
+            println!("{}", terminal(&w.rel));
             Ok(())
         }
         Command::Correct { target, text } => {
             let config = Config::load(dirs)?;
             let vault = Vault::open(&config.vault)?;
             let today = clock.today();
-            let rel = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
-            println!("{}", terminal(&rel));
+            let w = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
+            println!("{}", terminal(&w.rel));
             Ok(())
         }
         Command::Due { within, json } => due(dirs, &*clock, within, json),
+        Command::Mcp { door } => mcp::run(dirs, clock, door.into()),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {

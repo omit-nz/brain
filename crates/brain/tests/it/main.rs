@@ -2,6 +2,7 @@ mod capture;
 mod daemon;
 mod gaps;
 mod import;
+mod mcp;
 mod service;
 mod update;
 

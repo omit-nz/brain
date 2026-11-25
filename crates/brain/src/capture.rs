@@ -39,13 +39,20 @@ fn slug(text: &str) -> String {
     if s.is_empty() { "note".into() } else { s }
 }
 
-/// Writes `c` as a new inbox note owned by `me` and returns its vault path. Its name is the
-/// slug of its title (or text), then `-1`, `-2` and on, taking the first name no file holds, so
-/// two captures at one moment never overwrite each other.
-pub fn write(vault: &Vault, me: &str, today: Date, c: &Capture<'_>) -> anyhow::Result<String> {
+/// A note just written: its vault path and id.
+pub struct Written {
+    pub rel: String,
+    pub id: uuid::Uuid,
+}
+
+/// Writes `c` as a new inbox note owned by `me`. Its name is the slug of its title (or text),
+/// then `-1`, `-2` and on, taking the first name no file holds, so two captures at one moment
+/// never overwrite each other.
+pub fn write(vault: &Vault, me: &str, today: Date, c: &Capture<'_>) -> anyhow::Result<Written> {
     let review = today.checked_add(REVIEW_DAYS.days())?;
-    let mut fm = Frontmatter::new_with("id", &uuid::Uuid::now_v7().to_string(), "\n")
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let id = uuid::Uuid::now_v7();
+    let mut fm =
+        Frontmatter::new_with("id", &id.to_string(), "\n").map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let mut fields = Vec::new();
     if let Some(t) = c.title {
         fields.push(("title", t.to_string()));
@@ -84,7 +91,12 @@ pub fn write(vault: &Vault, me: &str, today: Date, c: &Capture<'_>) -> anyhow::R
         };
         let rel = inbox.join(name);
         match create_new(&vault.root, &rel, note.as_bytes(), Privacy::Normal) {
-            Ok(()) => return Ok(rel_key(&rel)),
+            Ok(()) => {
+                return Ok(Written {
+                    rel: rel_key(&rel),
+                    id,
+                });
+            }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e).with_context(|| format!("writing {}", rel_key(&rel))),
         }
@@ -101,7 +113,7 @@ pub fn correct(
     today: Date,
     target: &str,
     text: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Written> {
     let noted = index
         .lookup(target)?
         .with_context(|| format!("no note is {target}"))?;

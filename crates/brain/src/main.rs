@@ -7,6 +7,7 @@ mod daemon;
 mod gaps;
 mod import;
 mod inbox;
+mod mcp;
 mod out;
 mod runtime;
 

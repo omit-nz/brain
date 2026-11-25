@@ -41,13 +41,21 @@ pub fn runtime() -> anyhow::Result<PathBuf> {
 /// `BRAIN_TEST_EMBEDDER` gets the hash embedder instead, so a test can drive the commands that
 /// embed without a model download; release builds never read it.
 pub fn load() -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+    load_with_threads(None)
+}
+
+/// `load`, with ONNX Runtime held to `threads` cores (`None`: every core), so a process that
+/// searches beside others (an AI tool's `brain mcp`) does not take the whole machine.
+pub fn load_with_threads(threads: Option<usize>) -> anyhow::Result<Box<dyn EmbeddingProvider>> {
     if cfg!(debug_assertions) && std::env::var_os("BRAIN_TEST_EMBEDDER").is_some() {
         // Wide enough that unrelated texts land far apart, as a real model's do.
         return Ok(Box::new(HashEmbedder::new(256)));
     }
     runtime()?;
     let (model, tokenizer) = ensure_model()?;
-    Ok(Box::new(BgeSmallProvider::from_files(&model, &tokenizer)?))
+    Ok(Box::new(BgeSmallProvider::from_files_with_threads(
+        &model, &tokenizer, threads,
+    )?))
 }
 
 /// A text every working embedder takes, used to tell a failing embedder from failing notes.
