@@ -632,5 +632,10 @@ fn a_daemon_started_before_its_vault_waits_for_it() {
     assert!(d.child.try_wait().unwrap().is_none(), "{}", d.stderr());
     fs::rename(&away, h.vault.path()).unwrap();
     wait_for_notes(&h, &d, 1);
-    assert_eq!(d.stderr().matches("waiting for it").count(), 1, "{}", d.stderr());
+    assert_eq!(
+        d.stderr().matches("waiting for it").count(),
+        1,
+        "{}",
+        d.stderr()
+    );
 }

@@ -117,7 +117,10 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::R
         if !said {
             eprintln!(
                 "{}",
-                terminal(&format!("no vault at {} yet; waiting for it", root.display()))
+                terminal(&format!(
+                    "no vault at {} yet; waiting for it",
+                    root.display()
+                ))
             );
             said = true;
         }

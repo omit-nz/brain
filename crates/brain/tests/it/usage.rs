@@ -903,6 +903,10 @@ fn a_failed_day_shows_in_brain_usage_and_is_dropped_once_a_week_old() {
     e.point(&h);
     on(&h, "2026-11-27", &["usage", "send"]);
     let sent: Vec<String> = e.got().iter().map(Received::day).collect();
-    assert_eq!(sent.first().map(String::as_str), Some("2026-11-20"), "{sent:?}");
+    assert_eq!(
+        sent.first().map(String::as_str),
+        Some("2026-11-20"),
+        "{sent:?}"
+    );
     assert!(!sent.contains(&"2026-11-18".to_string()), "{sent:?}");
 }
