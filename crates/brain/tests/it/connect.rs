@@ -284,8 +284,7 @@ fn connect_as_registers_the_name() {
             "mcp",
             "--door",
             "claude-code",
-            "--as",
-            "chief of staff",
+            "--as=chief of staff",
         ]
     );
 }
@@ -333,6 +332,28 @@ fn a_hand_over_keeps_the_name() {
         fs::read_to_string(h.home.path().join("argv"))
             .unwrap()
             .trim(),
-        "mcp --door claude-desktop --as chief"
+        "mcp --door claude-desktop --as=chief"
     );
+}
+
+#[test]
+fn connect_as_a_name_starting_with_a_dash_registers_one_word() {
+    let h = Home::new();
+    install(&h);
+    let stub = claude_failing_on("none");
+    let home = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--as=-chief"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(stub.path().join("calls")).unwrap();
+    assert_eq!(calls.lines().last(), Some("--as=-chief"));
 }

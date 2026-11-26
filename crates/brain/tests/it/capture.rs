@@ -142,3 +142,13 @@ fn due_prints_mine_oldest_first() {
     empty.init();
     assert_eq!(empty.run(&["due"]), "nothing of yours is due\n");
 }
+
+#[test]
+fn a_quoted_title_is_searched_as_written() {
+    let h = Home::new();
+    h.init();
+    h.run(&["add", "the zebra crossing", "--title", "say \"hi\": now"]);
+    h.run(&["index"]);
+    let v = h.json(&["search", "--json", "zebra"]);
+    assert_eq!(v["hits"][0]["title"], "say \"hi\": now", "{v}");
+}

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use brain_note::{Frontmatter, MAX_NOTE_BYTES, Split, Vault, rel_key, text_of};
-use brain_platform::fs::{Privacy, create_new, is_link, write_atomic};
+use brain_platform::fs::{Lock, Privacy, create_dir_private, create_new, is_link, write_atomic};
 use jiff::Timestamp;
 use sha2::{Digest, Sha256};
 
@@ -18,6 +18,7 @@ use crate::capture::slug;
 pub const DEFAULT_ROOM: &str = "squads";
 const ROOMS: &str = "rooms";
 const TITLE_CHARS: usize = 80;
+const MAX_TITLE_CHARS: usize = 200;
 /// Posts shown by one `new`.
 pub const PAGE: usize = 50;
 
@@ -53,9 +54,13 @@ pub struct Posted {
     pub title: String,
 }
 
-/// The text's first non-empty line, trimmed and cut at 80 characters.
+/// The text's first non-empty line without its control characters, trimmed and cut at 80
+/// characters.
 fn first_line(text: &str) -> String {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let line = text
+        .lines()
+        .map(|l| l.replace(char::is_control, "").trim().to_string())
+        .find(|l| !l.is_empty());
     line.unwrap_or_default().chars().take(TITLE_CHARS).collect()
 }
 
@@ -74,7 +79,13 @@ pub fn post(
     check_name(author)?;
     anyhow::ensure!(!text.trim().is_empty(), "a post is empty");
     let title = match title {
-        Some(t) => t.to_string(),
+        Some(t) => {
+            anyhow::ensure!(
+                t.chars().count() <= MAX_TITLE_CHARS && !t.chars().any(char::is_control),
+                "a title is at most 200 characters, with no line break or other control character"
+            );
+            t.to_string()
+        }
         None => first_line(text),
     };
     let id = uuid::Uuid::now_v7();
@@ -160,8 +171,13 @@ fn post_names(vault: &Vault, room: &str) -> anyhow::Result<Vec<String>> {
             names.push(name);
         }
     }
-    names.sort();
+    // By name without `.md`, so `<base>.md` comes before the `<base>-1.md` written after it.
+    names.sort_by(|a, b| stem(a).cmp(stem(b)));
     Ok(names)
+}
+
+fn stem(name: &str) -> &str {
+    name.strip_suffix(".md").unwrap_or(name)
 }
 
 pub struct Message {
@@ -186,21 +202,34 @@ pub struct Page {
     pub more: usize,
 }
 
-fn read_post(vault: &Vault, rel: &Path) -> Result<Message, String> {
-    let text = vault.read(rel).map_err(|why| format!("{why:?}"))?;
+/// A post as its frontmatter says; one written without frontmatter (by hand, in a notes app) is
+/// its text, its time read from its file name and its title its first line.
+fn read_post(vault: &Vault, room: &str, file: &str) -> Result<Message, String> {
+    let text = vault
+        .read(&folder(room).join(file))
+        .map_err(|why| why.describe())?;
     let split = Split::parse(&text);
-    let fm = match &split.fm {
-        Ok(Some(fm)) => fm,
-        Ok(None) => return Err("no frontmatter".into()),
-        Err(e) => return Err(format!("frontmatter {e:?}")),
+    let get = |k: &str| match &split.fm {
+        Ok(Some(fm)) => text_of(fm.get(k)).unwrap_or_default(),
+        _ => String::new(),
     };
-    let get = |k: &str| text_of(fm.get(k)).unwrap_or_default();
+    if split.fm.is_err() {
+        return Err("its frontmatter does not parse".into());
+    }
+    let title = get("title");
     Ok(Message {
         id: get("id"),
-        room: get("room"),
+        room: room.to_string(),
         author: get("author"),
-        posted: get("posted"),
-        title: get("title"),
+        posted: match get("posted") {
+            t if t.is_empty() => time_of(file).unwrap_or_default(),
+            t => t,
+        },
+        title: if title.is_empty() {
+            first_line(split.body)
+        } else {
+            title
+        },
         body: split.body.to_string(),
     })
 }
@@ -214,57 +243,69 @@ fn seen_file(room: &str, reader: &str) -> PathBuf {
 }
 
 /// The posts in `room` that `reader` has not been shown, oldest first, at most `PAGE`, handed
-/// to `render`; only once the reply is built are they added to the reader's seen set, so a
-/// failure never skips a post. A set rather than a last-seen mark, so a post written late in a
-/// second already read is still new.
+/// to `render`, which returns its reply and how many of the page's first posts the reply holds.
+/// Only those are added to the reader's seen set, and only once the reply is built, so neither a
+/// failure nor a reply cut short ever skips a post. A set rather than a last-seen mark, so a post
+/// written late in a second already read is still new. One reader at a time: two sessions under
+/// one name would otherwise both be shown the same page.
 pub fn read_new<T>(
     vault: &Vault,
     data: &Path,
     room: &str,
     reader: &str,
-    render: impl FnOnce(&Page) -> T,
+    render: impl FnOnce(&Page) -> (T, usize),
 ) -> anyhow::Result<T> {
     check_room(room)?;
     check_name(reader)?;
+    create_dir_private(data)?;
+    let _one_reader = Lock::acquire(&data.join("rooms.lock"))?;
     let rel = seen_file(room, reader);
-    let mut seen: BTreeSet<String> = match fs::read_to_string(data.join(&rel)) {
-        Ok(t) => t.lines().map(String::from).collect(),
+    let at = data.join(&rel);
+    // Read as far as it goes: a damaged line only means its post is shown again.
+    let seen: BTreeSet<String> = match fs::read(&at) {
+        Ok(b) => String::from_utf8_lossy(&b)
+            .lines()
+            .map(String::from)
+            .collect(),
         Err(e) if e.kind() == ErrorKind::NotFound => BTreeSet::new(),
-        Err(e) => return Err(e).context("reading what this reader has seen"),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("reading what this reader has seen, {}", at.display()));
+        }
     };
-    let unseen: Vec<String> = post_names(vault, room)?
-        .into_iter()
-        .filter(|n| !seen.contains(n))
-        .collect();
+    let names = post_names(vault, room)?;
+    let unseen: Vec<&String> = names.iter().filter(|n| !seen.contains(*n)).collect();
     let more = unseen.len().saturating_sub(PAGE);
     let posts: Vec<Post> = unseen
         .into_iter()
         .take(PAGE)
-        .map(|file| {
-            let rel = folder(room).join(&file);
-            Post {
-                read: read_post(vault, &rel),
-                rel: rel_key(&rel),
-                file,
-            }
+        .map(|file| Post {
+            read: read_post(vault, room, file),
+            rel: rel_key(&folder(room).join(file)),
+            file: file.clone(),
         })
         .collect();
     let page = Page { posts, more };
-    let out = render(&page);
-    if !page.posts.is_empty() {
-        seen.extend(page.posts.into_iter().map(|p| p.file));
-        let text: String = seen.into_iter().map(|n| n + "\n").collect();
+    let (out, shown) = render(&page);
+    if shown > 0 {
+        let shown: BTreeSet<&String> = page.posts[..shown].iter().map(|p| &p.file).collect();
+        // Only names still in the room, so the set never outgrows it.
+        let text: String = names
+            .iter()
+            .filter(|n| seen.contains(*n) || shown.contains(n))
+            .map(|n| format!("{n}\n"))
+            .collect();
         write_atomic(data, &rel, text.as_bytes(), Privacy::Private)
-            .context("saving what this reader has seen")?;
+            .with_context(|| format!("saving what this reader has seen, {}", at.display()))?;
     }
     Ok(out)
 }
 
 pub struct RoomInfo {
     pub name: String,
-    pub posts: usize,
-    /// The newest post's time, RFC 3339, read from its file name.
-    pub newest: Option<String>,
+    /// How many posts it holds and the newest one's time (RFC 3339, read from its file name),
+    /// or why its folder cannot be read.
+    pub posts: Result<(usize, Option<String>), String>,
 }
 
 /// `20261126T080000Z-...` as `2026-11-26T08:00:00Z`.
@@ -297,12 +338,10 @@ pub fn list(vault: &Vault) -> anyhow::Result<Vec<RoomInfo>> {
         if !e.file_type()?.is_dir() || check_room(&name).is_err() {
             continue;
         }
-        let names = post_names(vault, &name)?;
-        rooms.push(RoomInfo {
-            posts: names.len(),
-            newest: names.last().and_then(|n| time_of(n)),
-            name,
-        });
+        let posts = post_names(vault, &name)
+            .map(|names| (names.len(), names.last().and_then(|n| time_of(n))))
+            .map_err(|e| format!("{e:#}"));
+        rooms.push(RoomInfo { name, posts });
     }
     rooms.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(rooms)

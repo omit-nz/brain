@@ -39,7 +39,7 @@ impl Mcp {
         Mcp::spawn(h, &[], &["--as", name])
     }
 
-    fn spawn(h: &Home, env: &[(&str, &str)], extra: &[&str]) -> Mcp {
+    pub(crate) fn spawn(h: &Home, env: &[(&str, &str)], extra: &[&str]) -> Mcp {
         let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
             .args(["mcp", "--door", "claude-code"])
             .args(extra)
@@ -706,4 +706,72 @@ fn a_bad_server_name_is_refused_at_start() {
     let out = h.brain().args(["mcp", "--as", ""]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("a name is"));
+}
+
+#[test]
+fn a_page_too_long_for_the_ai_ends_early_and_the_rest_stay_new() {
+    let h = indexed(&[]);
+    for i in 0..50 {
+        h.put(
+            &format!("rooms/squads/20261126T0800{i:02}Z-p.md"),
+            &format!(
+                "---\nauthor: lane\ntitle: p{i:02}\n---\n{}\n",
+                "w".repeat(6_000)
+            ),
+        );
+    }
+    let mut m = Mcp::start(&h);
+    let mut shown = Vec::new();
+    for _ in 0..20 {
+        let (text, err) = m.text("room_new", json!({}));
+        assert!(!err, "{text}");
+        assert!(
+            text.chars().count() <= 40_000,
+            "{} characters",
+            text.chars().count()
+        );
+        if text == "Nothing new in squads." {
+            break;
+        }
+        let page: Vec<String> = text
+            .split(" title=\"")
+            .skip(1)
+            .map(|t| t[..3].to_string())
+            .collect();
+        assert!(!page.is_empty(), "{text}");
+        let left = 50 - shown.len() - page.len();
+        if left > 0 {
+            assert!(
+                text.ends_with(&format!("\n{left} more not shown; call room_new again.")),
+                "{text}"
+            );
+        }
+        shown.extend(page);
+    }
+    let want: Vec<String> = (0..50).map(|i| format!("p{i:02}")).collect();
+    assert_eq!(shown, want);
+}
+
+#[test]
+fn a_long_post_is_cut_in_room_new() {
+    let h = indexed(&[]);
+    h.put(
+        "rooms/squads/20261126T080000Z-p.md",
+        &format!("---\nauthor: lane\n---\n{}\n", "w".repeat(5_000)),
+    );
+    let mut m = Mcp::start(&h);
+    let (text, _) = m.text("room_new", json!({}));
+    assert!(
+        text.contains(&format!(">{}...</post>", "w".repeat(4_000))),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_name_starting_with_a_dash_still_serves() {
+    let h = indexed(&[]);
+    let mut m = Mcp::spawn(&h, &[], &["--as=-chief"]);
+    m.text("room_post", json!({"text": "hi"}));
+    let (text, _) = m.text("room_new", json!({"as": "r"}));
+    assert!(text.contains(" author=\"-chief\""), "{text}");
 }

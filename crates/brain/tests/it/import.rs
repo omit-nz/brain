@@ -739,3 +739,21 @@ fn an_index_failure_after_the_copies_still_ledgers_them() {
     let out = i.import(&[]);
     assert!(out.contains("0 conflicts"), "{out}");
 }
+
+#[test]
+fn a_quoted_memory_name_imports_as_written() {
+    let i = Import::new();
+    fs::write(
+        i.mem.path().join("omit/memory/feedback_quoted.md"),
+        "---\nname: \"say \\\"hi\\\": now\"\ndescription: d\ntype: feedback\n---\nx\n",
+    )
+    .unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    let copy = i.copy("working-memory/omit/feedback_quoted.md");
+    assert_eq!(
+        line(&copy, "title"),
+        Some("\"say \\\"hi\\\": now\""),
+        "{copy}"
+    );
+}

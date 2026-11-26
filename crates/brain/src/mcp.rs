@@ -51,7 +51,7 @@ pub fn hand_over(dirs: &Dirs, door: &str, name: Option<&str>) -> anyhow::Result<
     }
     let mut args: Vec<OsString> = ["mcp", "--door", door].map(OsString::from).into();
     if let Some(name) = name {
-        args.extend(["--as", name].map(OsString::from));
+        args.push(format!("--as={name}").into());
     }
     Err(anyhow::Error::new(process::replace(&exe, &args))
         .context(format!("starting {}", exe.display())))
@@ -69,6 +69,9 @@ const NO_DAEMON: &str =
 const GAP: &str = "Nothing in your brain answers this yet; it is logged as a gap.";
 const MAX_QUERY: usize = 2_000;
 const BODY_CHARS: usize = 4_000;
+/// The most a room_new reply holds, well inside what an AI tool takes from one call (Claude
+/// Code's default is 25,000 tokens).
+const PAGE_CHARS: usize = 40_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
 
@@ -442,17 +445,24 @@ impl Server {
             let reader = a.reader.as_deref().unwrap_or(&s.reader);
             room::read_new(&s.vault, &s.data, name, reader, |page| {
                 if page.posts.is_empty() {
-                    return format!("Nothing new in {}.", escape(name));
+                    return (format!("Nothing new in {}.", escape(name)), 0);
                 }
-                let mut out = vec![format!("New in {}, oldest first:", escape(name))];
-                out.extend(page.posts.iter().map(fence_post));
-                if page.more > 0 {
-                    out.push(format!(
-                        "{} more not shown; call room_new again.",
-                        page.more
-                    ));
+                let mut out = format!("New in {}, oldest first:", escape(name));
+                let mut shown = 0;
+                // The more line is at most 60 characters.
+                for f in page.posts.iter().map(fence_post) {
+                    if shown > 0 && out.chars().count() + 1 + f.chars().count() > PAGE_CHARS - 60 {
+                        break;
+                    }
+                    out.push('\n');
+                    out.push_str(&f);
+                    shown += 1;
                 }
-                out.join("\n")
+                let left = page.posts.len() - shown + page.more;
+                if left > 0 {
+                    out.push_str(&format!("\n{left} more not shown; call room_new again."));
+                }
+                (out, shown)
             })
         })
         .await
@@ -466,16 +476,19 @@ impl Server {
                 return Ok("No rooms yet; room_post makes one.".into());
             }
             let mut out = vec!["Rooms:".to_string()];
-            out.extend(rooms.iter().map(|r| {
-                let posts = if r.posts == 1 {
-                    "1 post".to_string()
-                } else {
-                    format!("{} posts", r.posts)
-                };
-                match &r.newest {
-                    Some(t) => format!("{}: {posts}, newest {t}", r.name),
-                    None => format!("{}: {posts}", r.name),
+            out.extend(rooms.iter().map(|r| match &r.posts {
+                Ok((n, newest)) => {
+                    let posts = if *n == 1 {
+                        "1 post".to_string()
+                    } else {
+                        format!("{n} posts")
+                    };
+                    match newest {
+                        Some(t) => format!("{}: {posts}, newest {t}", r.name),
+                        None => format!("{}: {posts}", r.name),
+                    }
                 }
+                Err(why) => format!("{}: unreadable: {}", r.name, escape(why)),
             }));
             Ok(out.join("\n"))
         })

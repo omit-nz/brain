@@ -666,7 +666,7 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
                             lines.push(format!("{}  {}  {}", m.posted, m.author, m.title));
                             lines.extend(m.body.trim_end().lines().map(|l| format!("    {l}")));
                         }
-                        Err(why) => lines.push(format!("{}  (unreadable: {why})", p.file)),
+                        Err(why) => lines.push(format!("{}  (cannot be read: {why})", p.file)),
                     }
                 }
                 if page.posts.is_empty() {
@@ -678,7 +678,7 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
                         page.more
                     ));
                 }
-                lines.join("\n")
+                (lines.join("\n"), page.posts.len())
             })?;
             println!("{}", terminal(&text));
         }
@@ -688,10 +688,11 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
                 println!("no rooms yet");
             }
             for r in &rooms {
-                let mut line = format!("{}  {}", r.name, plural(r.posts, "post"));
-                if let Some(t) = &r.newest {
-                    line.push_str(&format!("  newest {t}"));
-                }
+                let line = match &r.posts {
+                    Ok((n, Some(t))) => format!("{}  {}  newest {t}", r.name, plural(*n, "post")),
+                    Ok((n, None)) => format!("{}  {}", r.name, plural(*n, "post")),
+                    Err(why) => format!("{}  unreadable: {why}", r.name),
+                };
                 println!("{}", terminal(&line));
             }
         }

@@ -37,7 +37,8 @@ pub fn claude_code(dirs: &Dirs, name: Option<&str>) -> anyhow::Result<()> {
         .args(["mcp", "add", "--scope", "user", "brain", "--"])
         .arg(&exe)
         .args(["mcp", "--door", "claude-code"])
-        .args(name.map(|n| ["--as", n]).into_iter().flatten())
+        // One word, so a name starting with `-` is never read as a flag.
+        .args(name.map(|n| format!("--as={n}")))
         .status()
         .context("running claude; is Claude Code installed and on your PATH?")?;
     // The remove above has already run, so a brain connected before is gone too.

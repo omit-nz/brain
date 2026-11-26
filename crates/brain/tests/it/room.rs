@@ -235,7 +235,7 @@ fn a_room_folder_that_is_a_link_is_refused() {
 /// The post titles `brain room new` printed, in order.
 fn titles(out: &str) -> Vec<String> {
     out.lines()
-        .filter(|l| !l.starts_with("    ") && l.contains("  ") && !l.contains("(unreadable: "))
+        .filter(|l| !l.starts_with("    ") && l.contains("  ") && !l.contains("(cannot be read: "))
         .map(|l| l.rsplit("  ").next().unwrap().to_string())
         .collect()
 }
@@ -354,7 +354,9 @@ fn an_unreadable_post_is_shown_by_name_and_the_rest_still_read() {
     let out = room(&h, T, &["new"]);
     assert_eq!(titles(&out), ["a", "c"], "{out}");
     assert!(
-        out.contains("20261126T080001Z-bad.md  (unreadable: "),
+        out.contains(
+            "20261126T080001Z-bad.md  (cannot be read: not utf-8: the file is not UTF-8 text)"
+        ),
         "{out}"
     );
     assert_eq!(room(&h, T, &["new"]).trim(), "nothing new in squads");
@@ -422,4 +424,144 @@ fn a_title_that_needs_quotes_reads_back_as_written() {
     let title = r#"say "hi": now \ then"#;
     room(&h, T, &["post", "x", "--title", title]);
     assert_eq!(titles(&room(&h, T, &["new"])), [title]);
+}
+
+#[test]
+fn posts_in_one_second_with_one_title_come_back_in_posting_order() {
+    let h = home();
+    for text in ["first written", "second written", "third written"] {
+        room(&h, T, &["post", text, "--title", "Status"]);
+    }
+    let out = room(&h, T, &["new"]);
+    let bodies: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("    ")).collect();
+    assert_eq!(bodies, ["first written", "second written", "third written"]);
+}
+
+#[test]
+fn a_title_with_control_characters_or_over_200_characters_is_refused() {
+    let h = home();
+    for title in ["a\u{1b}[31mb", "a\u{7}b", "a\tb"] {
+        let err = refused(&h, &["post", "x", "--title", title]);
+        assert!(err.contains("title"), "{title:?}: {err}");
+    }
+    let err = refused(&h, &["post", "x", "--title", &"t".repeat(201)]);
+    assert!(err.contains("title"), "{err}");
+    room(&h, T, &["post", "x", "--title", &"t".repeat(200)]);
+    // A title taken from the text drops control characters.
+    let rel = room(&h, T, &["post", "be\u{7}ll \u{1b}[31mred"]);
+    assert!(
+        read(&h, rel.trim()).contains("\ntitle: bell [31mred\n"),
+        "{}",
+        read(&h, rel.trim())
+    );
+}
+
+#[test]
+fn a_post_without_frontmatter_is_shown_as_its_text() {
+    let h = home();
+    h.put(
+        "rooms/squads/20261126T080000Z-plain.md",
+        "just text\nmore\n",
+    );
+    let out = room(&h, T, &["new"]);
+    assert!(
+        out.starts_with("2026-11-26T08:00:00Z    just text\n    just text\n    more"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_seen_set_that_is_not_text_is_read_as_far_as_it_goes() {
+    let h = home();
+    room(&h, T, &["post", "x", "--title", "kept"]);
+    room(&h, T, &["new"]);
+    let dir = h.home.path().join("data/rooms");
+    let seen: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_none())
+        .collect();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let mut bytes = fs::read(&seen[0]).unwrap();
+    bytes.extend_from_slice(b"\xff\xfe\n");
+    fs::write(&seen[0], bytes).unwrap();
+    assert_eq!(room(&h, T, &["new"]).trim(), "nothing new in squads");
+}
+
+#[cfg(unix)]
+#[test]
+fn one_unreadable_room_is_named_and_the_rest_listed() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = home();
+    room(&h, T, &["post", "a"]);
+    room(&h, T, &["post", "b", "--room", "ops"]);
+    let ops = h.vault.path().join("rooms/ops");
+    fs::set_permissions(&ops, fs::Permissions::from_mode(0o000)).unwrap();
+    let out = h.brain().args(["room", "list"]).output().unwrap();
+    fs::set_permissions(&ops, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("ops  unreadable: "), "{out}");
+    assert_eq!(lines[1], "squads  1 post  newest 2026-11-26T08:00:00Z");
+}
+
+/// The seen set file for the one reader the test used.
+fn seen_names(h: &Home) -> Vec<String> {
+    let dir = h.home.path().join("data/rooms");
+    let files: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_none())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    fs::read_to_string(&files[0])
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn the_seen_set_forgets_posts_no_longer_in_the_room() {
+    let h = home();
+    let a = room(&h, T, &["post", "a", "--title", "a"]);
+    room(&h, T, &["post", "b", "--title", "b"]);
+    room(&h, T, &["new"]);
+    fs::remove_file(h.vault.path().join(a.trim())).unwrap();
+    room(&h, "2026-11-26T08:00:01Z", &["post", "c", "--title", "c"]);
+    assert_eq!(titles(&room(&h, T, &["new"])), ["c"]);
+    assert_eq!(
+        seen_names(&h),
+        ["20261126T080000Z-b.md", "20261126T080001Z-c.md"]
+    );
+}
+
+#[test]
+fn two_readers_of_one_name_at_once_see_each_post_once() {
+    for round in 0..4 {
+        let h = home();
+        for i in 0..60 {
+            put_post(
+                &h,
+                &format!("20261126T08{:02}{:02}Z-p.md", i / 60, i % 60),
+                &format!("p{i:02}"),
+            );
+        }
+        let outs: Vec<String> = std::thread::scope(|s| {
+            let a = s.spawn(|| room(&h, T, &["new", "--as", "chief"]));
+            let b = s.spawn(|| room(&h, T, &["new", "--as", "chief"]));
+            [a.join().unwrap(), b.join().unwrap()].into()
+        });
+        let mut all: Vec<String> = outs.iter().flat_map(|o| titles(o)).collect();
+        let n = all.len();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), n, "round {round}: a post was shown twice");
+        assert_eq!(n, 60, "round {round}: {outs:?}");
+    }
 }
