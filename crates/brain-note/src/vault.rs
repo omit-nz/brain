@@ -35,6 +35,20 @@ pub struct Layout {
     pub memory: PathBuf,
 }
 
+impl Skip {
+    /// `reason: detail`, so a report can count skips by the reason before the colon.
+    pub fn describe(&self) -> String {
+        match self {
+            Skip::Link => "link: brain never follows links".into(),
+            Skip::TooLarge(n) => {
+                format!("too large: {n} bytes, over the {MAX_NOTE_BYTES} byte limit")
+            }
+            Skip::NotUtf8 => "not utf-8: the file is not UTF-8 text".into(),
+            Skip::Unreadable(e) => format!("unreadable: {e}"),
+        }
+    }
+}
+
 impl Default for Layout {
     fn default() -> Layout {
         Layout {

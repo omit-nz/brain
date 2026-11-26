@@ -287,3 +287,29 @@ fn path_of_finds_a_note_by_id() {
     assert_eq!(idx.path_of(&id).unwrap().as_deref(), Some("a.md"));
     assert_eq!(idx.path_of(&uuid::Uuid::nil()).unwrap(), None);
 }
+
+/// An index built before frontmatter values were unescaped holds `say \"hi\"` as a title; the
+/// reading rules went up with that change, so the next reindex rereads the unchanged note.
+#[test]
+fn an_index_from_before_unescaped_titles_rereads_them() {
+    let f = Fixture::new();
+    f.put("a.md", "---\ntitle: \"say \\\"hi\\\": now\"\n---\nalpha\n");
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let c = f.sql();
+    c.execute(
+        "UPDATE notes SET title = 'say \\\"hi\\\": now' WHERE path = 'a.md'",
+        [],
+    )
+    .unwrap();
+    // 2: the rules every index was built under before the change.
+    c.execute("UPDATE meta SET value = '2' WHERE key = 'rules'", [])
+        .unwrap();
+    idx.reindex(&f.vault()).unwrap();
+    let title: String = c
+        .query_row("SELECT title FROM notes WHERE path = 'a.md'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(title, "say \"hi\": now");
+}

@@ -24,6 +24,7 @@ use crate::import::{self, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
 use crate::mcp;
 use crate::out::terminal;
+use crate::room;
 use crate::usage;
 
 #[derive(Parser)]
@@ -83,6 +84,11 @@ enum Command {
         target: String,
         text: String,
     },
+    /// Post to a room, or read what is new in it, for your other sessions.
+    Room {
+        #[command(subcommand)]
+        action: RoomAction,
+    },
     /// What brain counts about its own use, and whether the day's counts go to omit.
     Usage {
         #[command(subcommand)]
@@ -97,11 +103,18 @@ enum Command {
         /// extension's bundled copy).
         #[arg(long, hide = true)]
         hand_over: bool,
+        /// The name this session posts and reads rooms under; the name set up with brain init
+        /// unless given.
+        #[arg(long = "as")]
+        name: Option<String>,
     },
     /// Connect an AI tool to the installed brain.
     Connect {
         #[arg(value_enum)]
         tool: ConnectTool,
+        /// The name this tool's sessions post and read rooms under.
+        #[arg(long = "as")]
+        name: Option<String>,
     },
     /// Your kept notes whose review has come, oldest first.
     Due {
@@ -206,6 +219,32 @@ enum InboxAction {
 }
 
 #[derive(Subcommand)]
+enum RoomAction {
+    /// Write a post into a room.
+    Post {
+        text: String,
+        #[arg(long, default_value = room::DEFAULT_ROOM)]
+        room: String,
+        /// One line; the text's first line unless given.
+        #[arg(long)]
+        title: Option<String>,
+        /// Who is posting; the name set up with brain init unless given.
+        #[arg(long = "as")]
+        author: Option<String>,
+    },
+    /// The posts this reader has not been shown yet, oldest first.
+    New {
+        #[arg(long, default_value = room::DEFAULT_ROOM)]
+        room: String,
+        /// Who is reading; the name set up with brain init unless given.
+        #[arg(long = "as")]
+        reader: Option<String>,
+    },
+    /// The rooms, with how many posts each holds and when the newest came.
+    List,
+}
+
+#[derive(Subcommand)]
 enum UsageAction {
     /// Send the day's counts to omit (the default).
     On,
@@ -305,6 +344,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Room { action } => room_cmd(dirs, &*clock, action),
         Command::Usage { action } => match action {
             None => usage::show(dirs, clock.today()),
             Some(UsageAction::On) => usage::set(dirs, &*clock, true),
@@ -315,16 +355,21 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             }
         },
         Command::Due { within, json } => due(dirs, &*clock, within, json),
-        Command::Mcp { door, hand_over } => {
+        Command::Mcp {
+            door,
+            hand_over,
+            name,
+        } => {
             if hand_over {
-                let name = door.to_possible_value().expect("every door has a name");
-                mcp::hand_over(dirs, name.get_name())?;
+                let d = door.to_possible_value().expect("every door has a name");
+                mcp::hand_over(dirs, d.get_name(), name.as_deref())?;
             }
-            mcp::run(dirs, clock, door.into())
+            mcp::run(dirs, clock, door.into(), name)
         }
         Command::Connect {
             tool: ConnectTool::ClaudeCode,
-        } => connect::claude_code(dirs),
+            name,
+        } => connect::claude_code(dirs, name.as_deref()),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {
@@ -593,6 +638,64 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
             "{}",
             terminal(&format!("{}  ({})\n    {}", h.title, h.path, h.snippet))
         );
+    }
+    Ok(())
+}
+
+fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Result<()> {
+    let config = Config::load(dirs)?;
+    let vault = Vault::open(&config.vault)?;
+    match action {
+        RoomAction::Post {
+            text,
+            room: name,
+            title,
+            author,
+        } => {
+            let author = author.unwrap_or(config.me);
+            let p = room::post(&vault, &name, &author, clock.now(), &text, title.as_deref())?;
+            println!("{}", terminal(&p.rel));
+        }
+        RoomAction::New { room: name, reader } => {
+            let reader = reader.unwrap_or(config.me);
+            let text = room::read_new(&vault, &dirs.data, &name, &reader, |page| {
+                let mut lines = Vec::new();
+                for p in &page.posts {
+                    match &p.read {
+                        Ok(m) => {
+                            lines.push(format!("{}  {}  {}", m.posted, m.author, m.title));
+                            lines.extend(m.body.trim_end().lines().map(|l| format!("    {l}")));
+                        }
+                        Err(why) => lines.push(format!("{}  (cannot be read: {why})", p.file)),
+                    }
+                }
+                if page.posts.is_empty() {
+                    lines.push(format!("nothing new in {name}"));
+                }
+                if page.more > 0 {
+                    lines.push(format!(
+                        "{} more not shown; run brain room new again",
+                        page.more
+                    ));
+                }
+                (lines.join("\n"), page.posts.len())
+            })?;
+            println!("{}", terminal(&text));
+        }
+        RoomAction::List => {
+            let rooms = room::list(&vault)?;
+            if rooms.is_empty() {
+                println!("no rooms yet");
+            }
+            for r in &rooms {
+                let line = match &r.posts {
+                    Ok((n, Some(t))) => format!("{}  {}  newest {t}", r.name, plural(*n, "post")),
+                    Ok((n, None)) => format!("{}  {}", r.name, plural(*n, "post")),
+                    Err(why) => format!("{}  unreadable: {why}", r.name),
+                };
+                println!("{}", terminal(&line));
+            }
+        }
     }
     Ok(())
 }

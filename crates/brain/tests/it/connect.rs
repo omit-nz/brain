@@ -251,3 +251,109 @@ fn a_hand_over_to_an_install_that_cannot_run_fails() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("starting"), "{err}");
 }
+
+#[test]
+fn connect_as_registers_the_name() {
+    let h = Home::new();
+    let exe = install(&h);
+    let stub = claude_failing_on("none");
+    let home = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--as", "chief of staff"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(stub.path().join("calls")).unwrap();
+    let add: Vec<&str> = calls.lines().skip_while(|l| *l != "add").collect();
+    assert_eq!(
+        add,
+        [
+            "add",
+            "--scope",
+            "user",
+            "brain",
+            "--",
+            exe.to_str().unwrap(),
+            "mcp",
+            "--door",
+            "claude-code",
+            "--as=chief of staff",
+        ]
+    );
+}
+
+#[test]
+fn connect_refuses_a_bad_name_before_running_claude() {
+    let h = Home::new();
+    install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--as", "two\nlines"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a name is"));
+    assert!(!stub.path().join("calls").exists(), "claude was never run");
+}
+
+#[test]
+fn a_hand_over_keeps_the_name() {
+    let h = Home::new();
+    install(&h);
+    let out = h
+        .brain()
+        .args([
+            "mcp",
+            "--door",
+            "claude-desktop",
+            "--hand-over",
+            "--as",
+            "chief",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.home.path().join("argv"))
+            .unwrap()
+            .trim(),
+        "mcp --door claude-desktop --as=chief"
+    );
+}
+
+#[test]
+fn connect_as_a_name_starting_with_a_dash_registers_one_word() {
+    let h = Home::new();
+    install(&h);
+    let stub = claude_failing_on("none");
+    let home = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--as=-chief"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(stub.path().join("calls")).unwrap();
+    assert_eq!(calls.lines().last(), Some("--as=-chief"));
+}

@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use brain_note::{Frontmatter, Kind, MAX_NOTE_BYTES, Skip, Split, Value};
+use brain_note::{Frontmatter, Kind, MAX_NOTE_BYTES, Skip, Split, Value, text_of};
 use brain_platform::fs::is_link;
 
 use super::{Source, Written};
@@ -84,16 +84,9 @@ fn kind_of(t: &str) -> Kind {
 }
 
 fn text(v: Option<Value>) -> Option<String> {
-    match v {
-        Some(Value::Text(t)) if !t.trim().is_empty() => {
-            let t = t.trim();
-            let unquoted = ['"', '\'']
-                .iter()
-                .find_map(|q| t.strip_prefix(*q).and_then(|s| s.strip_suffix(*q)));
-            Some(unquoted.unwrap_or(t).to_string())
-        }
-        _ => None,
-    }
+    text_of(v)
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 /// The memory as a brain note: a new block with its id, title, kind, private visibility, owner

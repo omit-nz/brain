@@ -10,6 +10,7 @@ mod import;
 mod inbox;
 mod mcp;
 mod out;
+mod room;
 mod runtime;
 mod usage;
 

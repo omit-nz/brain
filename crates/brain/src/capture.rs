@@ -22,7 +22,7 @@ pub struct Capture<'a> {
 }
 
 /// Lowercase words of `text` joined by `-`, at most 60 characters.
-fn slug(text: &str) -> String {
+pub(crate) fn slug(text: &str) -> String {
     let mut s = String::new();
     for word in text
         .split(|c: char| !c.is_alphanumeric())

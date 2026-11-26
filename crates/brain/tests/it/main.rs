@@ -6,6 +6,7 @@ mod daemon;
 mod gaps;
 mod import;
 mod mcp;
+mod room;
 mod service;
 mod update;
 mod usage;

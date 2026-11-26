@@ -306,9 +306,28 @@ impl Frontmatter {
     }
 }
 
+/// A text value as written, with the quotes and escapes `set` adds taken off again.
 pub fn text_of(v: Option<Value>) -> Option<String> {
     match v {
-        Some(Value::Text(t)) if !t.is_empty() => Some(unquote(&t).to_string()),
+        Some(Value::Text(t)) if !t.is_empty() => {
+            let inner = unquote(&t);
+            if inner.len() + 2 == t.len() && t.starts_with('"') {
+                let mut out = String::with_capacity(inner.len());
+                let mut chars = inner.chars();
+                while let Some(c) = chars.next() {
+                    match (c, chars.clone().next()) {
+                        ('\\', Some(n @ ('\\' | '"'))) => {
+                            out.push(n);
+                            chars.next();
+                        }
+                        _ => out.push(c),
+                    }
+                }
+                Some(out)
+            } else {
+                Some(inner.to_string())
+            }
+        }
         _ => None,
     }
 }

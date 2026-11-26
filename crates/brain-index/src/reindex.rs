@@ -60,25 +60,12 @@ fn stat(path: &Path) -> std::io::Result<(i64, i64)> {
     Ok((m.len() as i64, mtime))
 }
 
-/// `reason: detail`, so a report can count skips by the reason before the colon.
-fn describe(why: &Skip) -> String {
-    match why {
-        Skip::Link => "link: brain never follows links".into(),
-        Skip::TooLarge(n) => format!(
-            "too large: {n} bytes, over the {} byte limit",
-            brain_note::MAX_NOTE_BYTES
-        ),
-        Skip::NotUtf8 => "not utf-8: the file is not UTF-8 text".into(),
-        Skip::Unreadable(e) => format!("unreadable: {e}"),
-    }
-}
-
 impl Work {
     /// Reads the note again after its id was written into it.
     fn reload(&mut self, vault: &Vault) -> anyhow::Result<()> {
         self.raw = vault
             .read(&self.rel)
-            .map_err(|why| anyhow::anyhow!("{}: {}", self.key, describe(&why)))?;
+            .map_err(|why| anyhow::anyhow!("{}: {}", self.key, why.describe()))?;
         (self.size, self.mtime_ns) = stat(&vault.root.join(&self.rel))?;
         self.note = Note::parse(&self.rel, &self.raw, self.place);
         Ok(())
@@ -312,7 +299,7 @@ impl Index {
             tx.execute(
                 "INSERT INTO skipped(path, why) VALUES (?1, ?2)
                  ON CONFLICT(path) DO UPDATE SET why = excluded.why",
-                params![path, describe(why)],
+                params![path, why.describe()],
             )?;
         }
         tx.execute(
