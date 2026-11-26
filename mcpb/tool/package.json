@@ -1,7 +1,8 @@
 {
   "private": true,
-  "description": "The mcpb tool the release job packs and signs with, pinned with its whole tree.",
+  "description": "The mcpb tool the release job packs and signs with, and yauzl, the zip reader Claude Desktop opens a .mcpb with, which verify checks the pack with; pinned with their whole trees.",
   "dependencies": {
-    "@anthropic-ai/mcpb": "2.1.2"
+    "@anthropic-ai/mcpb": "2.1.2",
+    "yauzl": "3.4.0"
   }
 }

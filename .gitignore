@@ -1,3 +1,4 @@
 /target/
 /.omit/
 .wrangler/
+mcpb/tool/node_modules/
