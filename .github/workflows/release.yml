@@ -172,7 +172,7 @@ jobs:
           trap 'rm -rf "$keys"' EXIT
           printf '%s' "$MCPB_CERT" >"$keys/cert.pem"
           printf '%s' "$MCPB_KEY" >"$keys/key.pem"
-          mcpb/tool/node_modules/.bin/mcpb sign "out/brain-${GITHUB_REF_NAME#v}.mcpb" -c "$keys/cert.pem" -k "$keys/key.pem"
+          bash scripts/sign-mcpb.sh "out/brain-${GITHUB_REF_NAME#v}.mcpb" "$keys/cert.pem" "$keys/key.pem"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mcpb
@@ -319,6 +319,9 @@ jobs:
       - name: The build carries a release key
         run: test "$(od -An -v -tx1 crates/brain/src/keys/release.pub | tr -d ' \n')" != "$(printf '%064d' 0)"
       - run: cargo build --release --locked -p brain
+      # yauzl, the zip reader Claude Desktop opens a .mcpb with, for verify-mcpb.sh.
+      - name: Zip reader
+        run: npm ci --ignore-scripts --prefix mcpb/tool
       - name: Check every asset as a client would
         env:
           GH_TOKEN: ${{ github.token }}

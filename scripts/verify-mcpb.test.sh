@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Tests for verify-mcpb.sh: a pack made as the release job makes it passes, and each change a
-# packer could slip in is refused. Runs on Linux and macOS; needs zip, unzip and jq.
+# Tests for verify-mcpb.sh: a pack made and signed as the release job makes it passes, and each
+# change a packer could slip in is refused, as is a pack Claude Desktop's zip reader would refuse.
+# Runs on Linux and macOS; needs zip, unzip, jq, openssl, node and mcpb/tool's packages
+# (npm ci --ignore-scripts --prefix mcpb/tool).
 #
 # Usage: verify-mcpb.test.sh
 #
@@ -23,8 +25,21 @@ setup() {
   jq --arg v "$version" '.version = $v' "$here/../mcpb/manifest.json" >"$box/ext/manifest.json"
 }
 
-pack() {
+# A throwaway self-signed certificate: the signature's form is under test, not its chain.
+cert() {
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$box/key.pem" -out "$box/cert.pem" \
+    -subj /CN=brain-test -days 1 2>/dev/null
+}
+
+zipped() {
   (cd "$box/ext" && zip -qr "$box/brain.mcpb" .)
+}
+
+# Packed and signed as the release job does it.
+pack() {
+  zipped
+  cert
+  bash "$here/sign-mcpb.sh" "$box/brain.mcpb" "$box/cert.pem" "$box/key.pem"
 }
 
 verify() {
@@ -54,6 +69,32 @@ a_pack_as_the_release_makes_it_passes() {
   setup
   pack
   expect_pass "${FUNCNAME[0]}"
+}
+
+an_unsigned_pack_is_refused() {
+  setup
+  zipped
+  expect_refused "${FUNCNAME[0]}"
+}
+
+# What mcpb sign alone makes (v0.2.0's .mcpb): the block after the zip, undeclared, which Claude
+# Desktop refuses with "Invalid comment length".
+a_signature_after_the_zip_is_refused() {
+  setup
+  zipped
+  cert
+  "$here/../mcpb/tool/node_modules/.bin/mcpb" sign "$box/brain.mcpb" -c "$box/cert.pem" -k "$box/key.pem" >/dev/null
+  expect_refused "${FUNCNAME[0]}"
+}
+
+# A block whose own length field disagrees with it: not one signature, whatever its ends say.
+a_comment_that_is_not_one_signature_block_is_refused() {
+  setup
+  pack
+  local at
+  at=$(grep -abo MCPB_SIG_V1 "$box/brain.mcpb" | tail -1 | cut -d: -f1)
+  printf '\xff\xff\x00\x00' | dd of="$box/brain.mcpb" bs=1 seek=$((at + 11)) conv=notrunc 2>/dev/null
+  expect_refused "${FUNCNAME[0]}"
 }
 
 a_repointed_command_is_refused() {
@@ -93,7 +134,9 @@ a_server_that_cannot_run_is_refused() {
   expect_refused "${FUNCNAME[0]}"
 }
 
-for t in a_pack_as_the_release_makes_it_passes a_repointed_command_is_refused \
+for t in a_pack_as_the_release_makes_it_passes an_unsigned_pack_is_refused a_signature_after_the_zip_is_refused \
+  a_comment_that_is_not_one_signature_block_is_refused \
+  a_repointed_command_is_refused \
   an_extra_file_is_refused another_binary_is_refused the_wrong_version_is_refused \
   a_server_that_cannot_run_is_refused; do
   "$t"
