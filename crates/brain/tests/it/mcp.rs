@@ -326,6 +326,29 @@ fn a_quote_in_a_title_cannot_close_the_attribute() {
     assert!(text.contains("quince a &amp;lt; b"), "{text}");
 }
 
+/// With ONNX Runtime the server's search reranks: a note that shares the question's words but does
+/// not answer it is not offered, and the reply is the gap line alone.
+#[test]
+fn search_with_the_runtime_offers_only_what_answers() {
+    let ort = std::env::var("ORT_DYLIB_PATH")
+        .expect("set ORT_DYLIB_PATH (scripts/fetch-ort.sh); CI does");
+    let h = indexed(&[(
+        "recipe.md",
+        "French toast: bread soaked in eggs and milk, fried in butter, a breakfast in France.\n",
+    )]);
+    let mut m = Mcp::start_with(&h, &[("ORT_DYLIB_PATH", &ort)]);
+    let (text, err) = m.text(
+        "search_my_brain",
+        json!({"query": "what is the capital of France"}),
+    );
+    assert!(!err, "{text}");
+    assert!(
+        text.contains("Nothing in your brain answers this yet; it is logged as a gap."),
+        "{text}"
+    );
+    assert!(!text.contains("recipe.md"), "{text}");
+}
+
 #[test]
 fn a_gap_with_close_hits_lists_them_after_the_gap_line() {
     let h = Home::new();

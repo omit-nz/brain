@@ -1,4 +1,4 @@
-use brain_index::{Found, GAP_FLOOR, Hit, Query, Scope, is_gap};
+use brain_index::{Found, Hit, Query, Scope, is_gap};
 use brain_note::{Kind, Place};
 use ll_core::embed::{EmbeddingProvider, ModelConfig};
 
@@ -139,6 +139,48 @@ fn rerank_reorders_when_asked() {
     assert_eq!(paths(&reranked)[0], "answer.md");
 }
 
+/// A reranked search keeps only the hits the cross-encoder scores at or above the floor: a note
+/// that shares the question's words but does not answer it is dropped, not listed tenth.
+#[test]
+fn a_reranked_search_keeps_only_what_answers() {
+    let f = Fixture::new();
+    f.put(
+        "answer.md",
+        "Paris is the capital and largest city of France.\n",
+    );
+    f.put(
+        "recipe.md",
+        "French toast: bread soaked in eggs and milk, fried in butter, a breakfast in France.\n",
+    );
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let mut q = query("what is the capital of France");
+    assert_eq!(paths(&idx.search(&q, None).unwrap().hits).len(), 2);
+    q.rerank = true;
+    let found = idx.search(&q, None).unwrap();
+    assert_eq!(paths(&found.hits), vec!["answer.md"]);
+    assert!(!is_gap(&found));
+}
+
+/// With no note that answers, a reranked search keeps nothing, and that is a gap, though the
+/// question's words matched.
+#[test]
+fn a_reranked_search_with_no_answer_is_a_gap() {
+    let f = Fixture::new();
+    f.put(
+        "recipe.md",
+        "French toast: bread soaked in eggs and milk, fried in butter, a breakfast in France.\n",
+    );
+    let mut idx = f.index();
+    idx.reindex(&f.vault()).unwrap();
+    let mut q = query("what is the capital of France");
+    q.rerank = true;
+    let found = idx.search(&q, None).unwrap();
+    assert!(found.words);
+    assert_eq!(paths(&found.hits), Vec::<&str>::new());
+    assert!(is_gap(&found));
+}
+
 #[test]
 fn rerank_without_a_runtime_is_refused() {
     let f = Fixture::new();
@@ -260,39 +302,7 @@ fn found_reports_whether_words_matched() {
     assert!(idx.search(&query("orchard"), None).unwrap().words);
     let none = idx.search(&query("zeppelin"), None).unwrap();
     assert!(!none.words);
-    assert_eq!(none.best_similarity, None);
-}
-
-#[test]
-fn found_reports_the_best_similarity() {
-    let f = Fixture::new();
-    // Concept words only, so car sits near automobile and far from kettle.
-    f.put(
-        "auto.md",
-        "---\ntitle: automobile\nvisibility: private\n---\nautomobile vehicle\n",
-    );
-    f.put(
-        "tea.md",
-        "---\ntitle: kettle\nvisibility: shared\n---\nkettle tea\n",
-    );
-    let mut idx = f.index();
-    idx.reindex(&f.vault()).unwrap();
-    let p = Concepts::new();
-    idx.embed_pending(&p, 10).unwrap();
-    let mine = idx.search(&query("car"), Some(&p)).unwrap();
-    assert!(
-        mine.best_similarity.unwrap() > GAP_FLOOR,
-        "{:?}",
-        mine.best_similarity
-    );
-    let mut q = query("car");
-    q.scope = Scope::SharedOnly;
-    let shared = idx.search(&q, Some(&p)).unwrap();
-    assert!(
-        shared.best_similarity.unwrap() < GAP_FLOOR,
-        "the private automobile note is out of scope: {:?}",
-        shared.best_similarity
-    );
+    assert!(!none.reranked);
 }
 
 #[test]
@@ -307,19 +317,16 @@ fn a_hit_carries_its_body_and_place() {
 }
 
 #[test]
-fn is_gap_reads_the_floor_when_vectors_exist() {
-    let found = |words, best_similarity| Found {
+fn is_gap_reads_the_hits_when_reranked_and_the_words_otherwise() {
+    let found = |words, reranked| Found {
         hits: Vec::new(),
         words,
-        best_similarity,
+        reranked,
     };
     assert!(
-        is_gap(&found(true, Some(0.2))),
-        "words do not rescue a far vector"
+        is_gap(&found(true, true)),
+        "words do not rescue a reranked search with nothing left"
     );
-    assert!(!is_gap(&found(false, Some(0.9))));
-    assert!(is_gap(&found(false, None)));
-    assert!(!is_gap(&found(true, None)));
-    assert!(is_gap(&found(true, Some(GAP_FLOOR - 0.01))));
-    assert!(!is_gap(&found(false, Some(GAP_FLOOR))));
+    assert!(is_gap(&found(false, false)));
+    assert!(!is_gap(&found(true, false)));
 }

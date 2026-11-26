@@ -163,7 +163,7 @@ impl State {
             limit: limit.unwrap_or(5).clamp(1, 20) as usize,
             kinds: None,
             scope,
-            rerank: false,
+            rerank: embed::runtime().is_ok(),
         };
         let started = std::time::Instant::now();
         let found = self.index().search(&q, provider.as_deref())?;

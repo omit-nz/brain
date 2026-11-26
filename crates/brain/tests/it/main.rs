@@ -319,25 +319,6 @@ fn a_usage_error_exits_2() {
 }
 
 #[test]
-fn rerank_without_a_runtime_says_so() {
-    let h = Home::new();
-    h.init();
-    h.put("a.md", "platypus\n");
-    h.run(&["index"]);
-    let nowhere = h.home.path().join("no-such-runtime.dylib");
-    let out = h
-        .brain()
-        .env("ORT_DYLIB_PATH", &nowhere)
-        .args(["search", "platypus", "--rerank"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("ONNX Runtime"), "{err}");
-    assert!(!err.contains("panicked"), "{err}");
-}
-
-#[test]
 fn status_counts_skips_by_reason() {
     let h = Home::new();
     h.init();

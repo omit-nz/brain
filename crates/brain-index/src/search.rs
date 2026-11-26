@@ -46,28 +46,30 @@ pub struct Hit {
     pub body: String,
 }
 
-/// A search's hits, and how close it came.
+/// A search's hits, and how they were judged.
 #[derive(Debug, Clone)]
 pub struct Found {
     pub hits: Vec<Hit>,
     /// Whether any note matched a word of the question, the loose OR fallback included.
     pub words: bool,
-    /// The closest note's vector similarity in scope, before fusion; `None` when no vectors
-    /// were searched.
-    pub best_similarity: Option<f32>,
+    /// Whether the cross-encoder judged the hits, so only those at or above `RERANK_FLOOR` remain.
+    pub reranked: bool,
 }
 
-/// The similarity below which the closest note does not answer the question. A starting guess,
-/// refitted from Robin's own questions in Part 2's Live check.
-pub const GAP_FLOOR: f32 = 0.6;
+/// The cross-encoder score below which a hit does not answer the question. Fitted on Robin's
+/// fifteen questions in Part 2's Live check (2026-11-26): vector similarity could not tell an
+/// answer from a near topic (the groups overlapped), while a cut at 0 here kept 3 of 4 answerable
+/// questions and dropped 8 of 9 the vault cannot answer.
+pub const RERANK_FLOOR: f64 = 0.0;
 
-/// What a search means, decided here once for every door: with vectors, a gap when the closest
-/// note is below the floor, whatever words matched, since the loose word fallback matches
-/// nearly any question on a large vault; without vectors, a gap when no word matched.
+/// What a search means, decided here once for every door: reranked, a gap when no hit is left
+/// above the floor, whatever words matched, since the loose word fallback matches nearly any
+/// question on a large vault; otherwise a gap when no word matched.
 pub fn is_gap(found: &Found) -> bool {
-    match found.best_similarity {
-        Some(best) => best < GAP_FLOOR,
-        None => !found.words,
+    if found.reranked {
+        found.hits.is_empty()
+    } else {
+        !found.words
     }
 }
 
@@ -120,7 +122,7 @@ impl Index {
         let mut found = Found {
             hits: Vec::new(),
             words: false,
-            best_similarity: None,
+            reranked: false,
         };
         let text = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
         if text.is_empty() {
@@ -161,7 +163,6 @@ impl Index {
                 })?
                 .collect::<Result<_, _>>()?;
             scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-            found.best_similarity = scored.first().map(|(_, s)| *s);
             scored.truncate(POOL);
             add_weighted_rrf(
                 &mut fused,
@@ -223,27 +224,29 @@ impl Index {
             });
         }
 
-        if q.rerank && !hits.is_empty() {
+        if q.rerank {
             let top = hits.len().min(RERANK_TOP);
             let docs: Vec<(String, String)> = hits[..top]
                 .iter()
                 .map(|h| (h.path.clone(), format!("{}\n{}", h.title, h.body)))
                 .collect();
             let order = rerank(&text, &docs, top);
-            let mut head: Vec<Option<Hit>> = hits.drain(..top).map(Some).collect();
-            let mut reranked: Vec<Hit> = order
-                .iter()
-                .filter_map(|r| {
-                    head[r.index].take().map(|mut h| {
-                        h.score = r.score;
-                        h
+            // A cross-encoder that scored nothing (its model would not load) leaves the fused
+            // order, judged by words as an unreranked search is.
+            if top == 0 || !order.is_empty() {
+                let mut head: Vec<Option<Hit>> = hits.drain(..top).map(Some).collect();
+                hits = order
+                    .iter()
+                    .filter(|r| r.score >= RERANK_FLOOR)
+                    .filter_map(|r| {
+                        head[r.index].take().map(|mut h| {
+                            h.score = r.score;
+                            h
+                        })
                     })
-                })
-                .collect();
-            // A document the cross-encoder could not score keeps its fused place after the rest.
-            reranked.extend(head.into_iter().flatten());
-            reranked.append(&mut hits);
-            hits = reranked;
+                    .collect();
+                found.reranked = true;
+            }
         }
 
         hits.truncate(q.limit);
