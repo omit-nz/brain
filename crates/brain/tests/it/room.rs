@@ -227,6 +227,9 @@ fn a_room_folder_that_is_a_link_is_refused() {
     let err = refused(&h, &["list"]);
     assert!(err.contains("link"), "{err}");
     assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    put_post_at(elsewhere.path(), "squads/20261126T080000Z-x.md", "x");
+    let err = refused(&h, &["new"]);
+    assert!(err.contains("link"), "{err}");
 }
 
 /// The post titles `brain room new` printed, in order.
@@ -283,12 +286,23 @@ fn a_post_written_late_in_a_seen_second_is_still_new() {
 
 /// A post file put straight into the room, as another writer would leave it.
 fn put_post(h: &Home, name: &str, title: &str) {
-    h.put(
-        &format!("rooms/squads/{name}"),
-        &format!(
+    put_post_at(
+        &h.vault.path().join("rooms"),
+        &format!("squads/{name}"),
+        title,
+    );
+}
+
+fn put_post_at(rooms: &Path, rel: &str, title: &str) {
+    let p = rooms.join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(
+        p,
+        format!(
             "---\nid: 0190b7c2-0000-7000-8000-000000000000\nroom: squads\nauthor: lane\nposted: 2026-11-26T08:00:00Z\ntitle: {title}\nvisibility: private\n---\nbody of {title}\n"
         ),
-    );
+    )
+    .unwrap();
 }
 
 #[test]
@@ -321,7 +335,11 @@ fn only_finished_posts_are_read() {
     put_post(&h, ".brain-x1y2z3", "temp");
     put_post(&h, ".20261126T080001Z-hidden.md", "hidden");
     h.put("rooms/squads/notes.txt", "not a post\n");
-    put_post(&h, "sub/20261126T080002Z-deep.md", "deep");
+    put_post(
+        &h,
+        "20261126T080002Z-folder.md/20261126T080002Z-deep.md",
+        "deep",
+    );
     assert_eq!(titles(&room(&h, T, &["new"])), ["real"]);
     assert!(room(&h, T, &["list"]).contains("squads  1 post  "));
 }
@@ -342,15 +360,19 @@ fn an_unreadable_post_is_shown_by_name_and_the_rest_still_read() {
     assert_eq!(room(&h, T, &["new"]).trim(), "nothing new in squads");
 }
 
+#[cfg(unix)]
 #[test]
 fn posts_stay_new_when_the_seen_set_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt;
     let h = home();
     room(&h, T, &["post", "x", "--title", "kept"]);
+    // The folder reads (no set yet) but takes no new file.
     let seen = h.home.path().join("data/rooms");
-    fs::create_dir_all(seen.parent().unwrap()).unwrap();
-    fs::write(&seen, "in the way").unwrap();
-    refused(&h, &["new"]);
-    fs::remove_file(&seen).unwrap();
+    fs::create_dir_all(&seen).unwrap();
+    fs::set_permissions(&seen, fs::Permissions::from_mode(0o500)).unwrap();
+    let err = refused(&h, &["new"]);
+    assert!(err.contains("saving what this reader has seen"), "{err}");
+    fs::set_permissions(&seen, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(titles(&room(&h, T, &["new"])), ["kept"]);
 }
 
