@@ -4,7 +4,7 @@
 use brain_index::activity::Activity;
 use brain_platform::clock::{Clock, SystemClock};
 use brain_report::Event;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::Home;
 
@@ -16,21 +16,62 @@ fn open_gaps(h: &Home) -> Vec<Value> {
 }
 
 #[test]
-fn search_json_says_gap_and_best_similarity() {
+fn search_json_says_gap() {
     let h = Home::new();
     h.init();
     h.put("a.md", "orchard pruning schedule\n");
     h.run(&["index"]);
     let found = h.json(&["search", "--json", "pruning"]);
     assert_eq!(found["gap"], false);
-    assert_eq!(
-        found["best_similarity"],
-        Value::Null,
-        "no vectors without a runtime"
-    );
     assert_eq!(found["hits"][0]["path"], "a.md");
     let missed = h.json(&["search", "--json", "zeppelin"]);
     assert_eq!(missed["gap"], true);
+}
+
+/// With ONNX Runtime, as every install has it, `brain search` reranks: a note that shares the
+/// question's words but does not answer it is not listed, and with only such notes it is a gap.
+#[test]
+fn search_with_the_runtime_lists_only_what_answers() {
+    let ort = std::env::var_os("ORT_DYLIB_PATH")
+        .expect("set ORT_DYLIB_PATH (scripts/fetch-ort.sh); CI does");
+    let h = Home::new();
+    h.init();
+    h.put(
+        "recipe.md",
+        "French toast: bread soaked in eggs and milk, fried in butter, a breakfast in France.\n",
+    );
+    h.run(&["index"]);
+    let search = || {
+        let out = h
+            .brain()
+            .env("ORT_DYLIB_PATH", &ort)
+            .args(["search", "--json", "what is the capital of France"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let missed = search();
+    assert_eq!(missed["gap"], true, "{missed}");
+    assert_eq!(missed["hits"], json!([]), "{missed}");
+    h.put(
+        "answer.md",
+        "Paris is the capital and largest city of France.\n",
+    );
+    h.run(&["index"]);
+    let found = search();
+    assert_eq!(found["gap"], false, "{found}");
+    let paths: Vec<&str> = found["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["answer.md"], "{found}");
 }
 
 #[test]
@@ -109,4 +150,48 @@ fn a_gap_is_filled_when_a_note_answers_it() {
         .map(|(_, _, n)| n)
         .sum();
     assert_eq!(filled, 1);
+}
+
+/// The daemon's and `brain index`'s recheck judges a gap as a search does: with the runtime, a new
+/// note that only shares the question's words leaves the gap open, and one that answers fills it.
+#[test]
+fn with_the_runtime_a_gap_is_filled_only_by_an_answer() {
+    let ort = std::env::var_os("ORT_DYLIB_PATH")
+        .expect("set ORT_DYLIB_PATH (scripts/fetch-ort.sh); CI does");
+    let h = Home::new();
+    h.init();
+    let run = |args: &[&str]| {
+        let out = h
+            .brain()
+            .env("ORT_DYLIB_PATH", &ort)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    h.put(
+        "recipe.md",
+        "French toast: bread soaked in eggs and milk, fried in butter, a breakfast in France.\n",
+    );
+    run(&["index"]);
+    run(&["search", "what is the capital of France"]);
+    assert_eq!(open_gaps(&h).len(), 1);
+    h.put(
+        "packing.md",
+        "Packing for France: passport, plug adapter, a phrasebook for the capital's cafes.\n",
+    );
+    let out = run(&["index"]);
+    assert!(!out.contains("gap filled"), "{out}");
+    assert_eq!(open_gaps(&h).len(), 1);
+    h.put(
+        "answer.md",
+        "Paris is the capital and largest city of France.\n",
+    );
+    let out = run(&["index"]);
+    assert!(out.contains("1 gap filled"), "{out}");
 }

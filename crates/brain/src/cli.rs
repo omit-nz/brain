@@ -155,9 +155,6 @@ struct SearchArgs {
     limit: usize,
     #[arg(long)]
     json: bool,
-    /// Reorder the top results with the cross-encoder.
-    #[arg(long)]
-    rerank: bool,
     /// Only what a colleague could see.
     #[arg(long)]
     shared_only: bool,
@@ -556,7 +553,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
         } else {
             Scope::Mine
         },
-        rerank: s.rerank,
+        rerank: embed::runtime().is_ok(),
     };
     let started = std::time::Instant::now();
     let found = idx.search(&q, provider.as_deref())?;
@@ -581,7 +578,6 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
             .collect();
         let v = json!({
             "gap": gap,
-            "best_similarity": found.best_similarity,
             "hits": rows,
         });
         println!("{}", serde_json::to_string_pretty(&v)?);

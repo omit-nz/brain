@@ -2,7 +2,7 @@
 //! answers them.
 
 use brain_index::activity::Activity;
-use brain_index::{Hit, Index, Query, Scope, is_gap};
+use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_platform::clock::Clock;
 use brain_report::Event;
 use ll_core::embed::EmbeddingProvider;
@@ -32,7 +32,7 @@ pub fn recheck(
             limit: 1,
             kinds: None,
             scope: Scope::Mine,
-            rerank: false,
+            rerank: embed::runtime().is_ok(),
         };
         if !is_gap(&index.search(&q, provider)?) {
             activity.fill_gap(gap.id, clock.now())?;

@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub use embed::{Embedded, HashEmbedder};
 pub use reindex::Reindexed;
-pub use search::{Found, GAP_FLOOR, Hit, Query, Scope, is_gap};
+pub use search::{Found, Hit, Query, RERANK_FLOOR, Scope, is_gap};
 
 pub struct Index {
     conn: Connection,
