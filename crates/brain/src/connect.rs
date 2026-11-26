@@ -23,7 +23,10 @@ pub fn installed(dirs: &Dirs) -> anyhow::Result<PathBuf> {
 
 /// `brain connect claude-code`: `claude mcp add` at user scope, after removing any brain added
 /// before, so a second connect replaces the first instead of failing on the name.
-pub fn claude_code(dirs: &Dirs) -> anyhow::Result<()> {
+pub fn claude_code(dirs: &Dirs, name: Option<&str>) -> anyhow::Result<()> {
+    if let Some(n) = name {
+        crate::room::check_name(n)?;
+    }
     let exe = installed(dirs)?;
     let _ = Command::new("claude")
         .args(["mcp", "remove", "--scope", "user", "brain"])
@@ -34,6 +37,7 @@ pub fn claude_code(dirs: &Dirs) -> anyhow::Result<()> {
         .args(["mcp", "add", "--scope", "user", "brain", "--"])
         .arg(&exe)
         .args(["mcp", "--door", "claude-code"])
+        .args(name.map(|n| ["--as", n]).into_iter().flatten())
         .status()
         .context("running claude; is Claude Code installed and on your PATH?")?;
     // The remove above has already run, so a brain connected before is gone too.

@@ -19,7 +19,11 @@ Then `brain update` moves you to each new release once its signature checks. [do
 - Claude Code: `brain connect claude-code`. It runs Claude Code's own `claude mcp remove` and `claude mcp add` for a user-scope server named `brain`, so it replaces any server of that name you added yourself, and it writes no file itself; start a new session afterwards.
 - Claude Desktop: open `brain-<version>.mcpb` from the release page. The extension's copy of brain hands every connection to the brain you installed, so it needs the install above first.
 
-Both reach your notes through the same five tools: search your brain, search what your team shares, capture, correct and due.
+Both reach your notes through the same eight tools: search your brain, search what your team shares, capture, correct, due, and three for rooms.
+
+## Rooms
+
+A room lets your AI sessions leave each other messages on this computer, even sessions signed in to different Claude accounts. A room is the folder `rooms/<name>/` in your vault and each post is a private note in it, so search finds posts and nothing leaves the machine. `room_post` writes a post (to `squads` unless a room is named), `room_new` shows the posts a session has not seen yet, and `room_list` lists the rooms. Give each session its own name with `brain connect claude-code --as "<name>"`, or pass `as` on a call; without one, posts carry the name you gave `brain init`. The same works from a terminal: `brain room post <text>`, `brain room new` and `brain room list`.
 
 ## What omit sees
 

@@ -103,11 +103,18 @@ enum Command {
         /// extension's bundled copy).
         #[arg(long, hide = true)]
         hand_over: bool,
+        /// The name this session posts and reads rooms under; the name set up with brain init
+        /// unless given.
+        #[arg(long = "as")]
+        name: Option<String>,
     },
     /// Connect an AI tool to the installed brain.
     Connect {
         #[arg(value_enum)]
         tool: ConnectTool,
+        /// The name this tool's sessions post and read rooms under.
+        #[arg(long = "as")]
+        name: Option<String>,
     },
     /// Your kept notes whose review has come, oldest first.
     Due {
@@ -348,16 +355,21 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             }
         },
         Command::Due { within, json } => due(dirs, &*clock, within, json),
-        Command::Mcp { door, hand_over } => {
+        Command::Mcp {
+            door,
+            hand_over,
+            name,
+        } => {
             if hand_over {
-                let name = door.to_possible_value().expect("every door has a name");
-                mcp::hand_over(dirs, name.get_name())?;
+                let d = door.to_possible_value().expect("every door has a name");
+                mcp::hand_over(dirs, d.get_name(), name.as_deref())?;
             }
-            mcp::run(dirs, clock, door.into())
+            mcp::run(dirs, clock, door.into(), name)
         }
         Command::Connect {
             tool: ConnectTool::ClaudeCode,
-        } => connect::claude_code(dirs),
+            name,
+        } => connect::claude_code(dirs, name.as_deref()),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {
