@@ -326,6 +326,7 @@ name = "brain-repo-rules"
 version = "0.2.4"
 dependencies = [
  "brain-platform",
+ "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "toml",

@@ -20,6 +20,16 @@ use crate::out::terminal;
 /// What a hook may add to a prompt.
 pub const BUDGET: Duration = Duration::from_millis(250);
 
+/// `BUDGET`, which a debug build lets a test widen so a slow runner is not a failed test.
+fn budget() -> Duration {
+    let widened = cfg!(debug_assertions)
+        .then(|| std::env::var("BRAIN_TEST_HOOK_BUDGET_MS").ok())
+        .flatten();
+    widened
+        .and_then(|ms| ms.parse().ok())
+        .map_or(BUDGET, Duration::from_millis)
+}
+
 pub fn main(word: Option<String>) -> ExitCode {
     let Some(point) = word.as_deref().and_then(Point::parse) else {
         return ExitCode::SUCCESS;
@@ -29,7 +39,7 @@ pub fn main(word: Option<String>) -> ExitCode {
     let (done, waiting) = mpsc::channel();
     std::thread::spawn(move || done.send(run(point)));
     let name = point.as_str();
-    match waiting.recv_timeout(BUDGET) {
+    match waiting.recv_timeout(budget()) {
         Ok(Ok(Some(out))) => {
             // Claude Code may have stopped reading; that is not an error of the session's.
             let _ = writeln!(std::io::stdout(), "{out}");

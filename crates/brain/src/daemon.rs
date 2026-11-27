@@ -25,7 +25,7 @@ use notify_debouncer_full::{DebounceEventResult, NoCache};
 
 use crate::config::Config;
 use crate::out::terminal;
-use crate::{gaps, usage};
+use crate::{gaps, plugin, usage};
 
 pub const WRITER_LOCK: &str = "writer.lock";
 /// A full pass this long after the last, for whatever the watcher missed.
@@ -107,6 +107,13 @@ fn newer<S: update::Source>(
 /// Runs the daemon until it installs a newer release, then runs that release in its place with
 /// the same arguments: the same process under launchd, and the same terminal elsewhere.
 pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<()> {
+    // An update restarts the daemon, which is when an installed plugin learns the new release.
+    if let Err(e) = plugin::refresh(dirs) {
+        eprintln!(
+            "{}",
+            terminal(&format!("the Claude Code plugin was not updated: {e:#}"))
+        );
+    }
     let v = serve(dirs, &clock, from_dir)?;
     eprintln!("installed brain {v}; starting it");
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());

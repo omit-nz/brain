@@ -1,0 +1,12 @@
+{
+  "name": "brain",
+  "owner": { "name": "omit" },
+  "plugins": [
+    {
+      "name": "brain",
+      "source": "./brain",
+      "version": "{{version}}",
+      "description": "Your notes, searchable on your own machine."
+    }
+  ]
+}

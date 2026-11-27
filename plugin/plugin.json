@@ -1,0 +1,6 @@
+{
+  "name": "brain",
+  "version": "{{version}}",
+  "description": "Your notes, searchable on your own machine.",
+  "author": { "name": "omit" }
+}

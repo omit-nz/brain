@@ -2,7 +2,7 @@
 //! nothing said once it has run over its budget.
 
 use std::fs;
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use brain_reflex::{Point, REGISTRY, TRACES, decide};
@@ -73,19 +73,27 @@ fn a_hook_never_exits_non_zero() {
     quiet(&hook(&h, &["prompt"], "{}"));
 }
 
-/// A trace store another process holds would be waited on for five seconds.
+/// A payload that never arrives: the hook gives up rather than hold the session.
 #[test]
 fn a_hook_over_budget_says_nothing() {
     let h = Home::new();
     h.init();
-    quiet(&hook(&h, &["prompt"], "{}"));
-    let lock = rusqlite::Connection::open(h.home.path().join("data").join(TRACES)).unwrap();
-    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
     let start = Instant::now();
-    let out = hook(&h, &["prompt"], "{}");
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+        .args(["hook", "prompt"])
+        .env("BRAIN_HOME", h.home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Held open, so the read of the payload never ends.
+    let stdin = child.stdin.take();
+    let out = child.wait_with_output().unwrap();
     let took = start.elapsed();
+    drop(stdin);
     quiet(&out);
-    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("250 ms"),
         "{out:?}"

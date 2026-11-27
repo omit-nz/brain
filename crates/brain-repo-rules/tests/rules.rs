@@ -297,7 +297,78 @@ fn nothing_writes_claude_md() {
         }
     }
     assert!(!files.is_empty());
+    files.extend(plugin_files());
     assert_eq!(naming_claude_md(&files), Vec::<String>::new());
+}
+
+/// Every file of the Claude Code plugin, with its text.
+fn plugin_files() -> Vec<(PathBuf, String)> {
+    let files: Vec<_> = fs::read_dir(root().join("plugin"))
+        .expect("plugin/")
+        .map(|e| e.unwrap().path())
+        .map(|p| {
+            (
+                p.clone(),
+                fs::read_to_string(&p).expect("plugin/ holds text files only"),
+            )
+        })
+        .collect();
+    assert!(!files.is_empty());
+    files
+}
+
+/// Why the plugin is more than a door to `brain hook`, if it is.
+fn thick_door(files: &[(PathBuf, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, text) in files {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if [".js", ".mjs", ".ts", ".py", ".sh"]
+            .iter()
+            .any(|x| name.ends_with(x))
+        {
+            out.push(format!("{name}: a script"));
+        }
+        if name != "hooks.json" {
+            continue;
+        }
+        let hooks: serde_json::Value = serde_json::from_str(text).expect("hooks.json is JSON");
+        let expected = [
+            ("SessionStart", "session-start"),
+            ("UserPromptSubmit", "prompt"),
+            ("Stop", "stop"),
+            ("SessionEnd", "session-end"),
+        ];
+        let events = hooks["hooks"].as_object().expect("hooks");
+        if events.len() != expected.len() {
+            out.push("the four events, and no other".to_string());
+        }
+        for (event, point) in expected {
+            // `|| true`: a hook that exits 2 blocks the prompt, whatever binary answers it.
+            let command = format!("'{{{{brain}}}}' hook {point} || true");
+            let all = serde_json::json!([{ "hooks": [
+                { "type": "command", "command": command, "timeout": 5 }
+            ] }]);
+            if events.get(event) != Some(&all) {
+                out.push(format!("{event} is not the one call `{command}`"));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_plugin_is_a_thin_door() {
+    let files = plugin_files();
+    assert!(files.iter().any(|(p, _)| p.ends_with("hooks.json")));
+    assert_eq!(thick_door(&files), Vec::<String>::new());
+    let thick = [
+        (PathBuf::from("plugin/inject.mjs"), String::new()),
+        (
+            PathBuf::from("plugin/hooks.json"),
+            r#"{"hooks":{"SessionStart":[]}}"#.to_string(),
+        ),
+    ];
+    assert_eq!(thick_door(&thick).len(), 6);
 }
 
 #[test]

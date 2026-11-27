@@ -11,6 +11,7 @@ mod import;
 mod inbox;
 mod mcp;
 mod out;
+mod plugin;
 mod room;
 mod runtime;
 mod usage;

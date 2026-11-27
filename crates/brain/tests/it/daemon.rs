@@ -778,8 +778,8 @@ fn the_daemon_prunes_traces_and_verdicts() {
     );
     old(
         &verdicts,
-        "INSERT INTO verdicts(reflex, version, point, at, input_text, fired, confidence, reason, acted, latency_ms)
-         VALUES ('r', 1, 'prompt', 0, '', 0, 0, '', 0, 0)",
+        "INSERT INTO verdicts(reflex, version, backend, point, at, input_text, fired, confidence, reason, acted, latency_ms)
+         VALUES ('r', 1, 'rule', 'prompt', 0, '', 0, 0, '', 0, 0)",
     );
     let count = |db: &std::path::Path, sql: &str| -> i64 {
         rusqlite::Connection::open(db)
@@ -799,4 +799,36 @@ fn the_daemon_prunes_traces_and_verdicts() {
         },
         || d.stderr(),
     );
+}
+
+#[test]
+fn a_daemon_start_rewrites_the_installed_plugin() {
+    let h = Home::new();
+    h.init();
+    let manifest = h
+        .home
+        .path()
+        .join("data/claude-plugin/brain/.claude-plugin/plugin.json");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(&manifest, r#"{"name":"brain","version":"0.0.0"}"#).unwrap();
+    let installed = h
+        .home
+        .path()
+        .join("data/bin/brain-current")
+        .join(brain::update::exe_name());
+    fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    fs::write(&installed, "").unwrap();
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    let text = fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+}
+
+#[test]
+fn a_daemon_start_writes_no_plugin_where_none_was() {
+    let h = Home::new();
+    h.init();
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    assert!(!h.home.path().join("data/claude-plugin").exists());
 }

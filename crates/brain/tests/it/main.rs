@@ -34,6 +34,8 @@ impl Home {
     fn brain(&self) -> Command {
         let mut c = Command::cargo_bin("brain").unwrap();
         c.env("BRAIN_HOME", self.home.path())
+            // A loaded CI runner must not turn a hook test into a timing test.
+            .env("BRAIN_TEST_HOOK_BUDGET_MS", "30000")
             .env_remove("ORT_DYLIB_PATH")
             .env_remove("LL_MODELS_DIR")
             .current_dir(self.vault.path());
