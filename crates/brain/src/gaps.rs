@@ -17,6 +17,16 @@ pub fn area(hits: &[Hit]) -> Option<String> {
     Some(folder.to_string())
 }
 
+/// A test that needs a long recheck sets this; release builds never read it.
+fn pause() {
+    if cfg!(debug_assertions)
+        && let Ok(ms) = std::env::var("BRAIN_TEST_RECHECK_PAUSE_MS")
+        && let Ok(ms) = ms.parse()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// Searches the newest open gaps again and fills each one a note now answers. Returns how many
 /// were filled.
 pub fn recheck(
@@ -27,6 +37,7 @@ pub fn recheck(
 ) -> anyhow::Result<usize> {
     let mut filled = 0;
     for gap in activity.open_gaps(RECHECK)? {
+        pause();
         let q = Query {
             text: &gap.query,
             limit: 1,

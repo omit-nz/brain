@@ -133,6 +133,7 @@ fn embed(provider: &dyn EmbeddingProvider, texts: &[String]) -> anyhow::Result<V
 }
 
 impl Index {
+    /// Embeds every pending note, the newest first (one with no mtime was saved moments ago).
     pub fn embed_pending(
         &mut self,
         provider: &dyn EmbeddingProvider,
@@ -163,7 +164,8 @@ impl Index {
                 let mut st = self.conn.prepare(
                     "SELECT n.id, n.path, c.title, c.tags, c.body
                      FROM notes n JOIN notes_content c USING (id)
-                     WHERE n.embedded = 0 ORDER BY n.id LIMIT ?1",
+                     WHERE n.embedded = 0
+                     ORDER BY n.mtime_ns < 0 DESC, n.mtime_ns DESC, n.id LIMIT ?1",
                 )?;
                 st.query_map([batch as i64], |r| {
                     Ok((

@@ -353,7 +353,7 @@ fn upsert(tx: &Transaction<'_>, w: &Work) -> anyhow::Result<()> {
              note_uuid = excluded.note_uuid, hash = excluded.hash, size = excluded.size,
              mtime_ns = excluded.mtime_ns, title = excluded.title, tags = excluded.tags,
              kind = excluded.kind, place = excluded.place, disclosure = excluded.disclosure,
-             owner = excluded.owner, review = excluded.review, embedded = 0
+             owner = excluded.owner, review = excluded.review
          RETURNING id",
         params![
             w.uuid,
@@ -371,13 +371,19 @@ fn upsert(tx: &Transaction<'_>, w: &Work) -> anyhow::Result<()> {
         ],
         |r| r.get(0),
     )?;
-    tx.execute(
+    // A vector is made from these three, so a note rewritten with the same text keeps it: a
+    // reread under new rules, or an edit to its other frontmatter, embeds nothing again.
+    let rewritten = tx.execute(
         "INSERT INTO notes_content(id, title, tags, body) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, tags = excluded.tags,
-                                       body = excluded.body",
+                                       body = excluded.body
+         WHERE (title, tags, body) IS NOT (excluded.title, excluded.tags, excluded.body)",
         params![id, n.title, n.tags.join(" "), n.body],
     )?;
-    tx.execute("DELETE FROM embeddings WHERE id = ?1", [id])?;
+    if rewritten > 0 {
+        tx.execute("UPDATE notes SET embedded = 0 WHERE id = ?1", [id])?;
+        tx.execute("DELETE FROM embeddings WHERE id = ?1", [id])?;
+    }
     tx.execute("DELETE FROM links WHERE source_id = ?1", [id])?;
     for target in &n.links {
         tx.execute(
