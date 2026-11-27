@@ -112,11 +112,11 @@ impl Archive {
             .count()
     }
 
-    /// The source hash of `key`'s archived copy in `vault`.
+    /// The source hash of `key`'s latest archived copy in `vault`.
     pub(super) fn src_hash_of(&self, key: &str, vault: &Path) -> Option<&str> {
         self.0
             .iter()
-            .find(|r| r.key == key && r.vault == vault)
+            .rfind(|r| r.key == key && r.vault == vault)
             .map(|r| r.src_hash.as_str())
     }
 
@@ -184,8 +184,14 @@ impl Archive {
                     return true;
                 }
                 // Cut short before the move, restored, or a newer copy has taken its place. The
-                // archived file, if there, is left with its words, so nothing is purged.
-                Some(_) => false,
+                // archived file, if there, is left with its words, so nothing is purged; one the
+                // person had already deleted is purged now, while it is still known of.
+                Some(l) => {
+                    if archived.is_none() && l.id != r.id {
+                        deleted.extend(r.id.clone());
+                    }
+                    false
+                }
                 None => {
                     // While the archived file is still there, only the very bytes are it: a
                     // fresh copy written under the same id is not.
@@ -214,8 +220,8 @@ impl Archive {
             keep
         });
         if !deleted.is_empty() {
-            // A file the person moved into their notes is a note there: its traces stay. A
-            // lookup that fails purges nothing, and the traces age out.
+            // A file the person moved into their notes is a note there: its traces stay. An id
+            // the index cannot answer for is not purged.
             let index = Index::open(&dirs.data.join("index.db"))?;
             let nowhere = |id: &String| {
                 uuid::Uuid::parse_str(id).is_ok_and(|id| matches!(index.path_of(&id), Ok(None)))
@@ -246,10 +252,11 @@ impl Archive {
         let mut returning = HashMap::new();
         let mut left = Vec::new();
         for source in sources {
+            // Latest first: an older one outlasts a newer only while its file cannot be read.
             let record = self
                 .0
                 .iter()
-                .find(|r| r.key == source.key && r.vault == vault.root && r.from == followed);
+                .rfind(|r| r.key == source.key && r.vault == vault.root && r.from == followed);
             let Some(r) = record.filter(|_| ledger.current(&source.key, &vault.root).is_none())
             else {
                 left.push(source);

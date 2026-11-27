@@ -413,6 +413,14 @@ fn an_import_copies_an_archived_memory_afresh() {
         traced(&h, &id_of(&copied)) >= 1,
         "its archived file is still there"
     );
+    fs::remove_file(archive_path(&h, "one")).unwrap();
+    pass(&h);
+    pass(&h);
+    h.run(&["index"]);
+    assert!(
+        traced(&h, &id_of(&copied)) >= 1,
+        "untracked: purges nothing"
+    );
 }
 
 #[test]
@@ -542,6 +550,14 @@ fn another_followed_folder_restores_nothing_and_takes_no_id() {
     assert!(
         traced(&h, &id_of(&copied)) >= 1,
         "its archived file is still there"
+    );
+    fs::remove_file(archive_path(&h, "one")).unwrap();
+    pass(&h);
+    pass(&h);
+    h.run(&["index"]);
+    assert!(
+        traced(&h, &id_of(&copied)) >= 1,
+        "untracked: purges nothing"
     );
 }
 
@@ -780,6 +796,72 @@ fn an_archived_file_that_cannot_be_read_is_said_and_left() {
     assert_eq!(copy(&h, "one"), Some(copied));
 }
 
+#[test]
+fn a_deleted_archived_file_superseded_before_the_second_look_is_still_purged() {
+    let (h, p) = two();
+    let one = id(&h, "one");
+    archive_one(&h, &p);
+    fs::remove_file(archive_path(&h, "one")).unwrap();
+    h.run(&["memory", "unfollow"]);
+    let other = Projects::new();
+    other.write("one", "one first");
+    follow(&h, &other);
+    pass(&h);
+    assert!(records(&h).is_empty(), "{:?}", records(&h));
+    assert_eq!(traced(&h, &one), 0);
+}
+
+/// A changed source's fresh copy shares the archived memory's id, and so its traces.
+#[test]
+fn removing_a_changed_copy_purges_the_archived_memorys_traces_too() {
+    let (h, p, _, copied) = archived_one();
+    p.write("one", "one second");
+    pass(&h);
+    pass(&h);
+    fs::remove_file(copy_path(h.vault.path(), "one")).unwrap();
+    h.run(&["index"]);
+    assert_eq!(traced(&h, &id_of(&copied)), 0);
+    assert!(archive_path(&h, "one").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_path_that_cannot_be_read_is_said_and_left() {
+    use std::os::unix::fs::PermissionsExt;
+    let (h, _p, _, _) = archived_one();
+    h.put("working-memory/-proj/one.md", "mine\n");
+    let path = copy_path(h.vault.path(), "one");
+    let mode = |m| fs::set_permissions(&path, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    let said = pass(&h);
+    mode(0o644);
+    assert!(said.contains("skipped: memory/-proj/one.md"), "{said}");
+    assert_eq!(records(&h).len(), 1);
+}
+
+/// An archived file that cannot be read can outlast a newer record of the same source.
+#[cfg(unix)]
+#[test]
+fn of_two_records_of_one_source_the_newer_comes_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let (h, p, _, _) = archived_one();
+    p.write("one", "one second");
+    pass(&h);
+    let mode = |m| {
+        fs::set_permissions(archive_path(&h, "one"), fs::Permissions::from_mode(m)).unwrap();
+    };
+    mode(0o000);
+    let newer = (fs::read(p.file("one")).unwrap(), copy(&h, "one").unwrap());
+    p.remove("one");
+    pass(&h);
+    pass(&h);
+    assert_eq!(records(&h).len(), 2, "{:?}", records(&h));
+    fs::write(p.file("one"), newer.0).unwrap();
+    pass(&h);
+    mode(0o644);
+    assert_eq!(copy(&h, "one"), Some(newer.1));
+}
+
 #[cfg(unix)]
 mod linked {
     use std::os::unix::fs::symlink;
@@ -875,7 +957,7 @@ mod linked {
     }
 
     #[test]
-    fn a_removed_copy_stays_removed_through_a_link_and_back() {
+    fn a_removed_copy_is_made_again_after_a_link_is_undone() {
         let (h, p) = following(&["one"]);
         let source = fs::read(p.file("one")).unwrap();
         new_memory(&p, "another memory entirely\n");
@@ -888,7 +970,72 @@ mod linked {
         fs::create_dir_all(p.path().join("-proj/memory")).unwrap();
         fs::write(p.file("one"), source).unwrap();
         let said = pass(&h);
-        assert_eq!(copy(&h, "one"), None, "{said}");
+        assert!(copy(&h, "one").is_some(), "{said}");
+    }
+
+    /// `-proj` and `-zed` followed, each with its own `one`, then `-proj` linked to `-zed` with
+    /// its copy removed by the person, or archived and its archived file deleted.
+    fn linked_over_a_gone_duplicate(deleted_from_archive: bool) -> (Home, Projects) {
+        let (h, p) = following(&["one"]);
+        let zed = p.path().join("-zed/memory");
+        fs::create_dir_all(&zed).unwrap();
+        fs::write(zed.join("one.md"), "another memory entirely\n").unwrap();
+        pass(&h);
+        if !deleted_from_archive {
+            fs::remove_file(copy_path(h.vault.path(), "one")).unwrap();
+        }
+        fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
+        symlink(&zed, p.path().join("-proj/memory")).unwrap();
+        pass(&h);
+        if deleted_from_archive {
+            fs::remove_file(archive_path(&h, "one")).unwrap();
+        }
+        pass(&h);
+        pass(&h);
+        (h, p)
+    }
+
+    /// The live copy is at `name` and takes its source's next words.
+    fn follows(h: &Home, p: &Projects, name: &str) {
+        let source = p.path().join(name).join("memory/one.md");
+        pass(h);
+        fs::write(&source, "changed words\n").unwrap();
+        let said = pass(h);
+        let copy = h
+            .vault
+            .path()
+            .join("working-memory")
+            .join(name)
+            .join("one.md");
+        let text = fs::read_to_string(&copy).unwrap_or_default();
+        assert!(text.contains("changed words"), "{said}");
+    }
+
+    fn rename_zed_to(p: &Projects, name: &str) {
+        let to = p.path().join(name);
+        fs::create_dir_all(&to).unwrap();
+        fs::rename(p.path().join("-zed/memory"), to.join("memory")).unwrap();
+        symlink(to.join("memory"), p.path().join("-zed/memory")).unwrap();
+        fs::remove_file(p.path().join("-proj/memory")).unwrap();
+        symlink(to.join("memory"), p.path().join("-proj/memory")).unwrap();
+    }
+
+    #[test]
+    fn a_second_rename_after_a_removed_duplicate_keeps_the_live_copy() {
+        for deleted_from_archive in [false, true] {
+            let (h, p) = linked_over_a_gone_duplicate(deleted_from_archive);
+            rename_zed_to(&p, "-zz");
+            follows(&h, &p, "-zz");
+        }
+    }
+
+    #[test]
+    fn a_rename_back_after_a_removed_duplicate_keeps_the_live_copy() {
+        let (h, p) = linked_over_a_gone_duplicate(false);
+        fs::remove_file(p.path().join("-proj/memory")).unwrap();
+        fs::rename(p.path().join("-zed/memory"), p.path().join("-proj/memory")).unwrap();
+        symlink(p.path().join("-proj/memory"), p.path().join("-zed/memory")).unwrap();
+        follows(&h, &p, "-proj");
     }
 
     /// Every markdown file's text anywhere in the vault, the archive included.

@@ -297,9 +297,11 @@ fn renamed(
                         continue;
                     }
                 },
-                // Nothing at the old place, and the new name has its own record: the old one
-                // stays, so a copy the person removed is not made again when the link goes.
-                (false, _) if theirs.is_some() => continue,
+                // Nothing at the old place, and the new name has its own record.
+                (false, _) if theirs.is_some() => {
+                    ledger.0.remove(&key);
+                    continue;
+                }
                 // The person removed it, or a pass cut short had moved it: the record moves.
                 (false, _) => {}
             }

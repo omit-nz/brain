@@ -28,6 +28,30 @@ fn traces(h: &Home) -> Store {
     Store::open(&h.home.path().join("data").join(TRACES)).unwrap()
 }
 
+/// A run is dropped by whatever next opens the trace file, daemon or not.
+#[test]
+fn a_hook_drops_runs_past_their_age() {
+    let h = Home::new();
+    h.init();
+    let said = || {
+        quiet(&hook(
+            &h,
+            &["prompt"],
+            r#"{"session_id":"s-1","prompt":"hi"}"#,
+        ))
+    };
+    said();
+    let db = rusqlite::Connection::open(h.home.path().join("data/traces.db")).unwrap();
+    db.execute("UPDATE runs SET started_ns = 1", []).unwrap();
+    said();
+    let aged: i64 = db
+        .query_row("SELECT count(*) FROM runs WHERE started_ns = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(aged, 0);
+}
+
 #[test]
 fn a_hook_records_a_run_that_replays() {
     let h = Home::new();
