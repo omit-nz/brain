@@ -120,6 +120,11 @@ enum Command {
         #[arg(long = "index")]
         indexes: Vec<PathBuf>,
     },
+    /// Keep brain's copies of Claude Code's auto-memory in step with their sources.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Your kept notes whose review has come, oldest first.
     Due {
         /// Also list notes due within this many days.
@@ -249,6 +254,16 @@ enum RoomAction {
 }
 
 #[derive(Subcommand)]
+enum MemoryAction {
+    /// Follow the auto-memory under Claude Code's projects folder, from now on.
+    Follow { projects: PathBuf },
+    /// Stop following; the copies stay.
+    Unfollow,
+    /// One pass now; the daemon makes one every minute.
+    Run,
+}
+
+#[derive(Subcommand)]
 enum UsageAction {
     /// Send the day's counts to omit (the default).
     On,
@@ -358,6 +373,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Command::Memory { action } => memory_cmd(dirs, &*clock, action),
         Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Mcp {
             door,
@@ -420,6 +436,50 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     }
 }
 
+fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::Result<()> {
+    let mut config = Config::load(dirs)?;
+    match action {
+        MemoryAction::Unfollow => {
+            config.memory.follow = None;
+            config.save(dirs)?;
+            println!("brain no longer follows your auto-memory; its copies stay");
+            return Ok(());
+        }
+        MemoryAction::Follow { projects } => {
+            // A link is stored as what it points at: the pass follows no link.
+            let found = projects.canonicalize().ok().filter(|p| p.is_dir());
+            let found = found.with_context(|| format!("{}: no such folder", projects.display()))?;
+            config.memory.follow = Some(found);
+            config.save(dirs)?;
+        }
+        MemoryAction::Run => {}
+    }
+    let Some(followed) = &config.memory.follow else {
+        anyhow::bail!("brain follows no auto-memory; run `brain memory follow <projects folder>`");
+    };
+    // A missing vault is never made again here.
+    let vault = Vault::open(&config.vault)?;
+    let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
+    let writer = Lock::try_acquire(&writer_lock(dirs))?;
+    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let done = import::sync(dirs, &vault, followed, &w, |vault| {
+        if writer.is_some() {
+            let r = index(dirs)?.reindex(vault)?;
+            daemon::forget(dirs, &r);
+        }
+        Ok(())
+    })?;
+    let mut lines = vec![done.summary()];
+    lines.extend(done.kept.iter().map(|p| format!("kept as it is: {p}")));
+    lines.extend(
+        done.skipped
+            .iter()
+            .map(|(k, why)| format!("skipped: {k}: {why}")),
+    );
+    println!("{}", terminal(&lines.join("\n")));
+    Ok(())
+}
+
 fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     let named = vault.is_some();
     let root = match vault {
@@ -472,12 +532,14 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     } else {
         None
     };
-    let (usage, session) = before.map_or_else(Default::default, |c| (c.usage, c.session));
+    let (usage, session, memory) =
+        before.map_or_else(Default::default, |c| (c.usage, c.session, c.memory));
     Config {
         vault: vault.root.clone(),
         me: me.clone(),
         usage,
         session,
+        memory,
     }
     .save(dirs)?;
     println!(
@@ -886,7 +948,6 @@ fn import_learning_loop(
     import::check_apart(&src, &dst)?;
     let share = import::share_folders(&src, &a.share)?;
     let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
-    let mut ledger = Ledger::load(dirs)?;
     let w = Written {
         me: &config.me,
         today,
@@ -894,6 +955,13 @@ fn import_learning_loop(
         blocklist: blocklist.as_ref(),
         layout: &dst.layout,
     };
+    // Held from the ledger's read to its last save, so a memory pass never writes it too.
+    let _held = if a.dry_run {
+        None
+    } else {
+        Some(Lock::acquire(&dirs.data.join(import::LOCK))?)
+    };
+    let mut ledger = Ledger::load(dirs)?;
     // Held through the copy too, so a daemon started mid-import waits for it.
     let lock = if a.dry_run {
         None

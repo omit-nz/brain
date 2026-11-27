@@ -34,6 +34,10 @@ curl --proto '=https' -fsSL https://raw.githubusercontent.com/omit-nz/brain/main
 
 Then `brain update` moves you to each new release once its signature checks. [docs/release.md](docs/release.md) says what is trusted and when, and [SECURITY.md](SECURITY.md) answers the questions a security review asks.
 
+## Auto-memory
+
+`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source two looks in a row found gone. A copy you have edited is left as it is, and a folder that is missing or empty changes nothing. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
+
 ## Connect your AI
 
 - Claude Code: `brain connect claude-code`. It runs Claude Code's own `claude mcp remove` and `claude mcp add` for a user-scope server named `brain`, so it replaces any server of that name you added yourself, and it writes no file of Claude Code's itself; start a new session afterwards. It also installs a plugin through `claude plugin`, from a folder in brain's own data folder, with four hooks that each call `brain hook`. A hook answers within 250 ms or says nothing, and never blocks a session. A session starts with the notes due for review; name a memory folder with `--index <folder>` and its `MEMORY.md` is shown too. What brain records about each one is in [docs/traces.md](docs/traces.md).

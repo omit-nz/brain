@@ -19,6 +19,22 @@ pub struct Config {
     pub usage: UsageConfig,
     #[serde(default, skip_serializing_if = "SessionConfig::is_default")]
     pub session: SessionConfig,
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
+    pub memory: MemoryConfig,
+}
+
+/// The Claude Code auto-memory brain keeps its copies in step with.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Claude Code's projects folder.
+    pub follow: Option<PathBuf>,
+}
+
+impl MemoryConfig {
+    fn is_default(&self) -> bool {
+        *self == MemoryConfig::default()
+    }
 }
 
 /// What a Claude Code session starts with.

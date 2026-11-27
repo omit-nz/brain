@@ -24,6 +24,7 @@ use notify::{EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, NoCache};
 
 use crate::config::Config;
+use crate::import::{self, Followed, Written};
 use crate::out::terminal;
 use crate::{gaps, plugin, usage};
 
@@ -37,6 +38,7 @@ const RETRY: Duration = Duration::from_secs(6);
 const EMBED_BATCH: usize = 32;
 const RECHECK_EVERY: Duration = Duration::from_secs(3600);
 const SEND_EVERY: Duration = Duration::from_secs(3600);
+const FOLLOW_EVERY: Duration = Duration::from_secs(60);
 const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 pub fn writer_lock(dirs: &Dirs) -> PathBuf {
@@ -61,6 +63,40 @@ pub fn summary(r: &Reindexed) -> String {
         ));
     }
     line
+}
+
+/// How often a followed memory folder is looked at; a debug build lets a test hurry it.
+fn follow_every() -> Duration {
+    let hurried = cfg!(debug_assertions)
+        .then(|| std::env::var("BRAIN_TEST_FOLLOW_EVERY_MS").ok())
+        .flatten();
+    hurried
+        .and_then(|ms| ms.parse().ok())
+        .map_or(FOLLOW_EVERY, Duration::from_millis)
+}
+
+/// One pass over the followed auto-memory, when one is followed and no other command holds the
+/// import ledger. The config is read each time, so following starts without a restart.
+fn follow_memory(
+    dirs: &Dirs,
+    idx: &mut Index,
+    clock: &dyn Clock,
+) -> anyhow::Result<Option<Followed>> {
+    let config = Config::load(dirs)?;
+    let Some(followed) = &config.memory.follow else {
+        return Ok(None);
+    };
+    let Some(_held) = Lock::try_acquire(&dirs.data.join(import::LOCK))? else {
+        return Ok(None);
+    };
+    let vault = Vault::open(&config.vault)?;
+    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let done = import::sync(dirs, &vault, followed, &w, |vault| {
+        let r = idx.reindex(vault)?;
+        forget(dirs, &r);
+        Ok(())
+    })?;
+    Ok(Some(done))
 }
 
 /// Drops what traces and verdicts kept of the notes a pass saw go. A failure is said and no
@@ -200,6 +236,8 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
     let mut rechecking: Option<JoinHandle<()>> = None;
     let mut last_send: Option<Instant> = None;
     let mut last_update: Option<Instant> = None;
+    let mut last_follow: Option<Instant> = None;
+    let mut follow_said = None;
     let mut next = Instant::now();
     loop {
         if due {
@@ -252,6 +290,24 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
                 }
             }
         }
+        if last_follow.is_none_or(|t: Instant| t.elapsed() >= follow_every()) {
+            last_follow = Some(Instant::now());
+            let said = match follow_memory(dirs, &mut idx, &**clock) {
+                Ok(Some(done)) => {
+                    changed |= done.changed();
+                    embedding |= done.changed() && provider.is_some();
+                    (done.changed() || !done.skipped.is_empty())
+                        .then(|| format!("memory: {}", done.summary()))
+                }
+                Ok(None) => None,
+                Err(e) => Some(format!("memory: {e:#}")),
+            };
+            // A folder that stays away is said once, not every minute.
+            if said.is_some() && said != follow_said {
+                eprintln!("{}", terminal(said.as_deref().unwrap_or_default()));
+            }
+            follow_said = said;
+        }
         // One batch a turn, so a save made during a long first embed waits for one batch only.
         if embedding && let Some(p) = &provider {
             embedding = match idx.embed_batch(&**p, EMBED_BATCH) {
@@ -283,7 +339,9 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
         let wait = if embedding {
             Duration::ZERO
         } else {
+            let followed = last_follow.map(|t| follow_every().saturating_sub(t.elapsed()));
             next.saturating_duration_since(Instant::now())
+                .min(followed.unwrap_or_default())
         };
         let mut events = Vec::new();
         match rx.recv_timeout(wait) {

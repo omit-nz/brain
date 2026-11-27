@@ -5,6 +5,7 @@
 //! overwrites a copy the person edited.
 
 mod blocklist;
+mod follow;
 mod memory;
 mod report;
 mod vault;
@@ -22,17 +23,36 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use blocklist::Blocklist;
+pub use follow::{Followed, sync};
 pub use report::report;
 
 /// Days over which first reviews are spread.
 const REVIEW_SPREAD: i64 = 90;
 const LEDGER: &str = "import-ledger.json";
+/// Held by whoever reads, changes and saves the ledger.
+pub const LOCK: &str = "import.lock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntry {
     pub id: Option<String>,
     pub src_hash: String,
     pub dst_hash: String,
+    /// The memory folder the source was found in; unknown for a copy made before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<PathBuf>,
+    /// The vault the copy is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<PathBuf>,
+    /// The last pass did not find the source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+}
+
+impl LedgerEntry {
+    /// Whether this records a copy in `vault`; an entry that names no vault counts as this one.
+    fn of(&self, vault: &Path) -> bool {
+        self.vault.as_deref().is_none_or(|v| v == vault)
+    }
 }
 
 /// What each import copied, keyed by the source's key (`vault/<path>` or
@@ -51,6 +71,20 @@ impl Ledger {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ledger::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// What was recorded of `key`'s copy in `vault`; a copy in another vault is no record.
+    fn current(&self, key: &str, vault: &Path) -> Option<&LedgerEntry> {
+        self.0.get(key).filter(|e| e.of(vault))
+    }
+
+    /// Whether a memory copy in `vault` came from `folder`, or may have.
+    fn holds_memory_of(&self, folder: &Path, vault: &Path) -> bool {
+        self.0.iter().any(|(key, e)| {
+            key.starts_with("memory/")
+                && e.of(vault)
+                && e.from.as_deref().is_none_or(|from| from == folder)
+        })
     }
 
     pub fn save(&self, dirs: &Dirs) -> anyhow::Result<()> {
@@ -83,6 +117,8 @@ pub struct Source {
     dst_rel: PathBuf,
     raw: String,
     memory: bool,
+    /// The memory folder it was found in.
+    from: Option<PathBuf>,
 }
 
 /// What every copy is written with.
@@ -94,7 +130,18 @@ pub struct Written<'a> {
     pub layout: &'a Layout,
 }
 
-impl Written<'_> {
+impl<'a> Written<'a> {
+    /// What a memory copy is written with: it is private, so no share rule applies.
+    pub fn for_memory(me: &'a str, today: Date, vault: &'a Vault) -> Written<'a> {
+        Written {
+            me,
+            today,
+            share: &[],
+            blocklist: None,
+            layout: &vault.layout,
+        }
+    }
+
     /// Visibility for a note that declares none: the inbox and the private folder stay private
     /// whatever is shared, so a kept inbox note is not shared on the way out; then a learning-loop
     /// rule that withholds it wins, then a shared folder; everything else is private.
@@ -207,6 +254,16 @@ fn classify(
 ) -> anyhow::Result<(ImportPlan, Vec<Todo>)> {
     let mut plan = ImportPlan::default();
     let all = sources(src, memory, dst, &mut plan.skipped)?;
+    let todo = classify_sources(all, dst, ledger, &mut plan);
+    Ok((plan, todo))
+}
+
+fn classify_sources(
+    all: Vec<Source>,
+    dst: &Vault,
+    ledger: &Ledger,
+    plan: &mut ImportPlan,
+) -> Vec<Todo> {
     let mut todo = Vec::new();
     let mut claimed = HashSet::new();
     for s in all {
@@ -216,7 +273,7 @@ fn classify(
         // Vault notes come first, so a vault note under working-memory/ keeps its path and the
         // memory note meant for it is the conflict.
         let first = claimed.insert(s.dst_rel.clone());
-        match ledger.0.get(&s.key) {
+        match ledger.current(&s.key, &dst.root) {
             _ if !first => plan.conflicts.push(rel_key(&s.dst_rel)),
             None if dst_hash.is_some() => plan.conflicts.push(rel_key(&s.dst_rel)),
             None => {
@@ -231,7 +288,7 @@ fn classify(
             Some(_) => plan.conflicts.push(rel_key(&s.dst_rel)),
         }
     }
-    Ok((plan, todo))
+    todo
 }
 
 pub fn plan(
@@ -257,38 +314,53 @@ pub fn apply(
     let (plan, todo) = classify(src, memory, dst, ledger)?;
     let mut written = Vec::new();
     for (s, seen) in todo {
-        let prior = ledger.0.get(&s.key).and_then(|e| e.id.clone());
-        let (text, id) = if s.memory {
-            let id = prior.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-            (memory::to_note(&s, &id, w)?, Some(id))
-        } else {
-            let text = vault::to_note(&s, w, prior.as_deref())?;
-            let id = brain_note::Note::parse(&s.dst_rel, &text, brain_note::Place::Kept)
-                .id
-                .map(|u| u.to_string());
-            (text, id)
-        };
-        // The copy as classified: absent, or the bytes the ledger recorded. A save made to it since
-        // is left alone.
-        replace_unchanged(
-            &dst.root,
-            &s.dst_rel,
-            |now| now.map(hash) == seen,
-            text.as_bytes(),
-            Privacy::Normal,
-        )
-        .with_context(|| format!("writing {}", rel_key(&s.dst_rel)))?;
-        ledger.0.insert(
-            s.key.clone(),
-            LedgerEntry {
-                id,
-                src_hash: hash(s.raw.as_bytes()),
-                dst_hash: hash(text.as_bytes()),
-            },
-        );
+        write_one(&s, seen, dst, ledger, w)?;
         written.push(s.key);
     }
     Ok((plan, written))
+}
+
+/// Writes one source's copy and records it.
+fn write_one(
+    s: &Source,
+    seen: Option<String>,
+    dst: &Vault,
+    ledger: &mut Ledger,
+    w: &Written<'_>,
+) -> anyhow::Result<()> {
+    let prior = ledger.current(&s.key, &dst.root).and_then(|e| e.id.clone());
+    let (text, id) = if s.memory {
+        let id = prior.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        (memory::to_note(s, &id, w)?, Some(id))
+    } else {
+        let text = vault::to_note(s, w, prior.as_deref())?;
+        let id = brain_note::Note::parse(&s.dst_rel, &text, brain_note::Place::Kept)
+            .id
+            .map(|u| u.to_string());
+        (text, id)
+    };
+    // The copy as classified: absent, or the bytes the ledger recorded. A save made to it since
+    // is left alone.
+    replace_unchanged(
+        &dst.root,
+        &s.dst_rel,
+        |now| now.map(hash) == seen,
+        text.as_bytes(),
+        Privacy::Normal,
+    )
+    .with_context(|| format!("writing {}", rel_key(&s.dst_rel)))?;
+    ledger.0.insert(
+        s.key.clone(),
+        LedgerEntry {
+            id,
+            src_hash: hash(s.raw.as_bytes()),
+            dst_hash: hash(text.as_bytes()),
+            from: s.from.clone(),
+            vault: Some(dst.root.clone()),
+            missing: false,
+        },
+    );
+    Ok(())
 }
 
 /// Records each written copy's bytes as they are now, after the index rewrote any id, so

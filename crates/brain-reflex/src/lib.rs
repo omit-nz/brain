@@ -8,6 +8,7 @@ mod store;
 
 pub use cx::{Cx, Env};
 pub use fire::{Decided, Decision, TRACE_WAIT, decide, fire};
+pub use omit_agent_trace as trace;
 pub use store::{PickRow, Row, Verdicts};
 
 use std::path::Path;
@@ -169,4 +170,16 @@ pub fn purge(data: &Path, sources: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A run recorded in `data`'s trace store for a job that is not a hook, so has no budget to keep:
+/// one that records nothing when the store cannot be opened.
+pub fn record(data: &Path, name: &str) -> trace::Run {
+    match Store::open(&data.join(TRACES)) {
+        Ok(store) => trace::Run::record(&store, name),
+        Err(e) => {
+            eprintln!("brain: {name} is not traced: {e}");
+            trace::Run::off()
+        }
+    }
 }

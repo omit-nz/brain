@@ -863,3 +863,41 @@ fn a_removed_note_leaves_the_traces_while_the_daemon_runs() {
     fs::remove_file(h.vault.path().join("due.md")).unwrap();
     until("the note purged", || held() == 0, || d.stderr());
 }
+
+#[test]
+fn the_daemon_picks_up_a_changed_and_a_deleted_memory() {
+    let h = Home::new();
+    h.init();
+    let projects = tempfile::tempdir().unwrap();
+    let memory = projects.path().join("-proj/memory");
+    fs::create_dir_all(&memory).unwrap();
+    let write = |name: &str, text: &str| {
+        fs::write(
+            memory.join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: {text}\n---\n"),
+        )
+        .unwrap();
+    };
+    write("plan", "the heron plan is unpublished");
+    write("other", "something else");
+    h.run(&["memory", "follow", projects.path().to_str().unwrap()]);
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "300")]);
+    let plan = "working-memory/-proj/plan.md".to_string();
+    until(
+        "the first copy",
+        || found(&h, "heron") == [plan.clone()],
+        || d.stderr(),
+    );
+    write("plan", "the egret plan is published");
+    until(
+        "the change",
+        || found(&h, "egret") == [plan.clone()],
+        || d.stderr(),
+    );
+    fs::remove_file(memory.join("plan.md")).unwrap();
+    until(
+        "the deletion",
+        || found(&h, "egret").is_empty(),
+        || d.stderr(),
+    );
+}

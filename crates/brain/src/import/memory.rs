@@ -17,6 +17,7 @@ pub fn sources(
     skipped: &mut Vec<(String, Skip)>,
 ) -> anyhow::Result<Vec<Source>> {
     let mut out = Vec::new();
+    let from = root.canonicalize()?;
     let mut projects: Vec<PathBuf> = fs::read_dir(root)?
         .map(|e| e.map(|e| e.path()))
         .collect::<Result<_, _>>()?;
@@ -34,9 +35,16 @@ pub fn sources(
         if !dir.is_dir() {
             continue;
         }
-        let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<Result<_, _>>()?;
+        // One project that cannot be listed is named and passed over, never the end of the run.
+        let listed: std::io::Result<Vec<PathBuf>> =
+            fs::read_dir(&dir).and_then(|d| d.map(|e| e.map(|e| e.path())).collect());
+        let mut files = match listed {
+            Ok(files) => files,
+            Err(e) => {
+                skipped.push((format!("memory/{name}"), Skip::Unreadable(e.to_string())));
+                continue;
+            }
+        };
         files.sort();
         for file in files {
             let fname = file
@@ -66,6 +74,7 @@ pub fn sources(
                     dst_rel: dst_folder.join(&name).join(&fname),
                     raw,
                     memory: true,
+                    from: Some(from.clone()),
                 }),
                 Ok(Err(why)) => skipped.push((key, why)),
                 Err(e) => skipped.push((key, Skip::Unreadable(e.to_string()))),
