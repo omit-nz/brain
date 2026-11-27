@@ -6,7 +6,7 @@ One release carries one version for every part of brain, signed once. This page 
 
 A release is the GitHub release for tag `v<version>` on `omit-nz/brain`. For each target (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`) it holds `brain-<version>-<target>.tar.gz`, with one folder inside, `brain-<version>/`, holding `brain` (or `brain.exe`) and `lib/` with ONNX Runtime 1.24.2 from NuGet (`scripts/fetch-ort.sh`). Each archive carries its zipsign signature inside it, made with the archive's file name as the signing context, so a signed archive renamed to another version or target no longer verifies.
 
-In the macOS archive, `brain` (identifier `nz.omit.brain`, hardened runtime) and `lib/libonnxruntime.dylib` are signed with omit's Developer ID and notarised.
+In the macOS archive, `brain` (identifier `nz.omit.brain`, hardened runtime) and `lib/libonnxruntime.dylib` are signed with a Developer ID and notarised. Every signature on a Mac names Robin Lange (team 5BCNYRT23U), the Apple developer account omit releases under; below, "omit's Developer ID" means that one.
 
 Beside the archives: `brain.pkg`, the macOS installer (below); `brain-<version>.mcpb`; `brain-<version>.sigstore.json`, the build attestation for every archive, the `.pkg` and the `.mcpb`; `SHA256SUMS`, over the archives, the `.pkg`, the `.mcpb` and the bundle; and `release.json`, which reads `{version, protocol: 1, targets: {<target>: {url, sha256}}, pkg: {url, sha256}, attestations: {url, sha256}}`.
 

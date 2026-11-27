@@ -406,6 +406,45 @@ fn the_privacy_line_is_on_every_page_about_what_brain_sends() {
     assert_eq!(missing, Vec::<&str>::new());
 }
 
+/// macOS shows a person the signer's own name, so every page that tells them a release is signed
+/// names the one they will see, with the team an update is checked against.
+#[test]
+fn the_signer_a_person_sees_is_named() {
+    let team = fs::read_to_string(root().join("crates/brain/src/keys/team_id")).unwrap();
+    let signer = format!("Robin Lange (team {})", team.trim());
+    let missing: Vec<&str> = ["README.md", "SECURITY.md", "docs/release.md"]
+        .into_iter()
+        .filter(|page| {
+            !fs::read_to_string(root().join(page))
+                .unwrap()
+                .contains(&signer)
+        })
+        .collect();
+    assert_eq!(missing, Vec::<&str>::new());
+}
+
+/// The README is read as what brain does. What is not built is named only under its own heading,
+/// until the part that builds it moves it out.
+#[test]
+fn the_readme_names_unbuilt_parts_only_as_planned() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    let (before, rest) = readme.split_once("\n## Planned, not built\n").unwrap();
+    let after = rest.split_once("\n## ").map_or("", |(_, after)| after);
+    let now = format!("{before}{after}").to_lowercase();
+    let claimed: Vec<&str> = [
+        "email",
+        "screen",
+        "sync",
+        "colleague",
+        "team shares",
+        "relay",
+    ]
+    .into_iter()
+    .filter(|word| now.contains(word))
+    .collect();
+    assert_eq!(claimed, Vec::<&str>::new());
+}
+
 /// The release job checks the macOS build against what an installed brain asks of an update
 /// (brain_platform::codesign::developer_id, with brain's own identifier for brain), so a build the
 /// release passes is a build every Mac takes. Both scripts write the team as `\"$team\"`.
