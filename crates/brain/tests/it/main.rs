@@ -4,6 +4,7 @@ mod capture;
 mod connect;
 mod daemon;
 mod gaps;
+mod hook;
 mod import;
 mod mcp;
 mod room;

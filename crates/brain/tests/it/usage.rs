@@ -910,3 +910,22 @@ fn a_failed_day_shows_in_brain_usage_and_is_dropped_once_a_week_old() {
     );
     assert!(!sent.contains(&"2026-11-18".to_string()), "{sent:?}");
 }
+
+#[test]
+fn a_hook_payload_never_reaches_a_usage_report() {
+    let day = "2026-11-24";
+    let h = counted(&[day]);
+    h.brain()
+        .args(["hook", "prompt"])
+        .write_stdin(format!(
+            r#"{{"session_id":"{SENTINEL}","prompt":"{SENTINEL}"}}"#
+        ))
+        .assert()
+        .success();
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    send(&h);
+    let got = e.got();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(!String::from_utf8_lossy(&got[0].body).contains(SENTINEL));
+}

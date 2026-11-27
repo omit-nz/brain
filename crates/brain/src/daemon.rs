@@ -211,6 +211,9 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
             // At start and hourly; a pass comes at least every BACKSTOP, so the hour holds.
             if last_send.is_none_or(|t: Instant| t.elapsed() >= SEND_EVERY) {
                 last_send = Some(Instant::now());
+                if let Err(e) = brain_reflex::prune(&dirs.data, clock.now()) {
+                    eprintln!("{}", terminal(&format!("pruning traces failed: {e:#}")));
+                }
                 match usage::send_due(dirs, &idx, &**clock) {
                     Ok(s) => eprintln!("{}", s.line()),
                     Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),

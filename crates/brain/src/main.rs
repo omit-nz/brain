@@ -6,6 +6,7 @@ mod config;
 mod connect;
 mod daemon;
 mod gaps;
+mod hook;
 mod import;
 mod inbox;
 mod mcp;
@@ -20,6 +21,11 @@ use brain_platform::dirs::Dirs;
 use clap::Parser;
 
 fn main() -> ExitCode {
+    // A hook is taken before anything that could exit non-zero or load a model.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|a| a == "hook") {
+        return hook::main(args.next().and_then(|a| a.into_string().ok()));
+    }
     let result = Dirs::resolve().and_then(|dirs| {
         runtime::prepare(&dirs)?;
         cli::run(cli::Cli::parse(), &dirs)

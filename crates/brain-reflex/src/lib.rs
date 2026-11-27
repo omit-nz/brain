@@ -10,6 +10,10 @@ pub use cx::{Cx, Env};
 pub use fire::{Decided, Decision, decide, fire};
 pub use store::{PickRow, Row, Verdicts};
 
+use std::path::Path;
+
+use jiff::Timestamp;
+use omit_agent_trace::Store;
 use serde::{Deserialize, Serialize};
 
 /// The trace store and the verdict store, in brain's data folder.
@@ -120,3 +124,18 @@ pub struct Reflex {
 
 /// The reflexes brain ships. Every one ships in shadow.
 pub const REGISTRY: &[Reflex] = &[];
+
+/// Drops what is past keeping in `data`: traces after 30 days, unlabelled verdicts after 90.
+/// Where brain has recorded nothing, nothing is made.
+pub fn prune(data: &Path, now: Timestamp) -> anyhow::Result<()> {
+    let traces = data.join(TRACES);
+    if traces.exists() {
+        // Opening the trace store prunes it.
+        Store::open(&traces)?;
+    }
+    let verdicts = data.join(VERDICTS);
+    if verdicts.exists() {
+        Verdicts::open(&verdicts)?.prune(now)?;
+    }
+    Ok(())
+}

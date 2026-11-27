@@ -753,3 +753,50 @@ fn a_gap_a_recheck_fills_is_counted_on_the_local_day() {
         .sum();
     assert_eq!(filled, 1, "{zone} {local}");
 }
+
+#[test]
+fn the_daemon_prunes_traces_and_verdicts() {
+    let h = Home::new();
+    h.init();
+    h.brain()
+        .args(["hook", "prompt"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    let data = h.home.path().join("data");
+    let verdicts = data.join(brain_reflex::VERDICTS);
+    brain_reflex::Verdicts::open(&verdicts).unwrap();
+    let old = |db: &std::path::Path, sql: &str| {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap()
+    };
+    old(
+        &data.join(brain_reflex::TRACES),
+        "UPDATE runs SET started_ns = 0",
+    );
+    old(
+        &verdicts,
+        "INSERT INTO verdicts(reflex, version, point, at, input_text, fired, confidence, reason, acted, latency_ms)
+         VALUES ('r', 1, 'prompt', 0, '', 0, 0, '', 0, 0)",
+    );
+    let count = |db: &std::path::Path, sql: &str| -> i64 {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    let d = Daemon::start(&h);
+    until(
+        "pruned traces and verdicts",
+        || {
+            count(
+                &data.join(brain_reflex::TRACES),
+                "SELECT count(*) FROM runs",
+            ) == 0
+                && count(&verdicts, "SELECT count(*) FROM verdicts") == 0
+        },
+        || d.stderr(),
+    );
+}
