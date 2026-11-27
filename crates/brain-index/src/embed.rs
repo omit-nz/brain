@@ -119,7 +119,8 @@ impl EmbeddingProvider for HashEmbedder {
 }
 
 /// The note's embedded text: title, tags, then the whole body. The model's tokenizer truncates by
-/// tokens; nothing here cuts bytes.
+/// tokens; nothing here cuts bytes. A vector is kept while these three are unchanged
+/// (`reindex::upsert`), so a change to what is embedded must also pend every note.
 fn input(title: &str, tags: &str, body: &str) -> String {
     format!("{title}\n{tags}\n{body}")
 }
@@ -133,6 +134,7 @@ fn embed(provider: &dyn EmbeddingProvider, texts: &[String]) -> anyhow::Result<V
 }
 
 impl Index {
+    /// Embeds every pending note, the newest first (one with no mtime was saved moments ago).
     pub fn embed_pending(
         &mut self,
         provider: &dyn EmbeddingProvider,
@@ -158,12 +160,19 @@ impl Index {
     ) -> anyhow::Result<Embedded> {
         let model = provider.config().model_id.clone();
         let mut out = Embedded::default();
+        // Search reads only this model's vectors, so a note holding another's is pending.
+        self.conn.execute(
+            "UPDATE notes SET embedded = 0
+             WHERE embedded = 1 AND id IN (SELECT id FROM embeddings WHERE model != ?1)",
+            [&model],
+        )?;
         for _ in 0..rounds {
             let pending: Vec<(i64, String, String)> = {
                 let mut st = self.conn.prepare(
                     "SELECT n.id, n.path, c.title, c.tags, c.body
                      FROM notes n JOIN notes_content c USING (id)
-                     WHERE n.embedded = 0 ORDER BY n.id LIMIT ?1",
+                     WHERE n.embedded = 0
+                     ORDER BY n.mtime_ns < 0 DESC, n.mtime_ns DESC, n.id LIMIT ?1",
                 )?;
                 st.query_map([batch as i64], |r| {
                     Ok((

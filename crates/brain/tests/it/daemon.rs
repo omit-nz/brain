@@ -7,6 +7,9 @@ use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use brain_index::activity::Activity;
+use brain_platform::clock::{Clock, SystemClock};
+use brain_report::{Door, Event};
 use serde_json::Value;
 
 use super::Home;
@@ -648,4 +651,105 @@ fn a_daemon_started_before_its_vault_waits_for_it() {
         "{}",
         d.stderr()
     );
+}
+
+/// A recheck searches every open gap, which takes minutes on a big vault with many gaps. The
+/// daemon does it on a thread of its own, so a note saved meanwhile is indexed without waiting.
+#[test]
+fn a_save_during_a_gap_recheck_is_indexed_without_waiting_for_it() {
+    let h = Home::new();
+    h.init();
+    h.put("a.md", &note_with_id(1, "a note about pelicans"));
+    let activity = Activity::open(&h.home.path().join("data/activity.db")).unwrap();
+    for n in 0..60 {
+        let query = format!("zeppelin hangar {n}");
+        activity
+            .log_gap(SystemClock.now(), Door::Cli, &query, None)
+            .unwrap();
+    }
+    // 60 gaps a second each: far longer than the wait below.
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_RECHECK_PAUSE_MS", "1000")]);
+    d.wait_for_passes(1);
+    h.put("b.md", &note_with_id(2, "a note about herons"));
+    wait_for_notes(&h, &d, 2);
+    assert!(!d.stderr().contains("recheck"), "{}", d.stderr());
+}
+
+#[test]
+fn the_daemon_fills_a_gap_a_note_answers() {
+    let h = Home::new();
+    h.init();
+    h.run(&["search", "pelicans"]);
+    h.run(&["search", "zeppelins"]);
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    h.put("a.md", &note_with_id(1, "a note about pelicans"));
+    until(
+        "a finished recheck",
+        || d.stderr().contains("recheck: 1 gaps filled"),
+        || d.stderr(),
+    );
+    let open = &h.json(&["gaps", "--json"])["open"];
+    assert_eq!(open.as_array().unwrap().len(), 1, "{open}");
+    assert_eq!(open[0]["query"], "zeppelins", "{open}");
+}
+
+/// A gap is judged once the notes that might answer it have their vectors, so the recheck waits
+/// for the embedding queue.
+#[test]
+fn a_gap_recheck_waits_for_the_pending_embeddings() {
+    const NOTES: usize = 2000;
+    let h = Home::new();
+    h.init();
+    for n in 0..NOTES {
+        h.put(&format!("n{n:04}.md"), &note_with_id(n, "to embed"));
+    }
+    Activity::open(&h.home.path().join("data/activity.db"))
+        .unwrap()
+        .log_gap(SystemClock.now(), Door::Cli, "zeppelin hangar", None)
+        .unwrap();
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_EMBEDDER", "1")]);
+    until(
+        "a recheck",
+        || d.stderr().contains("recheck"),
+        || d.stderr(),
+    );
+    assert_eq!(h.json(&["status", "--json"])["embedded"], NOTES);
+}
+
+/// A recheck's counts go to the day the person is living, as every other count does: a day that
+/// is not theirs may already have been sent.
+#[test]
+fn a_gap_a_recheck_fills_is_counted_on_the_local_day() {
+    // A zone whose date differs from UTC's at this hour.
+    let hour = SystemClock.now().to_zoned(jiff::tz::TimeZone::UTC).hour();
+    let zone = if hour < 11 {
+        "Etc/GMT+12"
+    } else {
+        "Etc/GMT-14"
+    };
+    let h = Home::new();
+    h.init();
+    h.run(&["search", "pelicans"]);
+    let d = Daemon::start_with(&h, &[("TZ", zone)]);
+    d.wait_for_passes(1);
+    h.put("a.md", &note_with_id(1, "a note about pelicans"));
+    until(
+        "a finished recheck",
+        || d.stderr().contains("recheck: 1 gaps filled"),
+        || d.stderr(),
+    );
+    let local = SystemClock
+        .now()
+        .to_zoned(jiff::tz::TimeZone::get(zone).unwrap())
+        .date();
+    let activity = Activity::open(&h.home.path().join("data/activity.db")).unwrap();
+    let filled: u64 = activity
+        .day(local)
+        .unwrap()
+        .iter()
+        .filter(|(e, _, _)| *e == Event::GapFilled)
+        .map(|(_, _, n)| n)
+        .sum();
+    assert_eq!(filled, 1, "{zone} {local}");
 }

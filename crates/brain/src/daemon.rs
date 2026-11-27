@@ -4,7 +4,9 @@
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use brain::update;
@@ -16,6 +18,7 @@ use brain_platform::dirs::Dirs;
 use brain_platform::fs::Lock;
 use brain_platform::process;
 use brain_report::Event;
+use ll_core::embed::EmbeddingProvider;
 use notify::event::ModifyKind;
 use notify::{EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, NoCache};
@@ -103,8 +106,8 @@ fn newer<S: update::Source>(
 
 /// Runs the daemon until it installs a newer release, then runs that release in its place with
 /// the same arguments: the same process under launchd, and the same terminal elsewhere.
-pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<()> {
-    let v = serve(dirs, clock, from_dir)?;
+pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<()> {
+    let v = serve(dirs, &clock, from_dir)?;
     eprintln!("installed brain {v}; starting it");
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -114,7 +117,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::R
 
 /// The daemon's work, holding the writer lock and the vault watcher, which it lets go of when it
 /// returns the version it installed.
-fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<String> {
+fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<String> {
     let path = writer_lock(dirs);
     let _lock = match Lock::try_acquire(&path)? {
         Some(lock) => lock,
@@ -141,7 +144,8 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
         std::thread::sleep(RETRY);
     }
     let vault = Vault::open(&root)?;
-    let mut idx = Index::open(&dirs.data.join("index.db"))?;
+    let index_db = dirs.data.join("index.db");
+    let mut idx = Index::open(&index_db)?;
     let provider = embed::load()
         .map_err(|e| {
             eprintln!(
@@ -151,7 +155,8 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
                 ))
             )
         })
-        .ok();
+        .ok()
+        .map(Arc::<dyn EmbeddingProvider>::from);
     let (tx, rx) = mpsc::channel();
     // The default file-id cache walks the tree following links; the daemon needs no rename
     // pairing, so it keeps none, and the watcher itself follows no link, as the vault walk does not.
@@ -171,6 +176,7 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
     let mut rewatch = false;
     let mut changed = false;
     let mut last_recheck: Option<Instant> = None;
+    let mut rechecking: Option<JoinHandle<()>> = None;
     let mut last_send: Option<Instant> = None;
     let mut last_update: Option<Instant> = None;
     let mut next = Instant::now();
@@ -202,29 +208,21 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
                 }
             }
             embedding = provider.is_some();
-            // Each recheck searches every open gap, so it waits for a pass that changed notes and
-            // runs at most once an hour, never once per save.
-            if changed && last_recheck.is_none_or(|t: Instant| t.elapsed() >= RECHECK_EVERY) {
-                changed = false;
-                last_recheck = Some(Instant::now());
-                let filled = Activity::open(&store)
-                    .and_then(|a| gaps::recheck(&idx, &a, provider.as_deref(), clock));
-                match filled {
-                    Ok(n) => eprintln!("recheck: {n} gaps filled"),
-                    Err(e) => eprintln!("{}", terminal(&format!("recheck failed: {e:#}"))),
-                }
-            }
             // At start and hourly; a pass comes at least every BACKSTOP, so the hour holds.
             if last_send.is_none_or(|t: Instant| t.elapsed() >= SEND_EVERY) {
                 last_send = Some(Instant::now());
-                match usage::send_due(dirs, &idx, clock) {
+                match usage::send_due(dirs, &idx, &**clock) {
                     Ok(s) => eprintln!("{}", s.line()),
                     Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),
                 }
             }
-            if last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY) {
+            // Not while a recheck runs: off Unix the old process waits on the new one, and the
+            // recheck would run on beside it.
+            if rechecking.as_ref().is_none_or(JoinHandle::is_finished)
+                && last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY)
+            {
                 last_update = Some(Instant::now());
-                if let Some(v) = update_self(dirs, &store, clock, from_dir) {
+                if let Some(v) = update_self(dirs, &store, &**clock, from_dir) {
                     return Ok(v);
                 }
             }
@@ -246,6 +244,17 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
                 }
             };
         }
+        // Each recheck searches every open gap, so it waits for a pass that changed notes and for
+        // their vectors, and runs at most once an hour, never once per save.
+        if changed
+            && !embedding
+            && last_recheck.is_none_or(|t: Instant| t.elapsed() >= RECHECK_EVERY)
+            && rechecking.as_ref().is_none_or(JoinHandle::is_finished)
+        {
+            changed = false;
+            last_recheck = Some(Instant::now());
+            rechecking = Some(recheck(&index_db, &store, provider.clone(), clock.clone()));
+        }
         let wait = if embedding {
             Duration::ZERO
         } else {
@@ -266,6 +275,27 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
             due |= matters(&vault.root, event);
         }
     }
+}
+
+/// Searches the open gaps again beside the daemon's loop, on its own read of the index: each is a
+/// reranked search, and a few hundred in turn would keep every save waiting for minutes.
+fn recheck(
+    index_db: &Path,
+    store: &Path,
+    provider: Option<Arc<dyn EmbeddingProvider>>,
+    clock: Arc<dyn Clock>,
+) -> JoinHandle<()> {
+    let (index_db, store) = (index_db.to_path_buf(), store.to_path_buf());
+    std::thread::spawn(move || {
+        let filled = Index::open(&index_db).and_then(|idx| {
+            let activity = Activity::open(&store)?;
+            gaps::recheck(&idx, &activity, provider.as_deref(), &*clock)
+        });
+        match filled {
+            Ok(n) => eprintln!("recheck: {n} gaps filled"),
+            Err(e) => eprintln!("{}", terminal(&format!("recheck failed: {e:#}"))),
+        }
+    })
 }
 
 /// Whether a batch of watcher events can change the index. The exact events an editor's save

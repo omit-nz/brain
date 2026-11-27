@@ -260,3 +260,107 @@ fn the_hash_embedder_is_deterministic_and_sized() {
     assert_ne!(v[0], v[2]);
     assert!(v.iter().all(|x| x.len() == 16));
 }
+
+fn embedded(f: &Fixture) -> Vec<String> {
+    let c = f.sql();
+    let mut st = c
+        .prepare("SELECT path FROM notes JOIN embeddings USING (id) ORDER BY path")
+        .unwrap();
+    st.query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A release that changes the reading rules rereads every note. A vector is made from the title,
+/// tags and body, so a note whose three read the same keeps it.
+#[test]
+fn a_reread_under_new_rules_keeps_the_vectors_of_unchanged_text() {
+    let f = Fixture::with_notes(3);
+    let mut idx = f.indexed();
+    idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    f.sql()
+        .execute("UPDATE meta SET value = '0' WHERE key = 'rules'", [])
+        .unwrap();
+    // n001 read differently under the old rules, so its vector is of other text.
+    f.sql()
+        .execute(
+            "UPDATE notes_content SET title = 'as the old rules read it'
+             WHERE id = (SELECT id FROM notes WHERE path = 'n001.md')",
+            [],
+        )
+        .unwrap();
+    f.reindex(&mut idx);
+    assert_eq!(embedded(&f), ["n000.md", "n002.md"]);
+    assert_eq!(f.count("SELECT count(*) FROM notes WHERE embedded = 1"), 2);
+    assert_eq!(f.count("SELECT count(*) FROM notes WHERE embedded = 0"), 1);
+}
+
+#[test]
+fn an_edit_outside_the_embedded_text_keeps_the_vector() {
+    let f = Fixture::with_notes(1);
+    let mut idx = f.indexed();
+    idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    let raw = fs::read_to_string(f.vault.path().join("n000.md")).unwrap();
+    f.put("n000.md", &raw.replacen("---\n", "---\nowner: sam\n", 1));
+    f.reindex(&mut idx);
+    assert_eq!(f.count("SELECT count(*) FROM notes WHERE owner = 'sam'"), 1);
+    assert_eq!(embedded(&f), ["n000.md"]);
+    assert_eq!(f.count("SELECT count(*) FROM notes WHERE embedded = 1"), 1);
+}
+
+/// A note saved while thousands are pending is embedded in the next batch, and so is a note still
+/// being typed, which is stored with no mtime.
+#[test]
+fn the_newest_notes_are_embedded_first() {
+    let f = Fixture::with_notes(4);
+    let mut idx = f.indexed();
+    for (name, mtime_ns) in [
+        ("n000.md", 1_000_i64),
+        ("n001.md", 3_000),
+        ("n002.md", 2_000),
+        ("n003.md", -1),
+    ] {
+        f.sql()
+            .execute(
+                "UPDATE notes SET mtime_ns = ?1 WHERE path = ?2",
+                rusqlite::params![mtime_ns, name],
+            )
+            .unwrap();
+    }
+    idx.embed_batch(&HashEmbedder::new(8), 2).unwrap();
+    assert_eq!(embedded(&f), ["n001.md", "n003.md"]);
+}
+
+/// A note the embedder once failed on is tried again when its file changes, as before.
+#[test]
+fn a_failed_note_is_tried_again_after_any_edit() {
+    let f = Fixture::with_notes(1);
+    let mut idx = f.indexed();
+    idx.embed_pending(&Picky::new("number", false), 10).unwrap();
+    assert_eq!(f.count("SELECT count(*) FROM notes WHERE embedded = -1"), 1);
+    let raw = fs::read_to_string(f.vault.path().join("n000.md")).unwrap();
+    f.put("n000.md", &raw.replacen("---\n", "---\nowner: sam\n", 1));
+    f.reindex(&mut idx);
+    let e = idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    assert_eq!(e.done, 1);
+}
+
+/// Search reads only the running model's vectors, so a note embedded by another model is pending
+/// again.
+#[test]
+fn a_vector_of_another_model_is_made_again() {
+    let f = Fixture::with_notes(3);
+    let mut idx = f.indexed();
+    idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    f.sql()
+        .execute("UPDATE embeddings SET model = 'an older model'", [])
+        .unwrap();
+    let e = idx.embed_batch(&HashEmbedder::new(8), 2).unwrap();
+    assert_eq!((e.done, e.pending), (2, 1));
+    idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    assert_eq!(
+        f.count("SELECT count(*) FROM embeddings WHERE model = 'hash'"),
+        3
+    );
+}
