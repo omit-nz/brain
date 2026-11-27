@@ -276,3 +276,69 @@ pub fn archived_line(n: usize) -> String {
         n => format!("{n} followed memories are gone from Claude Code and out of search; they come back if their files do"),
     }
 }
+
+/// The order of reconcile's two saves, shown at the filesystem: with one file impossible to write,
+/// what was written of the other is what came first.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "memory/-proj/one.md";
+    const ID: &str = "0195f2e0-0000-7000-8000-000000000001";
+
+    /// Writes a file in `root`, making its folders.
+    fn put(root: &Path, rel: &str, text: &str) {
+        write_atomic(root, Path::new(rel), text.as_bytes(), Privacy::Private).unwrap();
+    }
+
+    /// A record whose copy is back at its path (row 4), or whose files are gone for the second
+    /// look (row 7): both move it to the ledger.
+    fn moving(back: bool) -> (tempfile::TempDir, Dirs, Vault, Archive) {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = Dirs::from_home(home.path());
+        put(home.path(), "vault/other.md", "x");
+        let vault = Vault::open(&home.path().join("vault")).unwrap();
+        let text = format!("---\nid: {ID}\n---\nwords\n");
+        if back {
+            put(&vault.root, "working-memory/-proj/one.md", &text);
+        }
+        let archive = Archive(vec![Record {
+            key: KEY.into(),
+            path: "_archive/working-memory/-proj/one.md".into(),
+            gone: !back,
+            entry: LedgerEntry {
+                id: Some(ID.into()),
+                src_hash: hash(b"source"),
+                dst_hash: hash(text.as_bytes()),
+                from: Some(home.path().join("projects")),
+                vault: Some(vault.root.clone()),
+                missing: false,
+            },
+        }]);
+        (home, dirs, vault, archive)
+    }
+
+    #[test]
+    fn the_records_are_not_saved_when_the_ledger_cannot_be() {
+        for back in [true, false] {
+            let (_home, dirs, vault, mut archive) = moving(back);
+            // A folder where the ledger goes.
+            put(&dirs.data, "import-ledger.json/x", "x");
+            let done = archive.reconcile(&dirs, &vault, &mut Ledger::default());
+            assert!(done.is_err(), "back {back}");
+            assert!(!dirs.data.join(FILE).exists(), "back {back}: saved first");
+        }
+    }
+
+    #[test]
+    fn the_ledger_is_saved_before_the_records() {
+        for back in [true, false] {
+            let (_home, dirs, vault, mut archive) = moving(back);
+            put(&dirs.data, "follow-archive.json/x", "x");
+            let done = archive.reconcile(&dirs, &vault, &mut Ledger::default());
+            assert!(done.is_err(), "back {back}");
+            let ledger = Ledger::load(&dirs).unwrap();
+            assert!(ledger.current(KEY, &vault.root).is_some(), "back {back}");
+        }
+    }
+}

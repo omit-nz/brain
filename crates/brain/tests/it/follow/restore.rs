@@ -337,6 +337,48 @@ fn a_reconcile_cut_short_between_its_saves_is_finished() {
     assert_eq!(copy(&h, "one"), Some(copied));
 }
 
+/// The ledger as a reconcile leaves it when killed before it saves the records: the record's own
+/// entry under its key, and the record still there.
+fn ledger_took_the_record(h: &Home) {
+    let mut entry = records(h)[0].clone();
+    let fields = entry.as_object_mut().unwrap();
+    let key = fields.remove("key").unwrap();
+    fields.remove("path");
+    fields.remove("gone");
+    let mut ledger = ledger(h);
+    ledger[key.as_str().unwrap()] = entry;
+    set_ledger(h, &ledger);
+}
+
+/// Row 4 half done: the file moved back by hand, the ledger saved, the record not yet dropped.
+#[test]
+fn a_moved_back_file_half_reconciled_keeps_its_words_and_id() {
+    let (h, p, source, copied) = archived_one();
+    fs::rename(archive_path(&h, "one"), copy_path(h.vault.path(), "one")).unwrap();
+    ledger_took_the_record(&h);
+    fs::write(p.file("one"), source).unwrap();
+    let said = pass(&h);
+    assert!(said.contains("0 copied, 0 updated"), "{said}");
+    assert!(!said.contains("kept as it is"), "{said}");
+    assert!(records(&h).is_empty(), "{:?}", records(&h));
+    assert_eq!(copy(&h, "one"), Some(copied));
+}
+
+/// Row 7 half done: the archived file deleted, the ledger saved, the record not yet dropped.
+#[test]
+fn a_deleted_archived_file_half_reconciled_stays_removed() {
+    let (h, p, source, _) = archived_one();
+    fs::remove_file(archive_path(&h, "one")).unwrap();
+    pass(&h);
+    ledger_took_the_record(&h);
+    fs::write(p.file("one"), source).unwrap();
+    let said = pass(&h);
+    assert_eq!(copy(&h, "one"), None, "{said}");
+    assert!(records(&h).is_empty(), "{:?}", records(&h));
+    let said = pass(&h);
+    assert_eq!(copy(&h, "one"), None, "{said}");
+}
+
 /// A changed source's fresh copy written, and the pass killed before the ledger was saved.
 #[test]
 fn a_changed_copy_cut_short_before_the_ledger_save_is_not_taken_for_the_old_one() {

@@ -433,3 +433,56 @@ fn trace(dirs: &Dirs, changes: &[Change]) {
         eprintln!("brain: this memory pass was not fully traced: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use brain_platform::fs::{Privacy, write_atomic};
+
+    use super::*;
+    use crate::import::LedgerEntry;
+
+    /// The record file cannot be written, so what happened to the copy is what happens before it
+    /// is saved.
+    #[test]
+    fn nothing_is_moved_before_its_record_is_saved() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = Dirs::from_home(home.path());
+        let put = |rel: &str| {
+            let rel = Path::new(rel);
+            write_atomic(home.path(), rel, b"words\n", Privacy::Private).unwrap();
+        };
+        // A folder where the record file goes.
+        put("data/follow-archive.json/x");
+        put("vault/working-memory/-proj/one.md");
+        let vault = Vault::open(&home.path().join("vault")).unwrap();
+        let copy = vault.root.join("working-memory/-proj/one.md");
+        let key = "memory/-proj/one.md".to_string();
+        let mut ledger = Ledger::default();
+        ledger.0.insert(
+            key.clone(),
+            LedgerEntry {
+                id: Some("0195f2e0-0000-7000-8000-000000000001".into()),
+                src_hash: hash(b"source"),
+                dst_hash: hash(b"words\n"),
+                from: None,
+                vault: None,
+                missing: false,
+            },
+        );
+        let done = archive_due(
+            &dirs,
+            &vault,
+            home.path(),
+            Look {
+                second: vec![key.clone()],
+                unread: Vec::new(),
+            },
+            &mut ledger,
+            &mut Archive::default(),
+            &mut Followed::default(),
+        );
+        assert!(done.is_err());
+        assert!(copy.exists(), "moved before its record was saved");
+        assert!(ledger.0.contains_key(&key));
+    }
+}
