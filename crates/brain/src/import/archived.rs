@@ -27,9 +27,32 @@ struct Record {
     /// The last pass did not find the file there.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     gone: bool,
-    /// The ledger's record of the copy, as it goes back.
-    #[serde(flatten)]
-    entry: LedgerEntry,
+    // The ledger's record of the copy, as it goes back; the vault and followed folder it is of
+    // are always known.
+    id: Option<String>,
+    src_hash: String,
+    dst_hash: String,
+    from: PathBuf,
+    vault: PathBuf,
+}
+
+impl Record {
+    /// The ledger's entry for this copy, as it goes back.
+    fn entry(&self) -> LedgerEntry {
+        LedgerEntry {
+            id: self.id.clone(),
+            src_hash: self.src_hash.clone(),
+            dst_hash: self.dst_hash.clone(),
+            from: Some(self.from.clone()),
+            vault: Some(self.vault.clone()),
+            missing: false,
+        }
+    }
+
+    /// Whether `entry` records this very copy of this source.
+    fn is(&self, entry: &LedgerEntry) -> bool {
+        entry.id == self.id && entry.src_hash == self.src_hash && entry.dst_hash == self.dst_hash
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -50,11 +73,6 @@ fn holds(vault: &Vault, rel: &Path, id: Option<&str>) -> std::io::Result<Option<
     let found = Note::parse(rel, &String::from_utf8_lossy(&bytes), Place::Kept).id;
     let same = found.is_some_and(|found| Some(found.to_string().as_str()) == id);
     Ok(same.then_some(bytes))
-}
-
-/// Whether two records are of one copy of one source.
-fn equal(a: &LedgerEntry, b: &LedgerEntry) -> bool {
-    a.id == b.id && a.src_hash == b.src_hash && a.dst_hash == b.dst_hash
 }
 
 impl Archive {
@@ -82,24 +100,24 @@ impl Archive {
 
     /// Whether a record names the note `id`.
     pub fn names(&self, id: &str) -> bool {
-        self.0.iter().any(|r| r.entry.id.as_deref() == Some(id))
+        self.0.iter().any(|r| r.id.as_deref() == Some(id))
     }
 
     /// How many archived copies of `vault` are there to come back.
     pub fn waiting(&self, vault: &Vault) -> usize {
         self.0
             .iter()
-            .filter(|r| r.entry.of(&vault.root))
-            .filter(|r| matches!(holds(vault, &r.path, r.entry.id.as_deref()), Ok(Some(_))))
+            .filter(|r| r.vault == vault.root)
+            .filter(|r| matches!(holds(vault, &r.path, r.id.as_deref()), Ok(Some(_))))
             .count()
     }
 
-    /// The record of `key`'s archived copy in `vault`.
-    pub(super) fn of(&self, key: &str, vault: &Path) -> Option<&LedgerEntry> {
+    /// The source hash of `key`'s archived copy in `vault`.
+    pub(super) fn src_hash_of(&self, key: &str, vault: &Path) -> Option<&str> {
         self.0
             .iter()
-            .find(|r| r.key == key && r.entry.of(vault))
-            .map(|r| &r.entry)
+            .find(|r| r.key == key && r.vault == vault)
+            .map(|r| r.src_hash.as_str())
     }
 
     pub(super) fn name_for(&self, vault: &Vault, rel: &Path) -> PathBuf {
@@ -120,12 +138,11 @@ impl Archive {
             key: key.to_string(),
             path,
             gone: false,
-            entry: LedgerEntry {
-                from: Some(followed.to_path_buf()),
-                vault: Some(vault.to_path_buf()),
-                missing: false,
-                ..entry.clone()
-            },
+            id: entry.id.clone(),
+            src_hash: entry.src_hash.clone(),
+            dst_hash: entry.dst_hash.clone(),
+            from: followed.to_path_buf(),
+            vault: vault.to_path_buf(),
         });
     }
 
@@ -143,10 +160,10 @@ impl Archive {
         let (mut in_ledger, mut in_archive) = (false, false);
         let (mut deleted, mut unread) = (Vec::new(), Vec::new());
         self.0.retain_mut(|r| {
-            if !r.entry.of(&vault.root) {
+            if r.vault != vault.root {
                 return true;
             }
-            let id = r.entry.id.as_deref();
+            let id = r.id.as_deref();
             let there = (
                 holds(vault, &r.path, id),
                 holds(vault, &copy_of(vault, &r.key), id),
@@ -161,7 +178,7 @@ impl Archive {
             let keep = match ledger.current(&r.key, &vault.root) {
                 // Cut short after the move: the ledger has not let go of it, and nothing of it
                 // is left at the copy's path.
-                Some(l) if equal(l, &r.entry) && archived.is_some() && copied.is_none() => {
+                Some(l) if r.is(l) && archived.is_some() && copied.is_none() => {
                     ledger.0.remove(&r.key);
                     in_ledger = true;
                     return true;
@@ -172,10 +189,9 @@ impl Archive {
                 None => {
                     // While the archived file is still there, only the very bytes are it: a
                     // fresh copy written under the same id is not.
-                    let back =
-                        copied.is_some_and(|b| archived.is_none() || hash(&b) == r.entry.dst_hash);
+                    let back = copied.is_some_and(|b| archived.is_none() || hash(&b) == r.dst_hash);
                     if back {
-                        ledger.0.insert(r.key.clone(), r.entry.clone());
+                        ledger.0.insert(r.key.clone(), r.entry());
                         in_ledger = true;
                         false
                     } else if archived.is_some() {
@@ -187,8 +203,8 @@ impl Archive {
                         return true;
                     } else {
                         // Deleted by the person: a removed copy from here on.
-                        deleted.extend(r.entry.id.clone());
-                        ledger.0.insert(r.key.clone(), r.entry.clone());
+                        deleted.extend(r.id.clone());
+                        ledger.0.insert(r.key.clone(), r.entry());
                         in_ledger = true;
                         false
                     }
@@ -230,22 +246,21 @@ impl Archive {
         let mut returning = HashMap::new();
         let mut left = Vec::new();
         for source in sources {
-            let record = self.0.iter().find(|r| {
-                r.key == source.key
-                    && r.entry.of(&vault.root)
-                    && r.entry.from.as_deref() == Some(followed)
-            });
+            let record = self
+                .0
+                .iter()
+                .find(|r| r.key == source.key && r.vault == vault.root && r.from == followed);
             let Some(r) = record.filter(|_| ledger.current(&source.key, &vault.root).is_none())
             else {
                 left.push(source);
                 continue;
             };
             // The person deleted the archived file, or it cannot be read: not copied again.
-            let Ok(Some(archived)) = holds(vault, &r.path, r.entry.id.as_deref()) else {
+            let Ok(Some(archived)) = holds(vault, &r.path, r.id.as_deref()) else {
                 continue;
             };
-            if hash(source.raw.as_bytes()) != r.entry.src_hash {
-                returning.extend(r.entry.id.clone().map(|id| (source.key.clone(), id)));
+            if hash(source.raw.as_bytes()) != r.src_hash {
+                returning.extend(r.id.clone().map(|id| (source.key.clone(), id)));
                 left.push(source);
                 continue;
             }
@@ -260,10 +275,10 @@ impl Archive {
                 left.push(source);
                 continue;
             }
-            ledger.0.insert(source.key.clone(), r.entry.clone());
+            ledger.0.insert(source.key.clone(), r.entry());
             // Only a copy as brain wrote it is settled: settling the person's edit would record
             // their words as brain's, and the next change would write over them.
-            if hash(&archived) == r.entry.dst_hash {
+            if hash(&archived) == r.dst_hash {
                 written.push(source.key.clone());
             }
             out.restored.push(rel_key(&to));
@@ -316,14 +331,11 @@ mod tests {
             key: KEY.into(),
             path: "_archive/working-memory/-proj/one.md".into(),
             gone: !back,
-            entry: LedgerEntry {
-                id: Some(ID.into()),
-                src_hash: hash(b"source"),
-                dst_hash: hash(text.as_bytes()),
-                from: Some(home.path().join("projects")),
-                vault: Some(vault.root.clone()),
-                missing: false,
-            },
+            id: Some(ID.into()),
+            src_hash: hash(b"source"),
+            dst_hash: hash(text.as_bytes()),
+            from: home.path().join("projects"),
+            vault: vault.root.clone(),
         }]);
         (home, dirs, vault, archive)
     }

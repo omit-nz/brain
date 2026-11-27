@@ -273,8 +273,9 @@ fn renamed(
             // is the name's record too: the name has had a memory of its own.
             let theirs = ledger
                 .current(&new, &vault.root)
-                .or_else(|| archive.of(&new, &vault.root));
-            let same = theirs.is_none_or(|e| e.src_hash == ledger.0[&key].src_hash);
+                .map(|e| e.src_hash.as_str())
+                .or_else(|| archive.src_hash_of(&new, &vault.root));
+            let same = theirs.is_none_or(|hash| hash == ledger.0[&key].src_hash);
             match (there(&from), there(&to) || !same) {
                 // The new name has its own: the old name's copy is archived, as a gone one is.
                 (true, true) => {
