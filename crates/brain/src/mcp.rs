@@ -29,6 +29,7 @@ use serde::Deserialize;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::daemon::writer_lock;
+use crate::import;
 use crate::out::terminal;
 use crate::room::{self, Post};
 use crate::usage;
@@ -86,10 +87,13 @@ fn cut(body: &str) -> String {
 }
 
 /// A hit with its body, cut at 4,000 characters, as data the AI cannot mistake for instructions.
-pub fn fence(hit: &Hit) -> String {
+pub fn fence(hit: &Hit, source_newer: bool) -> String {
     let mut attrs = attrs(hit.note_uuid, &hit.path, &hit.title, Some(hit.kind));
     if let Some(day) = hit.modified {
         attrs.push_str(&format!(" modified=\"{day}\""));
+    }
+    if source_newer {
+        attrs.push_str(" source_newer=\"true\"");
     }
     format!("<note{attrs}>{}</note>", escape(&cut(&hit.body)))
 }
@@ -198,7 +202,15 @@ impl State {
                 Scope::SharedOnly => "Notes that are not private:".into(),
             });
         }
-        out.extend(found.hits.iter().map(fence));
+        let paths = found.hits.iter().map(|h| h.path.as_str());
+        let newer = import::newer_sources(&self.dirs, &vault, paths);
+        out.extend(
+            found
+                .hits
+                .iter()
+                .zip(newer)
+                .map(|(hit, newer)| fence(hit, newer.is_some())),
+        );
         Ok(out.join("\n"))
     }
 }

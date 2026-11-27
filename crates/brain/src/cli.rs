@@ -684,10 +684,15 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     usage::searched(&usage::store(dirs), clock, Door::Cli, text, &found, ms);
     let gap = is_gap(&found);
     let hits = found.hits;
+    let newer = match Vault::open(&config.vault) {
+        Ok(vault) => import::newer_sources(dirs, &vault, hits.iter().map(|h| h.path.as_str())),
+        Err(_) => vec![None; hits.len()],
+    };
     if s.json {
         let rows: Vec<_> = hits
             .iter()
-            .map(|h| {
+            .zip(&newer)
+            .map(|(h, newer)| {
                 json!({
                     "id": h.note_uuid.map(|u| u.to_string()),
                     "path": h.path,
@@ -697,6 +702,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                     "score": h.score,
                     "snippet": h.snippet,
                     "modified": h.modified.map(|d| d.to_string()),
+                    "source_newer": newer.is_some(),
                 })
             })
             .collect();
@@ -712,7 +718,15 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     } else if hits.is_empty() {
         println!("nothing found");
     }
-    for h in &hits {
+    for (h, newer) in hits.iter().zip(newer) {
+        let stale = newer
+            .map(|source| {
+                format!(
+                    "\n    its source has changed since it was copied: {}",
+                    source.display()
+                )
+            })
+            .unwrap_or_default();
         let changed = h
             .modified
             .map(|d| format!(", changed {d}"))
@@ -720,7 +734,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
         println!(
             "{}",
             terminal(&format!(
-                "{}  ({}{changed})\n    {}",
+                "{}  ({}{changed})\n    {}{stale}",
                 h.title, h.path, h.snippet
             ))
         );
@@ -910,6 +924,10 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
+    let behind = match Vault::open(&config.vault) {
+        Ok(vault) => Ledger::load(dirs).map_or(0, |ledger| ledger.behind(&vault)),
+        Err(_) => 0,
+    };
     if let Some(why) = other {
         if as_json {
             let v = json!({
@@ -941,6 +959,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             "pending": s.pending,
             "skipped": s.skipped,
             "unidentified": s.unidentified,
+            "behind_source": behind,
             "vault": config.vault,
             "version": version,
         });
@@ -961,6 +980,11 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     ];
     for (reason, n) in &s.skipped {
         lines.push(format!("skipped, {reason}: {n}"));
+    }
+    match behind {
+        0 => {}
+        1 => lines.push("1 copy is behind its source".into()),
+        n => lines.push(format!("{n} copies are behind their source")),
     }
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());

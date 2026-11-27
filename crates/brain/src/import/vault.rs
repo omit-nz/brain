@@ -20,7 +20,7 @@ pub fn sources(src: &Vault, skipped: &mut Vec<(String, Skip)>) -> Vec<Source> {
                     dst_rel: rel,
                     raw,
                     memory: false,
-                    from: None,
+                    from: Some(src.root.clone()),
                 }),
                 Err(why) => skipped.push((format!("vault/{}", rel_key(&rel)), why)),
             },

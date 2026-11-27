@@ -178,7 +178,7 @@ fn date_back(vault: &Vault, ledger: &Ledger, dated: &[(String, PathBuf, SystemTi
     }
 }
 
-fn source_of(followed: &Path, key: &str) -> PathBuf {
+pub(super) fn source_of(followed: &Path, key: &str) -> PathBuf {
     let rest = key.strip_prefix("memory/").unwrap_or(key);
     match rest.split_once('/') {
         Some((project, file)) => followed.join(project).join("memory").join(file),

@@ -38,7 +38,8 @@ pub struct LedgerEntry {
     pub id: Option<String>,
     pub src_hash: String,
     pub dst_hash: String,
-    /// The memory folder the source was found in; unknown for a copy made before this was kept.
+    /// The folder the source was found in, a memory import's projects folder or the vault imported
+    /// from; unknown for a copy made before this was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<PathBuf>,
     /// The vault the copy is in.
@@ -54,6 +55,17 @@ impl LedgerEntry {
     fn of(&self, vault: &Path) -> bool {
         self.vault.as_deref().is_none_or(|v| v == vault)
     }
+}
+
+/// For each of `paths`, the source of the copy there when it has changed since. An unreadable
+/// ledger flags nothing: the notes are still worth showing.
+pub fn newer_sources<'a>(
+    dirs: &Dirs,
+    vault: &Vault,
+    paths: impl Iterator<Item = &'a str>,
+) -> Vec<Option<PathBuf>> {
+    let ledger = Ledger::load(dirs).unwrap_or_default();
+    paths.map(|path| ledger.moved_on(vault, path)).collect()
 }
 
 /// What each import copied, keyed by the source's key (`vault/<path>` or
@@ -77,6 +89,36 @@ impl Ledger {
     /// What was recorded of `key`'s copy in `vault`; a copy in another vault is no record.
     fn current(&self, key: &str, vault: &Path) -> Option<&LedgerEntry> {
         self.0.get(key).filter(|e| e.of(vault))
+    }
+
+    /// The source of the copy at `path` in `vault`, when that file no longer reads as it did when
+    /// copied. A source that is gone or cannot be read says nothing, and so does a copy whose
+    /// source folder was never recorded.
+    fn moved_on(&self, vault: &Vault, path: &str) -> Option<PathBuf> {
+        let (entry, source) = match self.current(&format!("vault/{path}"), &vault.root) {
+            Some(entry) => (entry, entry.from.as_ref()?.join(path)),
+            None => {
+                let rest = Path::new(path).strip_prefix(&vault.layout.memory).ok()?;
+                let key = format!("memory/{}", rel_key(rest));
+                let entry = self.current(&key, &vault.root)?;
+                (entry, follow::source_of(entry.from.as_ref()?, &key))
+            }
+        };
+        let now = std::fs::read(&source).ok()?;
+        (hash(&now) != entry.src_hash).then_some(source)
+    }
+
+    /// How many copies still in `vault` are behind their source.
+    pub fn behind(&self, vault: &Vault) -> usize {
+        self.0
+            .keys()
+            .filter_map(|key| match key.split_once('/')? {
+                ("vault", path) => Some(path.to_string()),
+                ("memory", rest) => Some(rel_key(&vault.layout.memory.join(rest))),
+                _ => None,
+            })
+            .filter(|path| vault.root.join(path).is_file() && self.moved_on(vault, path).is_some())
+            .count()
     }
 
     /// Whether a memory copy in `vault` came from `folder`, or may have.
