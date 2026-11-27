@@ -409,3 +409,155 @@ fn a_copy_of_unknown_origin_is_never_archived() {
     pass(&h);
     assert!(copy(&h, "one").is_some());
 }
+
+/// The archive takes the note's text out of the traces; the record of the archiving stays.
+#[test]
+fn a_pass_that_archives_keeps_its_trace() {
+    let (h, p) = following(&["one", "two"]);
+    p.remove("one");
+    pass(&h);
+    pass(&h);
+    let store = omit_agent_trace::Store::open(&h.home.path().join("data/traces.db")).unwrap();
+    let runs: Vec<_> = store
+        .runs()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.name == "memory follow")
+        .collect();
+    let spans: Vec<_> = runs
+        .iter()
+        .flat_map(|r| store.spans(&r.id).unwrap())
+        .collect();
+    assert!(spans.iter().any(|s| s.name == "archive"), "{spans:?}");
+    assert!(!format!("{spans:?}").contains("one first"), "{spans:?}");
+}
+
+#[cfg(unix)]
+mod renamed {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    /// Moves `-proj/memory` to `-new/memory` and leaves a link behind.
+    fn rename_project(p: &Projects) {
+        let new = p.path().join("-new");
+        fs::create_dir_all(&new).unwrap();
+        fs::rename(p.path().join("-proj/memory"), new.join("memory")).unwrap();
+        symlink(new.join("memory"), p.path().join("-proj/memory")).unwrap();
+    }
+
+    fn new_source(p: &Projects, text: &str) {
+        fs::write(
+            p.path().join("-new/memory/one.md"),
+            format!("---\nname: one\ndescription: {text}\ntype: project\n---\n"),
+        )
+        .unwrap();
+    }
+
+    fn new_copy(h: &Home) -> Option<String> {
+        fs::read_to_string(h.vault.path().join("working-memory/-new/one.md")).ok()
+    }
+
+    fn hits(h: &Home, query: &str) -> usize {
+        h.json(&["search", "--json", query])["hits"]
+            .as_array()
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn a_memory_folder_left_behind_a_link_moves_its_copies() {
+        let (h, p) = following(&["one"]);
+        let before = copy(&h, "one").unwrap();
+        rename_project(&p);
+        pass(&h);
+        assert_eq!(new_copy(&h), Some(before));
+        assert_eq!(copy(&h, "one"), None);
+        assert!(!archived(&h, "one"), "moved, not archived");
+        assert_eq!(hits(&h, "first"), 1);
+        new_source(&p, "one second");
+        pass(&h);
+        pass(&h);
+        assert!(new_copy(&h).unwrap().contains("one second"));
+        assert_eq!(copy(&h, "one"), None);
+    }
+
+    /// As after a one-time import, whose ledger names no source folder.
+    #[test]
+    fn a_renamed_project_moves_copies_of_unknown_origin() {
+        let (h, p) = following(&["one"]);
+        let path = h.home.path().join("data/import-ledger.json");
+        let mut ledger: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for entry in ledger.as_object_mut().unwrap().values_mut() {
+            let entry = entry.as_object_mut().unwrap();
+            entry.remove("from");
+            entry.remove("vault");
+        }
+        fs::write(&path, ledger.to_string()).unwrap();
+        rename_project(&p);
+        pass(&h);
+        assert!(new_copy(&h).unwrap().contains("one first"));
+        assert_eq!(copy(&h, "one"), None);
+    }
+
+    #[test]
+    fn an_edited_or_removed_copy_stays_so_after_a_rename() {
+        let (h, p) = following(&["one", "two"]);
+        h.put("working-memory/-proj/one.md", "my own words\n");
+        fs::remove_file(copy_path(h.vault.path(), "two")).unwrap();
+        rename_project(&p);
+        pass(&h);
+        assert!(new_copy(&h).unwrap().ends_with("my own words\n"));
+        assert!(!h.vault.path().join("working-memory/-new/two.md").exists());
+    }
+
+    /// Both names were copied before the old one became a link: one copy is left in search.
+    #[test]
+    fn a_second_copy_of_a_renamed_project_leaves_search() {
+        let (h, p) = following(&["one"]);
+        fs::create_dir_all(p.path().join("-new/memory")).unwrap();
+        new_source(&p, "one first");
+        pass(&h);
+        assert!(new_copy(&h).is_some());
+        fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
+        symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
+        pass(&h);
+        assert_eq!(copy(&h, "one"), None);
+        assert!(archived(&h, "one"));
+        assert!(new_copy(&h).is_some());
+    }
+
+    #[test]
+    fn a_link_that_leads_out_of_the_followed_folder_changes_nothing() {
+        let (h, p) = following(&["one"]);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let memory = elsewhere.path().join("memory");
+        fs::rename(p.path().join("-proj/memory"), &memory).unwrap();
+        symlink(&memory, p.path().join("-proj/memory")).unwrap();
+        // Something else to read, so the folder is not taken for an empty one.
+        fs::create_dir_all(p.path().join("-other/memory")).unwrap();
+        fs::write(p.path().join("-other/memory/x.md"), "x\n").unwrap();
+        pass(&h);
+        pass(&h);
+        assert!(copy(&h, "one").unwrap().contains("one first"));
+    }
+
+    #[test]
+    fn a_link_to_the_projects_folder_is_followed_as_what_it_points_at() {
+        let h = Home::new();
+        h.init();
+        let p = Projects::new();
+        p.write("one", "one first");
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("projects");
+        symlink(p.path(), &link).unwrap();
+        h.run(&["memory", "follow", link.to_str().unwrap()]);
+        assert!(copy(&h, "one").is_some());
+        // The link going does not: what it pointed at is what is followed.
+        fs::remove_file(&link).unwrap();
+        p.write("one", "one second");
+        pass(&h);
+        assert!(copy(&h, "one").unwrap().contains("one second"));
+    }
+}

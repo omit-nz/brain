@@ -150,26 +150,38 @@ pub fn prune(data: &Path, now: Timestamp) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Removes every trace and verdict that holds one of `sources`' text.
+/// Removes every trace and verdict that holds one of `sources`' text. One that fails does not
+/// stop the rest; the first failure is returned.
 pub fn purge(data: &Path, sources: &[String]) -> anyhow::Result<()> {
     if sources.is_empty() {
         return Ok(());
     }
+    let mut failed = None;
+    let mut note = |done: anyhow::Result<()>| {
+        if let Err(e) = done {
+            failed.get_or_insert(e);
+        }
+    };
     let verdicts = data.join(VERDICTS);
     if verdicts.exists() {
-        let verdicts = Verdicts::open(&verdicts)?;
-        for source in sources {
-            verdicts.purge(source)?;
-        }
+        note(Verdicts::open(&verdicts).and_then(|verdicts| {
+            let each = sources.iter().map(|s| verdicts.purge(s).map(drop));
+            // Collected first, so one failure does not stop the others being tried.
+            each.collect::<Vec<_>>().into_iter().collect()
+        }));
     }
     let traces = data.join(TRACES);
     if traces.exists() {
-        let traces = Store::open(&traces)?;
-        for source in sources {
-            traces.purge(source)?;
+        match Store::open(&traces) {
+            Ok(traces) => {
+                for source in sources {
+                    note(traces.purge(source).map(drop).map_err(Into::into));
+                }
+            }
+            Err(e) => note(Err(e.into())),
         }
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// A run recorded in `data`'s trace store for a job that is not a hook, so has no budget to keep:

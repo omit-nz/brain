@@ -92,7 +92,9 @@ fn follow_memory(
     let vault = Vault::open(&config.vault)?;
     let w = Written::for_memory(&config.me, clock.today(), &vault);
     let done = import::sync(dirs, &vault, followed, &w, |vault| {
-        let r = idx.reindex(vault)?;
+        // The whole vault is read, so a note someone is typing gets no id here either.
+        let now = clock.now();
+        let r = idx.reindex_settled(vault, now.checked_sub(SETTLE)?, now)?;
         forget(dirs, &r);
         Ok(())
     })?;
@@ -310,8 +312,15 @@ fn serve(
                 Ok(Some(done)) => {
                     changed |= done.changed();
                     embedding |= done.changed() && provider.is_some();
-                    (done.changed() || !done.skipped.is_empty())
-                        .then(|| format!("memory: {}", done.summary()))
+                    (done.changed() || !done.kept.is_empty() || !done.skipped.is_empty()).then(
+                        || {
+                            let mut said = format!("memory: {}", done.summary());
+                            for path in &done.kept {
+                                said.push_str(&format!("\nmemory: kept as it is: {path}"));
+                            }
+                            said
+                        },
+                    )
                 }
                 Ok(None) => None,
                 Err(e) => Some(format!("memory: {e:#}")),

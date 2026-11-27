@@ -36,7 +36,7 @@ Then `brain update` moves you to each new release once its signature checks. [do
 
 ## Auto-memory
 
-`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source two looks in a row found gone. A copy you have edited is left as it is, and a folder that is missing or empty changes nothing. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
+`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source two looks in a row found gone. A copy you have edited is left as it is, and a folder that is missing or empty changes nothing. When a project's memory folder becomes a link to another project's, as after moving a project folder, its copies move to the new name. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
 
 ## Connect your AI
 

@@ -1,17 +1,18 @@
 //! `brain memory follow`: the memory import run again and again, so a copy changes when its
 //! source does and leaves search when its source is gone. Nothing is taken away on doubt: only a
-//! copy this folder gave, untouched since, whose source two passes in a row found gone.
+//! copy this folder gave, untouched since, whose source two passes in a row found gone. A project
+//! whose memory folder is now a link to another's was renamed, and its copies move with it.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use brain_note::{Vault, rel_key};
+use brain_note::{Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{archive, is_link};
+use brain_platform::fs::{archive, is_link, rename_within};
 use brain_reflex::trace::{Call, Kind, Reply};
 use serde_json::json;
 
-use super::{Ledger, Written, classify_sources, hash, memory, settle, write_one};
+use super::{Ledger, LedgerEntry, Written, classify_sources, hash, memory, settle, write_one};
 
 /// What one pass did, by vault path.
 #[derive(Debug, Default)]
@@ -47,8 +48,9 @@ struct Change {
     what: &'static str,
     key: String,
     file: PathBuf,
-    id: Option<String>,
-    text: String,
+    /// The note and its text, when the change put text in the vault. One that took text away
+    /// holds neither: the trace would be purged with the note it records the going of.
+    put: Option<(Option<String>, String)>,
 }
 
 /// One pass over `followed`. The caller holds the import lock. `index` brings the index up to
@@ -82,18 +84,23 @@ pub fn sync(
             followed.display()
         );
     }
-    let mut out = Followed {
-        skipped: skipped
-            .into_iter()
-            .map(|(key, why)| (key, why.describe()))
-            .collect(),
-        ..Followed::default()
-    };
     let found: Vec<String> = all.iter().map(|s| s.key.clone()).collect();
+    let mut out = Followed::default();
+    let mut changes = Vec::new();
+    renamed(
+        vault,
+        followed,
+        &skipped,
+        &found,
+        &mut ledger,
+        &mut out,
+        &mut changes,
+    );
+    out.skipped
+        .extend(skipped.into_iter().map(|(key, why)| (key, why.describe())));
     let mut plan = Default::default();
     let todo = classify_sources(all, vault, &ledger, &mut plan);
-    out.kept = plan.conflicts;
-    let mut changes = Vec::new();
+    out.kept.extend(plan.conflicts);
     let mut written = Vec::new();
     for (source, seen) in todo {
         let what = if seen.is_some() { "update" } else { "copy" };
@@ -106,8 +113,7 @@ pub fn sync(
                     what,
                     key: key.clone(),
                     file,
-                    id,
-                    text,
+                    put: Some((id, text)),
                 });
                 written.push(key);
                 if what == "copy" {
@@ -149,6 +155,125 @@ fn source_of(followed: &Path, key: &str) -> PathBuf {
     }
 }
 
+/// Where the copy of `key` is in the vault.
+fn copy_of(vault: &Vault, key: &str) -> PathBuf {
+    vault.layout.memory.join(key.trim_start_matches("memory/"))
+}
+
+/// A memory folder that is now a link to another project's folder here: Claude Code's folder was
+/// renamed and left the link behind. Its copies move to the new name, so a memory stays one note,
+/// with the person's edits and removals. Where the new name already has its own copy, the old one
+/// is a second copy and goes as a gone source's would.
+fn renamed(
+    vault: &Vault,
+    followed: &Path,
+    skipped: &[(String, Skip)],
+    found: &[String],
+    ledger: &mut Ledger,
+    out: &mut Followed,
+    changes: &mut Vec<Change>,
+) {
+    for (link, why) in skipped {
+        if !matches!(why, Skip::Link) {
+            continue;
+        }
+        let Some(target) = source_of(followed, &format!("{link}/"))
+            .canonicalize()
+            .ok()
+            .filter(|t| t.ends_with("memory"))
+            .and_then(|t| {
+                t.parent()?
+                    .strip_prefix(followed)
+                    .ok()?
+                    .to_str()
+                    .map(String::from)
+            })
+        else {
+            continue;
+        };
+        let under = format!("{link}/");
+        let keys: Vec<String> = ledger
+            .0
+            .iter()
+            .filter(|(key, e)| {
+                key.starts_with(&under)
+                    && e.of(&vault.root)
+                    && e.from.as_deref().is_none_or(|from| from == followed)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            let new = format!("memory/{target}/{}", &key[under.len()..]);
+            // A target read this pass: one of its files is not there to move to otherwise.
+            if !found.contains(&new) {
+                continue;
+            }
+            let (from, to) = (copy_of(vault, &key), copy_of(vault, &new));
+            let taken = ledger.current(&new, &vault.root).is_some()
+                || std::fs::symlink_metadata(vault.root.join(&to)).is_ok();
+            if taken {
+                if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
+                    ledger.0.remove(&key);
+                }
+                continue;
+            }
+            match rename_within(&vault.root, &from, &to) {
+                Ok(()) => {
+                    out.updated.push(rel_key(&to));
+                    changes.push(Change {
+                        what: "move",
+                        key: new.clone(),
+                        file: source_of(followed, &new),
+                        put: None,
+                    });
+                }
+                // A copy the person removed stays removed under the new name.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    out.skipped.push((key, format!("not moved: {e}")));
+                    continue;
+                }
+            }
+            if let Some(entry) = ledger.0.remove(&key) {
+                ledger.0.insert(new, entry);
+            }
+        }
+    }
+}
+
+/// Takes the copy of a source that is no more: archived as the ledger wrote it, kept and said when
+/// the person's hand is on it. False when it could not be dealt with, so the next pass tries again.
+fn retire(
+    vault: &Vault,
+    followed: &Path,
+    key: &str,
+    entry: &LedgerEntry,
+    out: &mut Followed,
+    changes: &mut Vec<Change>,
+) -> bool {
+    let rel = copy_of(vault, key);
+    match std::fs::read(vault.root.join(&rel)) {
+        Ok(copy) if hash(&copy) == entry.dst_hash => {
+            if let Err(e) = archive(&vault.root, &rel, &vault.layout.archive) {
+                out.skipped.push((key.into(), format!("not archived: {e}")));
+                return false;
+            }
+            out.archived.push(rel_key(&rel));
+            changes.push(Change {
+                what: "archive",
+                key: key.into(),
+                file: source_of(followed, key),
+                put: None,
+            });
+        }
+        // The person's own words now: kept, said once and no longer followed.
+        Ok(_) => out.kept.push(rel_key(&rel)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
+    }
+    true
+}
+
 /// Deals with the copies whose source is gone: not found, on this pass and the one before.
 fn gone(
     vault: &Vault,
@@ -165,40 +290,18 @@ fn gone(
         {
             continue;
         }
-        let file = source_of(followed, key);
         // Any other answer than "not found" means unread, not gone.
         let not_found = matches!(
-            std::fs::symlink_metadata(&file),
+            std::fs::symlink_metadata(source_of(followed, key)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound
         );
         if !not_found || !std::mem::replace(&mut entry.missing, true) {
             entry.missing = not_found;
             continue;
         }
-        let rel = vault.layout.memory.join(key.trim_start_matches("memory/"));
-        match std::fs::read(vault.root.join(&rel)) {
-            Ok(copy) if hash(&copy) == entry.dst_hash => {
-                if let Err(e) = archive(&vault.root, &rel, &vault.layout.archive) {
-                    // Kept in the ledger, so the next pass tries again.
-                    out.skipped
-                        .push((key.clone(), format!("not archived: {e}")));
-                    continue;
-                }
-                out.archived.push(rel_key(&rel));
-                changes.push(Change {
-                    what: "archive",
-                    key: key.clone(),
-                    file,
-                    id: entry.id.clone(),
-                    text: String::from_utf8_lossy(&copy).into_owned(),
-                });
-            }
-            // The person's own words now: kept, said once and no longer followed.
-            Ok(_) => out.kept.push(rel_key(&rel)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => continue,
+        if retire(vault, followed, key, entry, out, changes) {
+            forget.push(key.clone());
         }
-        forget.push(key.clone());
     }
     for key in forget {
         ledger.0.remove(&key);
@@ -217,10 +320,14 @@ fn trace(dirs: &Dirs, changes: &[Change]) {
             let request = json!({ "key": change.key });
             let mut call = Call::new(Kind::Read, "source", &request);
             let mut sources = vec![format!("file:{}", change.file.display())];
-            sources.extend(change.id.as_ref().map(|id| format!("note:{id}")));
+            let (id, text) = change
+                .put
+                .as_ref()
+                .map_or((None, None), |(id, text)| (id.as_ref(), Some(text)));
+            sources.extend(id.map(|id| format!("note:{id}")));
             let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
             call.sources = &sources;
-            let _ = run.call(call, || Ok(Reply::new(json!(change.text))));
+            let _ = run.call(call, || Ok(Reply::new(json!(text))));
             Ok(())
         });
     }

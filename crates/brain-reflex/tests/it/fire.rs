@@ -526,3 +526,38 @@ fn a_purge_takes_the_verdicts_and_traces_that_hold_a_source() {
         "only the run that never read the file: its payload read and step"
     );
 }
+
+/// A reader in the way delays clearing the log, which the trace crate reports as an error.
+#[test]
+fn a_busy_trace_store_still_purges_every_source() {
+    let home = Home::temp();
+    let env = home.env();
+    for session in ["s-1", "s-2"] {
+        let payload = home.payload(session, "alpha\n");
+        fire(Point::Prompt, payload, &[], &[SHADOW], &env).unwrap();
+    }
+    let reader = rusqlite::Connection::open(env.data.join(TRACES)).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM runs")
+        .unwrap();
+    let sources = ["session:s-1".to_string(), "session:s-2".to_string()];
+    assert!(brain_reflex::purge(&env.data, &sources).is_err());
+    reader.execute_batch("COMMIT").unwrap();
+    assert_eq!(home.runs().len(), 0);
+}
+
+#[test]
+fn a_verdict_store_that_cannot_be_purged_still_purges_the_traces() {
+    let home = Home::temp();
+    let env = home.env();
+    let payload = home.payload("s-1", "alpha\n");
+    fire(Point::Prompt, payload, &[], &[SHADOW], &env).unwrap();
+    rusqlite::Connection::open(env.data.join(VERDICTS))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER no BEFORE DELETE ON verdicts BEGIN SELECT RAISE(ABORT, 'no'); END",
+        )
+        .unwrap();
+    assert!(brain_reflex::purge(&env.data, &["session:s-1".to_string()]).is_err());
+    assert_eq!(home.runs().len(), 0);
+}

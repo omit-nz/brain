@@ -936,3 +936,51 @@ fn a_running_daemon_follows_a_new_vault() {
     );
     assert_eq!(found(&h, "herons"), Vec::<String>::new());
 }
+
+/// A project's memory folder under a followed folder, followed.
+fn followed_memory(h: &Home, names: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let projects = tempfile::tempdir().unwrap();
+    let memory = projects.path().join("-proj/memory");
+    fs::create_dir_all(&memory).unwrap();
+    for name in names {
+        fs::write(memory.join(format!("{name}.md")), format!("{name} first\n")).unwrap();
+    }
+    h.run(&["memory", "follow", projects.path().to_str().unwrap()]);
+    (projects, memory)
+}
+
+#[test]
+fn a_memory_pass_writes_no_id_into_a_note_saved_moments_ago() {
+    let h = Home::new();
+    h.init();
+    let (_projects, memory) = followed_memory(&h, &["plan"]);
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "100")]);
+    d.wait_for_passes(1);
+    let typed = "a note still being typed\n";
+    h.put("typing.md", typed);
+    fs::write(memory.join("plan.md"), "the egret plan\n").unwrap();
+    until(
+        "the changed memory",
+        || !found(&h, "egret").is_empty(),
+        || d.stderr(),
+    );
+    assert_eq!(
+        fs::read_to_string(h.vault.path().join("typing.md")).unwrap(),
+        typed
+    );
+}
+
+#[test]
+fn the_daemon_names_a_copy_it_kept_when_its_source_went() {
+    let h = Home::new();
+    h.init();
+    let (_projects, memory) = followed_memory(&h, &["plan", "other"]);
+    h.put("working-memory/-proj/plan.md", "my own words\n");
+    fs::remove_file(memory.join("plan.md")).unwrap();
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "100")]);
+    until(
+        "the kept copy named",
+        || d.stderr().contains("working-memory/-proj/plan.md"),
+        || d.stderr(),
+    );
+}
