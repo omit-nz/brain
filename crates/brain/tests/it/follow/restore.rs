@@ -797,7 +797,7 @@ fn an_archived_file_that_cannot_be_read_is_said_and_left() {
 }
 
 #[test]
-fn a_deleted_archived_file_superseded_before_the_second_look_is_still_purged() {
+fn a_deleted_archived_file_superseded_before_the_second_look_purges_nothing() {
     let (h, p) = two();
     let one = id(&h, "one");
     archive_one(&h, &p);
@@ -808,7 +808,7 @@ fn a_deleted_archived_file_superseded_before_the_second_look_is_still_purged() {
     follow(&h, &other);
     pass(&h);
     assert!(records(&h).is_empty(), "{:?}", records(&h));
-    assert_eq!(traced(&h, &one), 0);
+    assert!(traced(&h, &one) >= 1);
 }
 
 /// A changed source's fresh copy shares the archived memory's id, and so its traces.
@@ -842,7 +842,7 @@ fn a_copy_path_that_cannot_be_read_is_said_and_left() {
 /// An archived file that cannot be read can outlast a newer record of the same source.
 #[cfg(unix)]
 #[test]
-fn of_two_records_of_one_source_the_newer_comes_back() {
+fn a_newer_archive_of_a_source_takes_the_older_records_place() {
     use std::os::unix::fs::PermissionsExt;
     let (h, p, _, _) = archived_one();
     p.write("one", "one second");
@@ -855,10 +855,14 @@ fn of_two_records_of_one_source_the_newer_comes_back() {
     p.remove("one");
     pass(&h);
     pass(&h);
-    assert_eq!(records(&h).len(), 2, "{:?}", records(&h));
+    assert_eq!(records(&h).len(), 1, "{:?}", records(&h));
+    // The older file, readable again and then deleted, ends nothing.
+    mode(0o644);
+    fs::remove_file(archive_path(&h, "one")).unwrap();
+    pass(&h);
+    pass(&h);
     fs::write(p.file("one"), newer.0).unwrap();
     pass(&h);
-    mode(0o644);
     assert_eq!(copy(&h, "one"), Some(newer.1));
 }
 

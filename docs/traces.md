@@ -13,10 +13,11 @@ step can be read and replayed later on the same machine.
   at the next index pass, labelled verdicts too. That is tried once: what a pass that was cut short
   or a busy store misses ages out with the rest.
 - A followed memory that `brain memory follow` archived is set aside, not removed: archiving purges
-  nothing. Deleting its archived file while brain still tracks it purges its runs and verdicts. A
-  memory that returns with other words is copied under the same id, so removing that copy purges
-  them too. A fresh copy under a new id, by an import or another followed folder, leaves the old
-  file untracked, and deleting it then purges nothing. An id is archived when brain's archive
+  nothing. Deleting its archived file while the memory is still out of search purges its runs and
+  verdicts, once two passes have found the file gone. A memory that returns with other words is
+  copied under the same id, so removing that copy can purge them too. Once the memory is in the
+  vault again, restored, rewritten or copied afresh, deleting an old file under `_archive` purges
+  nothing. An id is archived when brain's archive
   records name it and no note in the index holds it. Anything that gives an agent or a person text
   from a run or a verdict must say which of its sources are archived, worked out when it is read.
   Nothing reads that text back yet.

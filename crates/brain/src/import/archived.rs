@@ -112,11 +112,11 @@ impl Archive {
             .count()
     }
 
-    /// The source hash of `key`'s latest archived copy in `vault`.
+    /// The source hash of `key`'s archived copy in `vault`.
     pub(super) fn src_hash_of(&self, key: &str, vault: &Path) -> Option<&str> {
         self.0
             .iter()
-            .rfind(|r| r.key == key && r.vault == vault)
+            .find(|r| r.key == key && r.vault == vault)
             .map(|r| r.src_hash.as_str())
     }
 
@@ -134,6 +134,9 @@ impl Archive {
         followed: &Path,
         vault: &Path,
     ) {
+        // One record a source: an older one, left only while its file could not be read, gives
+        // way, and its file stays where it is.
+        self.0.retain(|r| r.key != key || r.vault != vault);
         self.0.push(Record {
             key: key.to_string(),
             path,
@@ -184,14 +187,8 @@ impl Archive {
                     return true;
                 }
                 // Cut short before the move, restored, or a newer copy has taken its place. The
-                // archived file, if there, is left with its words, so nothing is purged; one the
-                // person had already deleted is purged now, while it is still known of.
-                Some(l) => {
-                    if archived.is_none() && l.id != r.id {
-                        deleted.extend(r.id.clone());
-                    }
-                    false
-                }
+                // archived file, if there, is left with its words, so nothing is purged.
+                Some(_) => false,
                 None => {
                     // While the archived file is still there, only the very bytes are it: a
                     // fresh copy written under the same id is not.
@@ -252,11 +249,10 @@ impl Archive {
         let mut returning = HashMap::new();
         let mut left = Vec::new();
         for source in sources {
-            // Latest first: an older one outlasts a newer only while its file cannot be read.
             let record = self
                 .0
                 .iter()
-                .rfind(|r| r.key == source.key && r.vault == vault.root && r.from == followed);
+                .find(|r| r.key == source.key && r.vault == vault.root && r.from == followed);
             let Some(r) = record.filter(|_| ledger.current(&source.key, &vault.root).is_none())
             else {
                 left.push(source);
