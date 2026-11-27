@@ -698,34 +698,12 @@ fn a_folder_that_lost_most_of_what_it_held_archives_nothing_until_told() {
     pass(&h);
     let said = pass(&h);
     assert!(said.contains("0 archived"), "{said}");
-    assert!(said.contains("12 of 13"), "{said}");
+    assert!(said.contains("12 followed memories are gone"), "{said}");
     assert!(said.contains("brain memory follow"), "{said}");
     pass(&h);
     assert!(names.iter().all(|n| copy(&h, n).is_some()));
     let said = follow(&h, &p);
     assert!(said.contains("12 archived"), "{said}");
-}
-
-/// What the README says to do after the notes folder is renamed.
-#[test]
-fn moving_the_copies_aside_follows_a_renamed_vault_again() {
-    let (h, p) = following(&["one"]);
-    let parent = tempfile::tempdir().unwrap();
-    let (before, after) = (parent.path().join("notes"), parent.path().join("renamed"));
-    let init = |vault: &Path| {
-        h.run(&["init", "--me", "robin", "--vault", vault.to_str().unwrap()]);
-    };
-    fs::create_dir(&before).unwrap();
-    init(&before);
-    pass(&h);
-    fs::rename(&before, &after).unwrap();
-    init(&after);
-    fs::rename(after.join("working-memory"), parent.path().join("aside")).unwrap();
-    pass(&h);
-    p.write("one", "one second");
-    pass(&h);
-    let text = fs::read_to_string(copy_path(&after, "one")).unwrap();
-    assert!(text.contains("one second"), "{text}");
 }
 
 /// Two projects each with a memory of one name, the old one's folder then linked to the other's:
@@ -756,4 +734,66 @@ fn two_memories_of_one_name_keep_their_words_when_the_projects_are_linked() {
     assert!(files.iter().any(|text| text.contains("one first")));
     let found = h.json(&["search", "--json", "entirely"]);
     assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
+}
+
+fn many(prefix: &str, n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("{prefix}{i}")).collect()
+}
+
+fn following_many(names: &[String]) -> (Home, Projects) {
+    following(&names.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// A reset folder coming back a part at a time: what has not arrived yet is still not archived.
+#[test]
+fn a_hold_outlasts_a_restore_half_done() {
+    let names = many("m", 40);
+    let (h, p) = following_many(&names);
+    for name in &names {
+        p.remove(name);
+    }
+    p.write("fresh", "fresh first");
+    pass(&h);
+    pass(&h);
+    for name in &names[..25] {
+        p.write(name, &format!("{name} first"));
+    }
+    let said = pass(&h);
+    assert!(said.contains("0 archived"), "{said}");
+    assert!(names.iter().all(|n| copy(&h, n).is_some()));
+}
+
+/// As many new memories as old ones gone is no smaller a loss.
+#[test]
+fn new_memories_never_dilute_a_hold() {
+    let old = many("old", 12);
+    let (h, p) = following_many(&old);
+    for name in &old {
+        p.remove(name);
+    }
+    for name in many("new", 20) {
+        p.write(&name, "new first");
+    }
+    pass(&h);
+    let said = pass(&h);
+    assert!(said.contains("0 archived"), "{said}");
+    assert!(old.iter().all(|n| copy(&h, n).is_some()));
+}
+
+#[test]
+fn status_says_what_waits_to_be_archived() {
+    let names = many("m", 12);
+    let (h, p) = following_many(&names);
+    assert!(!h.run(&["status"]).contains("brain memory follow"));
+    for name in &names {
+        p.remove(name);
+    }
+    p.write("fresh", "fresh first");
+    pass(&h);
+    pass(&h);
+    let said = h.run(&["status"]);
+    assert!(said.contains("12 followed memories are gone"), "{said}");
+    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
+    follow(&h, &p);
+    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 0);
 }

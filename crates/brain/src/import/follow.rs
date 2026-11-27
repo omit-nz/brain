@@ -2,7 +2,7 @@
 //! source does and leaves search when its source is gone. Nothing is taken away on doubt: only a
 //! copy this folder gave, untouched since, whose source two passes in a row found gone. A project
 //! whose memory folder is now a link to another's was renamed, and its copies move with it. A pass
-//! that would take most of what it follows takes nothing until the person says so.
+//! that would archive more than a few at once archives nothing until the person says so.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -16,7 +16,7 @@ use serde_json::json;
 
 use super::{Ledger, LedgerEntry, Written, classify_sources, hash, memory, settle, write_one};
 
-/// Gone memories archived without asking, even when they are most of those followed.
+/// The most gone memories a pass archives without asking.
 const UNASKED: usize = 10;
 
 /// What one pass did, by vault path.
@@ -155,7 +155,7 @@ pub fn sync(
     }
     date_back(vault, &ledger, &dated);
     gone(vault, followed, told, &mut ledger, &mut out, &mut changes);
-    // Saved before the index runs, so a pass cut short never forgets what it wrote.
+    // Saved before the index runs, so a pass cut short there never forgets what it wrote.
     ledger.save(dirs)?;
     trace(dirs, &changes);
     if out.changed() {
@@ -320,9 +320,28 @@ fn retire(
     true
 }
 
-/// Deals with the copies whose source is gone: not found, on this pass and the one before. More
-/// than a few going at once that are also most of those followed looks like a folder reset or
-/// replaced, so then none is taken until the person says so.
+/// What to say of `gone` followed memories that wait for the person's word.
+pub fn held_line(gone: usize, followed: &Path) -> String {
+    format!(
+        "{gone} followed memories are gone from {followed}; none archived. If that is right, run `brain memory follow \"{followed}\"`",
+        followed = followed.display(),
+    )
+}
+
+/// How many copies of memories gone from `followed` wait for that word: the last pass did not find
+/// them, and there are too many to archive unasked.
+pub fn waiting(ledger: &Ledger, vault: &Path, followed: &Path) -> usize {
+    let gone = ledger
+        .0
+        .values()
+        .filter(|e| e.missing && e.from.as_deref() == Some(followed) && e.of(vault))
+        .count();
+    if gone > UNASKED { gone } else { 0 }
+}
+
+/// Deals with the copies whose source is gone: not found, on this pass and the one before. Many at
+/// once looks like a folder reset, replaced or half restored, so then none is taken until the
+/// person says so.
 fn gone(
     vault: &Vault,
     followed: &Path,
@@ -331,7 +350,7 @@ fn gone(
     out: &mut Followed,
     changes: &mut Vec<Change>,
 ) {
-    let (mut all, mut ripe) = (0, Vec::new());
+    let mut ripe = Vec::new();
     for (key, entry) in &mut ledger.0 {
         if !key.starts_with("memory/")
             || entry.from.as_deref() != Some(followed)
@@ -339,7 +358,6 @@ fn gone(
         {
             continue;
         }
-        all += 1;
         // Any other answer than "not found" means unread, not gone.
         let gone = matches!(
             std::fs::symlink_metadata(source_of(followed, key)),
@@ -349,12 +367,8 @@ fn gone(
             ripe.push(key.clone());
         }
     }
-    if !told && ripe.len() > UNASKED && ripe.len() * 2 > all {
-        out.held = Some(format!(
-            "{} of {all} followed memories are gone from {followed}; none archived. If that is right, run `brain memory follow \"{followed}\"`",
-            ripe.len(),
-            followed = followed.display(),
-        ));
+    if !told && ripe.len() > UNASKED {
+        out.held = Some(held_line(ripe.len(), followed));
         return;
     }
     for key in ripe {

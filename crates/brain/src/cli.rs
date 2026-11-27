@@ -930,10 +930,13 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
-    let behind = match Vault::open(&config.vault) {
-        Ok(vault) => Ledger::load(dirs).map_or(0, |ledger| ledger.behind(&vault)),
-        Err(_) => 0,
-    };
+    let (mut behind, mut waiting) = (0, 0);
+    if let (Ok(vault), Ok(ledger)) = (Vault::open(&config.vault), Ledger::load(dirs)) {
+        behind = ledger.behind(&vault);
+        waiting = config.memory.follow.as_deref().map_or(0, |followed| {
+            import::waiting(&ledger, &vault.root, followed)
+        });
+    }
     if let Some(why) = other {
         if as_json {
             let v = json!({
@@ -966,6 +969,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             "skipped": s.skipped,
             "unidentified": s.unidentified,
             "behind_source": behind,
+            "memories_waiting": waiting,
             "vault": config.vault,
             "version": version,
         });
@@ -991,6 +995,11 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
         0 => {}
         1 => lines.push("1 copy is behind its source".into()),
         n => lines.push(format!("{n} copies are behind their source")),
+    }
+    if let Some(followed) = config.memory.follow.as_deref()
+        && waiting > 0
+    {
+        lines.push(import::held_line(waiting, followed));
     }
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());

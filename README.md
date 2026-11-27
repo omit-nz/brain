@@ -4,11 +4,11 @@ Leave a brain at home. brain keeps a folder of your Markdown notes searchable on
 
 ## What works today (0.2.5)
 
-- Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, says when each note it finds last changed and whether the file it was copied from has changed since, and keeps the questions nothing answered (`brain gaps`).
+- Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, says when each note it finds last changed and, for a copy whose source it has recorded, whether that file has changed since, and keeps the questions nothing answered (`brain gaps`).
 - Claude Code and Claude Desktop search your notes, capture new ones into an inbox, correct a note and list what is due for review.
 - A background daemon indexes a note soon after you save it (macOS; on Linux you run `brain daemon` yourself).
 - Rooms, so AI sessions on one computer can leave each other messages.
-- A Claude Code plugin: a session starts with the notes due for review and the memory indexes you name. What brain reads and decides at each hook is kept on your computer for 30 days ([docs/traces.md](docs/traces.md)).
+- A Claude Code plugin: a session starts with the notes due for review and the memory indexes you name. What brain reads and decides at each hook is kept on your computer and ages out ([docs/traces.md](docs/traces.md)).
 - Copies of Claude Code's auto-memory that follow their sources (`brain memory follow`).
 - Import of a learning-loop vault.
 - Signed releases and updates.
@@ -38,7 +38,7 @@ Then `brain update` moves you to each new release once its signature checks. [do
 
 ## Auto-memory
 
-`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source two looks in a row found gone. A copy you have edited is left as it is, and a folder that is missing or empty changes nothing. When more than ten go at once and they are most of what it follows, as when the folder is reset, none is archived until you run `brain memory follow` again. When a project's memory folder becomes a link to another project's, its copies move to the new name; where brain had already copied a memory under both, the copy under the old name is archived, or kept if you edited it. To move a project's memory yourself, run `brain memory unfollow`, move it, link the old name to it, and follow again. If you rename your notes folder or switch to another, move its `working-memory` folder aside and run `brain memory run`: copies made before do not follow their sources in a new place. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
+`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source it has seen there and two looks in a row then found gone. A copy you have edited is left as it is, and a folder that is missing or empty changes nothing. When more than ten are due to be archived at once, as when the folder is reset, none is until you run `brain memory follow` again; `brain status` says so. `brain memory run` makes one pass now, and `brain memory unfollow` stops.\n\nWhen a project's memory folder becomes a link to another project's, its copies move to the new name; where brain had already copied a memory under both, the copy under the old name is archived, or kept if you edited it. To move a project's memory yourself, run `brain memory unfollow`, move it, link the old name to it, and follow again; run no import in between. Do not rename or switch your notes folder while brain follows memory: copies made before stop following their sources, ones you had removed or moved can be copied again, and there is no supported way yet to tie them back.
 
 ## Connect your AI
 

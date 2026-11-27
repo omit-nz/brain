@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use blocklist::Blocklist;
-pub use follow::{Followed, sync};
+pub use follow::{Followed, held_line, sync, waiting};
 pub use report::report;
 
 /// Days over which first reviews are spread.

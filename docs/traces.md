@@ -9,7 +9,8 @@ step can be read and replayed later on the same machine.
 - The same file holds a run for each pass of `brain memory follow` that changed something, with the
   full text of each memory it copied or updated.
 - When a note is removed, or stops being shared, the runs and verdicts holding its text are purged
-  at the next index pass.
+  at the next index pass. That is tried once: what a pass that was cut short or a busy store misses
+  ages out with the rest.
 - `verdicts.db`, beside it: one row per reflex per hook, with what it picked and any label you
   give it. A row with no label is dropped after 90 days.
 
