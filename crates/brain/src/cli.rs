@@ -260,7 +260,11 @@ enum MemoryAction {
     /// Stop following; the copies stay.
     Unfollow,
     /// One pass now; the daemon makes one every minute.
-    Run,
+    Run {
+        /// Archive the copies brain is holding because too many were gone at once.
+        #[arg(long)]
+        archive_gone: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -446,8 +450,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
 
 fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::Result<()> {
     let mut config = Config::load(dirs)?;
-    // Naming the folder is the person's word that what is gone from it is gone.
-    let told = matches!(action, MemoryAction::Follow { .. });
+    // The one word that archives what is held: naming the folder again is not it.
+    let told = matches!(action, MemoryAction::Run { archive_gone: true });
     match action {
         MemoryAction::Unfollow => {
             config.memory.follow = None;
@@ -462,7 +466,7 @@ fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::R
             config.memory.follow = Some(found);
             config.save(dirs)?;
         }
-        MemoryAction::Run => {}
+        MemoryAction::Run { .. } => {}
     }
     let Some(followed) = &config.memory.follow else {
         anyhow::bail!("brain follows no auto-memory; run `brain memory follow <projects folder>`");
@@ -481,6 +485,7 @@ fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::R
     })?;
     let mut lines = vec![done.summary()];
     lines.extend(done.held.clone());
+    lines.extend(done.archived.iter().map(|p| format!("archived: {p}")));
     lines.extend(done.kept.iter().map(|p| format!("kept as it is: {p}")));
     lines.extend(
         done.skipped
@@ -930,12 +935,20 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
-    let (mut behind, mut waiting) = (0, 0);
-    if let (Ok(vault), Ok(ledger)) = (Vault::open(&config.vault), Ledger::load(dirs)) {
-        behind = ledger.behind(&vault);
-        waiting = config.memory.follow.as_deref().map_or(0, |followed| {
-            import::waiting(&ledger, &vault.root, followed)
-        });
+    // `None` for the count held when the ledger cannot say.
+    let (mut behind, mut waiting, mut unread) = (0, Some(0), None);
+    if let Ok(vault) = Vault::open(&config.vault) {
+        match Ledger::load(dirs) {
+            Ok(ledger) => {
+                behind = ledger.behind(&vault);
+                let followed = config.memory.follow.as_deref();
+                waiting = Some(followed.map_or(0, |f| import::waiting(&ledger, &vault, f)));
+            }
+            Err(e) => {
+                waiting = None;
+                unread = Some(format!("the import ledger cannot be read: {e:#}"));
+            }
+        }
     }
     if let Some(why) = other {
         if as_json {
@@ -996,11 +1009,8 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
         1 => lines.push("1 copy is behind its source".into()),
         n => lines.push(format!("{n} copies are behind their source")),
     }
-    if let Some(followed) = config.memory.follow.as_deref()
-        && waiting > 0
-    {
-        lines.push(import::held_line(waiting, followed));
-    }
+    lines.extend(waiting.filter(|n| *n > 0).map(import::held_line));
+    lines.extend(unread);
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());
     }

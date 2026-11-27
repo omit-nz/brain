@@ -699,10 +699,13 @@ fn a_folder_that_lost_most_of_what_it_held_archives_nothing_until_told() {
     let said = pass(&h);
     assert!(said.contains("0 archived"), "{said}");
     assert!(said.contains("12 followed memories are gone"), "{said}");
-    assert!(said.contains("brain memory follow"), "{said}");
+    assert!(said.contains("brain memory run --archive-gone"), "{said}");
     pass(&h);
     assert!(names.iter().all(|n| copy(&h, n).is_some()));
+    // Naming the folder again is not the word.
     let said = follow(&h, &p);
+    assert!(said.contains("0 archived"), "{said}");
+    let said = archive_gone(&h);
     assert!(said.contains("12 archived"), "{said}");
 }
 
@@ -755,7 +758,7 @@ fn a_hold_outlasts_a_restore_half_done() {
     p.write("fresh", "fresh first");
     pass(&h);
     pass(&h);
-    for name in &names[..25] {
+    for name in &names[..38] {
         p.write(name, &format!("{name} first"));
     }
     let said = pass(&h);
@@ -784,7 +787,7 @@ fn new_memories_never_dilute_a_hold() {
 fn status_says_what_waits_to_be_archived() {
     let names = many("m", 12);
     let (h, p) = following_many(&names);
-    assert!(!h.run(&["status"]).contains("brain memory follow"));
+    assert!(!h.run(&["status"]).contains("--archive-gone"));
     for name in &names {
         p.remove(name);
     }
@@ -794,6 +797,182 @@ fn status_says_what_waits_to_be_archived() {
     let said = h.run(&["status"]);
     assert!(said.contains("12 followed memories are gone"), "{said}");
     assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
-    follow(&h, &p);
+    // A copy no longer at its path waits for nothing.
+    fs::remove_file(copy_path(h.vault.path(), "m0")).unwrap();
+    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 11);
+    fs::write(h.home.path().join("data/import-ledger.json"), "not json").unwrap();
+    let said = h.run(&["status"]);
+    assert!(said.contains("import ledger cannot be read"), "{said}");
+    assert!(h.json(&["status", "--json"])["memories_waiting"].is_null());
+}
+
+fn archive_gone(h: &Home) -> String {
+    h.run(&["memory", "run", "--archive-gone"])
+}
+
+#[cfg(unix)]
+mod held_links {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    /// The memories of `-proj`, copied under `-new` too, with other words.
+    fn also_under_new(p: &Projects, names: &[String]) {
+        let new = p.path().join("-new/memory");
+        fs::create_dir_all(&new).unwrap();
+        for name in names {
+            fs::write(
+                new.join(format!("{name}.md")),
+                format!("other words {name}\n"),
+            )
+            .unwrap();
+        }
+    }
+
+    fn link_old_to_new(p: &Projects) {
+        fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
+        symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
+    }
+
+    #[test]
+    fn linking_one_project_to_another_archives_no_crowd_unasked() {
+        let names = many("m", 12);
+        let (h, p) = following_many(&names);
+        also_under_new(&p, &names);
+        pass(&h);
+        link_old_to_new(&p);
+        for _ in 0..3 {
+            let said = pass(&h);
+            assert!(said.contains("0 archived"), "{said}");
+        }
+        assert!(names.iter().all(|n| copy(&h, n).is_some()));
+        assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
+        let said = archive_gone(&h);
+        assert!(said.contains("12 archived"), "{said}");
+    }
+
+    /// Every markdown file's text anywhere in the vault, the archive included.
+    fn vault_texts(h: &Home) -> Vec<String> {
+        let mut dirs = vec![h.vault.path().to_path_buf()];
+        let mut texts = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for e in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+                if e.is_dir() {
+                    dirs.push(e);
+                } else {
+                    texts.push(fs::read_to_string(e).unwrap_or_default());
+                }
+            }
+        }
+        texts
+    }
+
+    /// A person tidies away the second copy, then links: the old copy is the only one left.
+    #[test]
+    fn a_copy_that_is_the_only_one_left_is_moved_not_archived() {
+        let (h, p) = following(&["one"]);
+        fs::create_dir_all(p.path().join("-new/memory")).unwrap();
+        fs::copy(p.file("one"), p.path().join("-new/memory/one.md")).unwrap();
+        pass(&h);
+        let second = h.vault.path().join("working-memory/-new/one.md");
+        fs::remove_file(&second).unwrap();
+        link_old_to_new(&p);
+        pass(&h);
+        pass(&h);
+        assert!(second.exists());
+        assert!(!archived(&h, "one"));
+    }
+
+    /// Two memories of one name with different words, one copy tidied away: neither the move nor
+    /// anything after it writes over the other's words.
+    #[test]
+    fn a_move_never_writes_over_a_memorys_words() {
+        let (h, p) = following(&["one"]);
+        also_under_new(&p, &["one".to_string()]);
+        pass(&h);
+        fs::remove_file(h.vault.path().join("working-memory/-new/one.md")).unwrap();
+        link_old_to_new(&p);
+        for _ in 0..3 {
+            pass(&h);
+        }
+        assert!(vault_texts(&h).iter().any(|t| t.contains("one first")));
+        assert!(
+            !h.vault.path().join("working-memory/-new/one.md").exists(),
+            "a removed copy stays removed"
+        );
+    }
+
+    /// A memory folder linked to a disk of its own, and the disk goes away for a while.
+    #[test]
+    fn a_link_whose_target_goes_away_archives_nothing() {
+        let (h, p) = following(&["one"]);
+        fs::create_dir_all(p.path().join("-other/memory")).unwrap();
+        fs::write(p.path().join("-other/memory/x.md"), "x\n").unwrap();
+        let disk = tempfile::tempdir().unwrap();
+        let away = disk.path().join("memory");
+        fs::rename(p.path().join("-proj/memory"), &away).unwrap();
+        symlink(&away, p.path().join("-proj/memory")).unwrap();
+        pass(&h);
+        fs::rename(&away, disk.path().join("unplugged")).unwrap();
+        for _ in 0..3 {
+            pass(&h);
+        }
+        assert!(copy(&h, "one").is_some());
+        assert!(!archived(&h, "one"));
+    }
+
+    /// The README's way of moving a project's memory, while another project's hold stands.
+    #[test]
+    fn moving_a_project_releases_no_hold() {
+        let names = many("m", 12);
+        let (h, p) = following_many(&names);
+        for name in &names {
+            p.remove(name);
+        }
+        p.write("stays", "stays first");
+        pass(&h);
+        pass(&h);
+        h.run(&["memory", "unfollow"]);
+        let said = follow(&h, &p);
+        assert!(said.contains("0 archived"), "{said}");
+        assert!(names.iter().all(|n| copy(&h, n).is_some()));
+    }
+}
+
+/// The word is for what has been said to be held, not for whatever has gone by then.
+#[test]
+fn archive_gone_takes_only_what_is_held() {
+    let names = many("m", 12);
+    let (h, p) = following_many(&names);
+    for name in &names {
+        p.remove(name);
+    }
+    p.write("fresh", "fresh first");
+    pass(&h);
+    // Never shown: this look is the first to find them gone twice.
+    let said = archive_gone(&h);
+    assert!(said.contains("0 archived"), "{said}");
+    assert!(names.iter().all(|n| copy(&h, n).is_some()));
+    let said = archive_gone(&h);
+    assert!(said.contains("12 archived"), "{said}");
+}
+
+#[test]
+fn status_counts_no_hold_the_word_cannot_release() {
+    let names = many("m", 12);
+    let (h, p) = following_many(&names);
+    for name in &names {
+        p.remove(name);
+    }
+    p.write("fresh", "fresh first");
+    pass(&h);
+    pass(&h);
+    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
+    h.run(&["memory", "unfollow"]);
+    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 0);
+    let other = Projects::new();
+    other.write("elsewhere", "elsewhere first");
+    let said = follow(&h, &other);
+    assert!(!said.contains("--archive-gone"), "{said}");
     assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 0);
 }

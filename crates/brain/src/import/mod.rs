@@ -48,6 +48,9 @@ pub struct LedgerEntry {
     /// The last pass did not find the source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing: bool,
+    /// Its copy was due to be archived with too many others; it waits for the person's word.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 impl LedgerEntry {
@@ -412,6 +415,7 @@ fn write_one(
             from: s.from.clone(),
             vault: Some(dst.root.clone()),
             missing: false,
+            held: false,
         },
     );
     Ok(())

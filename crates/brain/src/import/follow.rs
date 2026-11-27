@@ -2,7 +2,8 @@
 //! source does and leaves search when its source is gone. Nothing is taken away on doubt: only a
 //! copy this folder gave, untouched since, whose source two passes in a row found gone. A project
 //! whose memory folder is now a link to another's was renamed, and its copies move with it. A pass
-//! that would archive more than a few at once archives nothing until the person says so.
+//! with more than a few copies to archive archives none of them, and they stay held until their
+//! source is back or the person says to archive them.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -65,8 +66,8 @@ struct Change {
     put: Option<(Option<String>, String)>,
 }
 
-/// One pass over `followed`; `told` when the person has just asked for this folder to be followed,
-/// which lets it archive however much is gone. The caller holds the import lock. `index` brings the index up to
+/// One pass over `followed`; `told` when the person has asked for what is held to be archived.
+/// The caller holds the import lock. `index` brings the index up to
 /// date with what was written, and the ledger is settled after it.
 pub fn sync(
     dirs: &Dirs,
@@ -101,7 +102,7 @@ pub fn sync(
     let found: Vec<String> = all.iter().map(|s| s.key.clone()).collect();
     let mut out = Followed::default();
     let mut changes = Vec::new();
-    renamed(
+    let second = renamed(
         vault,
         followed,
         &mut skipped,
@@ -110,6 +111,12 @@ pub fn sync(
         &mut out,
         &mut changes,
     );
+    // Projects this pass did not read, as one behind a link: what is under them is not gone.
+    let unread: Vec<String> = skipped
+        .iter()
+        .filter(|(key, _)| key.matches('/').count() == 1)
+        .map(|(key, _)| format!("{key}/"))
+        .collect();
     out.skipped
         .extend(skipped.into_iter().map(|(key, why)| (key, why.describe())));
     let dated: Vec<(String, PathBuf, SystemTime)> = all
@@ -154,7 +161,18 @@ pub fn sync(
         }
     }
     date_back(vault, &ledger, &dated);
-    gone(vault, followed, told, &mut ledger, &mut out, &mut changes);
+    archive_due(
+        vault,
+        followed,
+        Look {
+            told,
+            second,
+            unread,
+        },
+        &mut ledger,
+        &mut out,
+        &mut changes,
+    );
     // Saved before the index runs, so a pass cut short there never forgets what it wrote.
     ledger.save(dirs)?;
     trace(dirs, &changes);
@@ -212,7 +230,8 @@ fn renamed(
     ledger: &mut Ledger,
     out: &mut Followed,
     changes: &mut Vec<Change>,
-) {
+) -> Vec<String> {
+    let mut second = Vec::new();
     skipped.retain(|(link, why)| {
         if !matches!(why, Skip::Link) {
             return true;
@@ -238,33 +257,40 @@ fn renamed(
                 continue;
             }
             let (from, to) = (copy_of(vault, &key), copy_of(vault, &new));
-            let moved = match ledger.current(&new, &vault.root) {
-                Some(_) => Err(std::io::ErrorKind::AlreadyExists.into()),
-                None => rename_within(&vault.root, &from, &to),
-            };
-            match moved {
-                Ok(()) => {
-                    out.moved.push(rel_key(&to));
-                    changes.push(Change {
-                        what: "move",
-                        key: new.clone(),
-                        file: source_of(followed, &new),
-                        put: None,
-                    });
+            let there = |rel: &Path| std::fs::symlink_metadata(vault.root.join(rel)).is_ok();
+            // A copy takes the new name only where nothing would then be written over it: the
+            // name has no record of its own, or one of the same words.
+            let same = ledger
+                .current(&new, &vault.root)
+                .is_none_or(|e| e.src_hash == ledger.0[&key].src_hash);
+            match (there(&from), there(&to) || !same) {
+                // The new name has its own: the old name's copy is archived, as a gone one is.
+                (true, true) => {
+                    second.push(key);
+                    continue;
                 }
-                // Nothing at the old place: the person removed it, or a pass cut short had
-                // moved it already. The record moves either way.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
-                        ledger.0.remove(&key);
+                (true, false) => match rename_within(&vault.root, &from, &to) {
+                    Ok(()) => {
+                        out.moved.push(rel_key(&to));
+                        changes.push(Change {
+                            what: "move",
+                            key: new.clone(),
+                            file: source_of(followed, &new),
+                            put: None,
+                        });
                     }
+                    Err(e) => {
+                        out.skipped.push((key, format!("not moved: {e}")));
+                        continue;
+                    }
+                },
+                // Nothing at the old place, and the new name has its own record.
+                (false, _) if ledger.current(&new, &vault.root).is_some() => {
+                    ledger.0.remove(&key);
                     continue;
                 }
-                Err(e) => {
-                    out.skipped.push((key, format!("not moved: {e}")));
-                    continue;
-                }
+                // The person removed it, or a pass cut short had moved it: the record moves.
+                (false, _) => {}
             }
             if let Some(entry) = ledger.0.remove(&key) {
                 ledger.0.insert(new, entry);
@@ -272,6 +298,7 @@ fn renamed(
         }
         false
     });
+    second
 }
 
 /// The project whose memory folder `link`, a `memory/<project>` the pass did not follow, leads to
@@ -320,41 +347,59 @@ fn retire(
     true
 }
 
-/// What to say of `gone` followed memories that wait for the person's word.
-pub fn held_line(gone: usize, followed: &Path) -> String {
+/// What to say of `held` copies that wait for the person's word.
+pub fn held_line(held: usize) -> String {
     format!(
-        "{gone} followed memories are gone from {followed}; none archived. If that is right, run `brain memory follow \"{followed}\"`",
-        followed = followed.display(),
+        "{held} followed memories are gone or copied twice, and are held, not archived. If that is right, `brain memory run --archive-gone` archives them"
     )
 }
 
-/// How many copies of memories gone from `followed` wait for that word: the last pass did not find
-/// them, and there are too many to archive unasked.
-pub fn waiting(ledger: &Ledger, vault: &Path, followed: &Path) -> usize {
-    let gone = ledger
+/// How many copies in `vault` are held for `followed`, of those still where brain put them.
+pub fn waiting(ledger: &Ledger, vault: &Vault, followed: &Path) -> usize {
+    ledger
         .0
-        .values()
-        .filter(|e| e.missing && e.from.as_deref() == Some(followed) && e.of(vault))
-        .count();
-    if gone > UNASKED { gone } else { 0 }
+        .iter()
+        .filter(|(key, e)| {
+            e.held
+                && e.of(&vault.root)
+                && e.from.as_deref().is_none_or(|from| from == followed)
+                && vault.root.join(copy_of(vault, key)).is_file()
+        })
+        .count()
 }
 
-/// Deals with the copies whose source is gone: not found, on this pass and the one before. Many at
-/// once looks like a folder reset, replaced or half restored, so then none is taken until the
-/// person says so.
-fn gone(
+/// What a pass found that bears on archiving.
+struct Look {
+    /// The person has asked for what is held to be archived.
+    told: bool,
+    /// Copies of memories that already have one under another name.
+    second: Vec<String>,
+    /// `memory/<project>/` of each project not read.
+    unread: Vec<String>,
+}
+
+/// The one way a copy is archived. Due are those whose source was not found on this pass and the
+/// one before, and the `second` copies of memories already under another name. Many at once looks
+/// like a folder reset, replaced, half restored or linked over, so then every one of them is held
+/// until its source is back or the person says so.
+fn archive_due(
     vault: &Vault,
     followed: &Path,
-    told: bool,
+    look: Look,
     ledger: &mut Ledger,
     out: &mut Followed,
     changes: &mut Vec<Change>,
 ) {
-    let mut ripe = Vec::new();
+    let mut due = Vec::new();
     for (key, entry) in &mut ledger.0 {
+        if look.second.contains(key) {
+            due.push(key.clone());
+            continue;
+        }
         if !key.starts_with("memory/")
             || entry.from.as_deref() != Some(followed)
             || !entry.of(&vault.root)
+            || look.unread.iter().any(|project| key.starts_with(project))
         {
             continue;
         }
@@ -363,19 +408,33 @@ fn gone(
             std::fs::symlink_metadata(source_of(followed, key)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound
         );
-        if std::mem::replace(&mut entry.missing, gone) && gone {
-            ripe.push(key.clone());
+        let seen = std::mem::replace(&mut entry.missing, gone);
+        if !gone {
+            entry.held = false;
+        } else if seen {
+            due.push(key.clone());
         }
     }
-    if !told && ripe.len() > UNASKED {
-        out.held = Some(held_line(ripe.len(), followed));
-        return;
+    // What was held before this look is all the word covers: it is what the person was told of.
+    let (held, mut due): (Vec<String>, Vec<String>) =
+        due.into_iter().partition(|key| ledger.0[key].held);
+    if due.len() > UNASKED {
+        for key in due.drain(..) {
+            if let Some(entry) = ledger.0.get_mut(&key) {
+                entry.held = true;
+            }
+        }
     }
-    for key in ripe {
+    if look.told {
+        due.extend(held);
+    }
+    for key in due {
         if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
             ledger.0.remove(&key);
         }
     }
+    let held = waiting(ledger, vault, followed);
+    out.held = (held > 0).then(|| held_line(held));
 }
 
 /// Records a pass that changed something, so each change can be read afterwards. A trace that
