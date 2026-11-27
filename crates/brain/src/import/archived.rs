@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use brain_index::Index;
 use brain_note::{Note, Place, Vault, rel_key};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Privacy, archive_name, rename_within, write_atomic};
@@ -131,47 +132,48 @@ impl Archive {
     /// Brings the records and the ledger back into step with each other and with `vault`, after
     /// a pass cut short, a newer copy or the person's own hand. The only place a record is
     /// dropped. The ledger is saved first: a record moved to it and not yet dropped here is
-    /// finished by the next pass, and the other order would lose it.
+    /// finished by the next pass, and the other order would lose it. Returns what could not be
+    /// read, whose records are left as they are.
     pub(super) fn reconcile(
         &mut self,
         dirs: &Dirs,
         vault: &Vault,
         ledger: &mut Ledger,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let (mut in_ledger, mut in_archive) = (false, false);
-        let mut purge = Vec::new();
+        let (mut deleted, mut unread) = (Vec::new(), Vec::new());
         self.0.retain_mut(|r| {
             if !r.entry.of(&vault.root) {
                 return true;
             }
             let id = r.entry.id.as_deref();
-            let Ok(archived) = holds(vault, &r.path, id) else {
-                return true;
+            let there = (
+                holds(vault, &r.path, id),
+                holds(vault, &copy_of(vault, &r.key), id),
+            );
+            let (archived, copied) = match there {
+                (Ok(archived), Ok(copied)) => (archived, copied),
+                (Err(e), _) | (_, Err(e)) => {
+                    unread.push((r.key.clone(), format!("cannot be read: {e}")));
+                    return true;
+                }
             };
             let keep = match ledger.current(&r.key, &vault.root) {
-                // Cut short after the move: the ledger has not let go of it yet.
-                Some(l) if equal(l, &r.entry) && archived.is_some() => {
+                // Cut short after the move: the ledger has not let go of it, and nothing of it
+                // is left at the copy's path.
+                Some(l) if equal(l, &r.entry) && archived.is_some() && copied.is_none() => {
                     ledger.0.remove(&r.key);
                     in_ledger = true;
                     return true;
                 }
-                // Cut short before the move, or restored.
-                Some(l) if equal(l, &r.entry) => false,
-                // A newer copy has taken its place.
-                Some(l) => {
-                    if l.id != r.entry.id {
-                        purge.extend(r.entry.id.clone());
-                    }
-                    false
-                }
+                // Cut short before the move, restored, or a newer copy has taken its place. The
+                // archived file, if there, is left with its words, so nothing is purged.
+                Some(_) => false,
                 None => {
-                    let Ok(back) = holds(vault, &copy_of(vault, &r.key), id) else {
-                        return true;
-                    };
                     // While the archived file is still there, only the very bytes are it: a
                     // fresh copy written under the same id is not.
                     let back =
-                        back.is_some_and(|b| archived.is_none() || hash(&b) == r.entry.dst_hash);
+                        copied.is_some_and(|b| archived.is_none() || hash(&b) == r.entry.dst_hash);
                     if back {
                         ledger.0.insert(r.key.clone(), r.entry.clone());
                         in_ledger = true;
@@ -185,7 +187,7 @@ impl Archive {
                         return true;
                     } else {
                         // Deleted by the person: a removed copy from here on.
-                        purge.extend(r.entry.id.clone());
+                        deleted.extend(r.entry.id.clone());
                         ledger.0.insert(r.key.clone(), r.entry.clone());
                         in_ledger = true;
                         false
@@ -195,14 +197,22 @@ impl Archive {
             in_archive |= !keep;
             keep
         });
-        daemon::purge(dirs, purge.into_iter());
+        if !deleted.is_empty() {
+            // A file the person moved into their notes is a note there: its traces stay. A
+            // lookup that fails purges nothing, and the traces age out.
+            let index = Index::open(&dirs.data.join("index.db"))?;
+            let nowhere = |id: &String| {
+                uuid::Uuid::parse_str(id).is_ok_and(|id| matches!(index.path_of(&id), Ok(None)))
+            };
+            daemon::purge(dirs, deleted.into_iter().filter(nowhere));
+        }
         if in_ledger {
             ledger.save(dirs)?;
         }
         if in_archive {
             self.save(dirs)?;
         }
-        Ok(())
+        Ok(unread)
     }
 
     /// Moves back the archived copy of each source that has returned as it was. Returns the

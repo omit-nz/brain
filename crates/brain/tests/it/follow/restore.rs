@@ -409,7 +409,10 @@ fn an_import_copies_an_archived_memory_afresh() {
     pass(&h);
     assert!(records(&h).is_empty(), "{:?}", records(&h));
     assert_eq!(fs::read_to_string(archive_path(&h, "one")).unwrap(), copied);
-    assert_eq!(traced(&h, &id_of(&copied)), 0, "the old id is purged");
+    assert!(
+        traced(&h, &id_of(&copied)) >= 1,
+        "its archived file is still there"
+    );
 }
 
 #[test]
@@ -469,13 +472,40 @@ fn an_unreadable_follow_archive_purges_nothing() {
 
 #[test]
 fn an_archived_memory_is_in_no_search_due_or_brief() {
-    let (h, _p, _, _) = archived_one();
-    let found = h.json(&["search", "--json", "one first"]);
-    assert!(
-        !found.to_string().contains("_archive") && !found.to_string().contains("-proj/one.md"),
-        "{found}"
-    );
-    assert!(!h.run(&["due"]).contains("one.md"));
+    let (h, p) = two();
+    let path = copy_path(h.vault.path(), "one");
+    // Due now, which brain's own copies are not for weeks.
+    let text = fs::read_to_string(&path).unwrap();
+    let review = text.lines().find(|l| l.starts_with("review:")).unwrap();
+    fs::write(&path, text.replace(review, "review: 2020-01-01")).unwrap();
+    h.run(&["index"]);
+    let shown = || {
+        let search = h.json(&["search", "--json", "first"]).to_string();
+        let due = h.run(&["due"]);
+        let brief = h
+            .brain()
+            .args(["hook", "session-start"])
+            .write_stdin(r#"{"session_id":"s","cwd":"/","transcript_path":"/t/s.jsonl"}"#)
+            .output()
+            .unwrap();
+        let brief = String::from_utf8(brief.stdout).unwrap();
+        [search, due, brief].map(|said| said.contains("-proj/one.md") || said.contains("\"one\""))
+    };
+    assert_eq!(shown(), [true; 3], "search, due, brief, before");
+    // An edited copy is not archived, so the source goes with the ledger agreeing with it.
+    let mut ledger = ledger(&h);
+    ledger["memory/-proj/one.md"]["dst_hash"] = sha256(&fs::read(&path).unwrap()).into();
+    set_ledger(&h, &ledger);
+    archive_one(&h, &p);
+    assert_eq!(shown(), [false; 3], "search, due, brief, after");
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[test]
@@ -508,6 +538,11 @@ fn another_followed_folder_restores_nothing_and_takes_no_id() {
     follow(&h, &other);
     assert_ne!(id(&h, "one"), id_of(&copied));
     assert_eq!(fs::read_to_string(archive_path(&h, "one")).unwrap(), copied);
+    pass(&h);
+    assert!(
+        traced(&h, &id_of(&copied)) >= 1,
+        "its archived file is still there"
+    );
 }
 
 #[test]
@@ -611,7 +646,11 @@ fn rename_vault(h: &Home) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn a_renamed_vault_folder_stops_following_its_copies() {
-    let (h, p) = following(&["one", "two"]);
+    let (h, p) = following(&["one", "two", "three"]);
+    let archived = (fs::read(p.file("three")).unwrap(), id(&h, "three"));
+    p.remove("three");
+    pass(&h);
+    pass(&h);
     fs::remove_file(copy_path(h.vault.path(), "two")).unwrap();
     let (_aside, renamed) = rename_vault(&h);
     p.write("one", "one second");
@@ -622,7 +661,10 @@ fn a_renamed_vault_folder_stops_following_its_copies() {
             .assert()
             .success()
     };
+    fs::write(p.file("three"), archived.0).unwrap();
     run();
+    let three = fs::read_to_string(copy_path(&renamed, "three")).unwrap();
+    assert_ne!(id_of(&three), archived.1, "not brought back");
     let text = fs::read_to_string(copy_path(&renamed, "one")).unwrap();
     assert!(text.contains("one first"), "no longer followed: {text}");
     assert!(
@@ -670,6 +712,72 @@ fn a_vault_without_its_archive_folder_reads_as_the_files_deleted() {
     fs::write(p.file("one"), source).unwrap();
     pass(&h);
     assert_eq!(copy(&h, "one"), None);
+}
+
+/// A spare of a restored file put back where it was archived: the live copy stays followed.
+#[test]
+fn a_spare_at_the_archived_path_does_not_unrecord_the_live_copy() {
+    let (h, p, source, copied) = archived_one();
+    fs::write(p.file("one"), source).unwrap();
+    pass(&h);
+    fs::write(archive_path(&h, "one"), &copied).unwrap();
+    let said = pass(&h);
+    assert!(!said.contains("kept as it is"), "{said}");
+    assert_eq!(h.json(&["status", "--json"])["memories_archived"], 0);
+    p.write("one", "one second");
+    pass(&h);
+    assert!(copy(&h, "one").unwrap().contains("one second"));
+}
+
+/// The index gives a restored copy a new id when another note holds its own.
+#[test]
+fn a_restored_copy_the_index_re_ids_is_still_archived_when_it_goes() {
+    let (h, p, source, copied) = archived_one();
+    h.put("0-inbox/spare.md", &copied);
+    h.run(&["index"]);
+    fs::write(p.file("one"), source).unwrap();
+    pass(&h);
+    pass(&h);
+    assert_ne!(id(&h, "one"), id_of(&copied), "the index gave it a new id");
+    assert!(
+        traced(&h, &id_of(&copied)) >= 1,
+        "the other note's traces stay"
+    );
+    archive_one(&h, &p);
+}
+
+#[test]
+fn an_archived_file_moved_into_the_notes_keeps_its_traces() {
+    let (h, p) = two();
+    let one = id(&h, "one");
+    archive_one(&h, &p);
+    let kept = h.vault.path().join("kept.md");
+    fs::rename(archive_path(&h, "one"), &kept).unwrap();
+    h.run(&["index"]);
+    pass(&h);
+    pass(&h);
+    assert!(records(&h).is_empty(), "{:?}", records(&h));
+    assert!(traced(&h, &one) >= 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_archived_file_that_cannot_be_read_is_said_and_left() {
+    use std::os::unix::fs::PermissionsExt;
+    let (h, p, source, copied) = archived_one();
+    let mode = |m| {
+        fs::set_permissions(archive_path(&h, "one"), fs::Permissions::from_mode(m)).unwrap();
+    };
+    mode(0o000);
+    fs::write(p.file("one"), source).unwrap();
+    for _ in 0..2 {
+        let said = pass(&h);
+        assert!(said.contains("skipped: memory/-proj/one.md"), "{said}");
+        assert_eq!(copy(&h, "one"), None);
+    }
+    mode(0o644);
+    pass(&h);
+    assert_eq!(copy(&h, "one"), Some(copied));
 }
 
 #[cfg(unix)]
@@ -764,6 +872,23 @@ mod linked {
         symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
         import(&h, p.path());
         assert!(copy(&h, "one").is_some() && new_copy(&h).is_some());
+    }
+
+    #[test]
+    fn a_removed_copy_stays_removed_through_a_link_and_back() {
+        let (h, p) = following(&["one"]);
+        let source = fs::read(p.file("one")).unwrap();
+        new_memory(&p, "another memory entirely\n");
+        pass(&h);
+        fs::remove_file(copy_path(h.vault.path(), "one")).unwrap();
+        link_old_to_new(&p);
+        pass(&h);
+        pass(&h);
+        fs::remove_file(p.path().join("-proj/memory")).unwrap();
+        fs::create_dir_all(p.path().join("-proj/memory")).unwrap();
+        fs::write(p.file("one"), source).unwrap();
+        let said = pass(&h);
+        assert_eq!(copy(&h, "one"), None, "{said}");
     }
 
     /// Every markdown file's text anywhere in the vault, the archive included.

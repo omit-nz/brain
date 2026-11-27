@@ -105,8 +105,10 @@ pub fn sync(
     }
     let found: Vec<String> = all.iter().map(|s| s.key.clone()).collect();
     let mut archive = Archive::load(dirs)?;
-    archive.reconcile(dirs, vault, &mut ledger)?;
-    let mut out = Followed::default();
+    let mut out = Followed {
+        skipped: archive.reconcile(dirs, vault, &mut ledger)?,
+        ..Followed::default()
+    };
     let second = renamed(
         vault,
         followed,
@@ -294,11 +296,9 @@ fn renamed(
                         continue;
                     }
                 },
-                // Nothing at the old place, and the new name has its own record.
-                (false, _) if theirs.is_some() => {
-                    ledger.0.remove(&key);
-                    continue;
-                }
+                // Nothing at the old place, and the new name has its own record: the old one
+                // stays, so a copy the person removed is not made again when the link goes.
+                (false, _) if theirs.is_some() => continue,
                 // The person removed it, or a pass cut short had moved it: the record moves.
                 (false, _) => {}
             }

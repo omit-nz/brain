@@ -8,7 +8,7 @@ Leave a brain at home. brain keeps a folder of your Markdown notes searchable on
 - Claude Code and Claude Desktop search your notes, capture new ones into an inbox, correct a note and list what is due for review.
 - A background daemon indexes a note soon after you save it (macOS; on Linux you run `brain daemon` yourself).
 - Rooms, so AI sessions on one computer can leave each other messages.
-- A Claude Code plugin: a session starts with the notes due for review and the memory indexes you name. What brain reads and decides at each hook is kept on your computer and ages out ([docs/traces.md](docs/traces.md)).
+- A Claude Code plugin: a session starts with the notes due for review and the memory indexes you name. What brain reads and decides at each hook is kept on your computer, and ages out while the daemon runs ([docs/traces.md](docs/traces.md)).
 - Copies of Claude Code's auto-memory that follow their sources (`brain memory follow`).
 - Import of a learning-loop vault.
 - Signed releases and updates.
@@ -47,16 +47,16 @@ When a project's memory folder becomes a link to another project's, its copies m
 ## Limits
 
 - A project's memory folder moved before the old name is linked to the new one gets new copies, ones you had removed included. The old copies are archived, or kept if you edited them, and the archived ones come back if you move the folder back. (`a_folder_moved_with_no_link_is_copied_anew`)
-- Do not rename or switch your notes folder once brain has followed memory, even after `brain memory unfollow`: copies made before stop following their sources, ones you had removed can be copied again, and there is no supported way yet to tie them back. (`a_renamed_vault_folder_stops_following_its_copies`)
+- Do not rename or switch your notes folder once brain has followed memory, even after `brain memory unfollow`: copies made before stop following their sources, ones you had removed can be copied again, memories archived before are not brought back, and there is no supported way yet to tie them back. (`a_renamed_vault_folder_stops_following_its_copies`)
 - `brain import` run between a memory folder's move and the next pass copies that project again under its new name. (`an_import_between_a_move_and_the_first_follow_copies_the_project_again`)
 - A linked project whose new name brain has never copied: a file of the same name there is taken for the old memory renamed, and the copy takes its words. If it was a different memory, the old words are not kept. (`a_linked_name_never_copied_takes_the_old_copy_and_its_words`)
 - A pass killed after writing copies and before saving its record leaves those copies reading as yours, so they stop following. (`a_pass_killed_before_the_ledger_save_leaves_its_copies_as_the_persons`, `a_changed_copy_cut_short_before_the_ledger_save_is_not_taken_for_the_old_one`)
 - A followed folder that is reset takes those memories out of search until it is restored. (`a_folder_reset_and_restored_in_halves_leaves_the_vault_as_it_was`)
 - A memory that is removed and written again every few minutes moves its file each time. (`a_source_that_comes_and_goes_moves_its_file_each_time`)
-- An archived file you move elsewhere, or rewrite without its id, reads as deleted. So does every one of them if your notes folder is copied without `_archive`. (`an_archived_file_rewritten_without_its_id_reads_as_deleted`, `a_vault_without_its_archive_folder_reads_as_the_files_deleted`)
+- An archived file you move elsewhere, or rewrite without its id, reads as deleted and its memory is not copied again; one you moved into your notes is a note there, and its traces stay if the index has seen it by then, as it does while the daemon runs. So does every one of them read as deleted if your notes folder is copied without `_archive`. (`an_archived_file_rewritten_without_its_id_reads_as_deleted`, `a_vault_without_its_archive_folder_reads_as_the_files_deleted`)
 - An archived file you move back by hand while its source is still gone is archived again. (`an_archived_file_moved_back_while_its_source_is_gone_is_archived_again`)
-- After you follow a different folder, memories archived before are not brought back; one that returns is copied afresh. (`another_followed_folder_restores_nothing_and_takes_no_id`)
-- `brain import` of an archived memory's source writes a fresh copy with a new id, and the archived one stays. (`an_import_copies_an_archived_memory_afresh`)
+- After you follow a different folder, memories archived before are not brought back; one that returns is copied afresh, and the archived file stays. brain no longer tracks that file, so deleting it purges nothing. (`another_followed_folder_restores_nothing_and_takes_no_id`)
+- `brain import` of an archived memory's source writes a fresh copy with a new id, and the archived file stays. brain no longer tracks that file, so deleting it purges nothing. (`an_import_copies_an_archived_memory_afresh`)
 
 ## Connect your AI
 
