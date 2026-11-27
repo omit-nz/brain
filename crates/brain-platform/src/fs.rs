@@ -203,6 +203,19 @@ pub fn rename_within(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
 /// Moves `rel` under `archive_dir`, keeping its relative path and adding `-1`, `-2` on a clash.
 /// Returns the new path relative to `root`.
 pub fn archive(root: &Path, rel: &Path, archive_dir: &Path) -> io::Result<PathBuf> {
+    let target = archive_name(root, rel, archive_dir, |_| false);
+    rename_within(root, rel, &target)?;
+    Ok(target)
+}
+
+/// Where `archive` would put `rel`, passing over a name `taken` says is already promised. For a
+/// caller that must record the path before it moves the file there with `rename_within`.
+pub fn archive_name(
+    root: &Path,
+    rel: &Path,
+    archive_dir: &Path,
+    taken: impl Fn(&Path) -> bool,
+) -> PathBuf {
     let base = archive_dir.join(rel);
     let stem = base
         .file_stem()
@@ -214,12 +227,11 @@ pub fn archive(root: &Path, rel: &Path, archive_dir: &Path) -> io::Result<PathBu
         .unwrap_or_default();
     let mut target = base.clone();
     let mut n = 0;
-    while fs::symlink_metadata(root.join(&target)).is_ok() {
+    while fs::symlink_metadata(root.join(&target)).is_ok() || taken(&target) {
         n += 1;
         target = base.with_file_name(format!("{stem}-{n}{ext}"));
     }
-    rename_within(root, rel, &target)?;
-    Ok(target)
+    target
 }
 
 /// An exclusive lock on an owner-only file, held until it is dropped or its process dies (`flock`

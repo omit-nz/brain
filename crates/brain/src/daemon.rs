@@ -24,7 +24,7 @@ use notify::{EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, NoCache};
 
 use crate::config::Config;
-use crate::import::{self, Followed, Written};
+use crate::import::{self, Archive, Followed, Written};
 use crate::out::terminal;
 use crate::{gaps, plugin, usage};
 
@@ -91,7 +91,7 @@ fn follow_memory(
     };
     let vault = Vault::open(&config.vault)?;
     let w = Written::for_memory(&config.me, clock.today(), &vault);
-    let done = import::sync(dirs, &vault, followed, &w, false, |vault| {
+    let done = import::sync(dirs, &vault, followed, &w, |vault| {
         // The whole vault is read, so a note someone is typing gets no id here either.
         let now = clock.now();
         let r = idx.reindex_settled(vault, now.checked_sub(SETTLE)?, now)?;
@@ -101,10 +101,26 @@ fn follow_memory(
     Ok(Some(done))
 }
 
-/// Drops what traces and verdicts kept of the notes a pass saw go. A failure is said and no
-/// more: both stores also prune by age.
+/// Drops what traces and verdicts kept of the notes a pass saw go, but not of a followed memory
+/// brain archived: that one is set aside, and comes back with its source. With the archive
+/// records unreadable nothing is dropped.
 pub fn forget(dirs: &Dirs, r: &Reindexed) {
-    let sources: Vec<String> = r.gone.iter().map(|id| format!("note:{id}")).collect();
+    let archive = match Archive::load(dirs) {
+        Ok(archive) => archive,
+        Err(e) => {
+            let said = format!("no trace was purged: {e:#}");
+            eprintln!("{}", terminal(&said));
+            return;
+        }
+    };
+    let gone = r.gone.iter().map(ToString::to_string);
+    purge(dirs, gone.filter(|id| !archive.names(id)));
+}
+
+/// Purges the notes `ids` from traces and verdicts. A failure is said and no more: both stores
+/// also prune by age.
+pub fn purge(dirs: &Dirs, ids: impl Iterator<Item = String>) {
+    let sources: Vec<String> = ids.map(|id| format!("note:{id}")).collect();
     if let Err(e) = brain_reflex::purge(&dirs.data, &sources) {
         eprintln!(
             "{}",
@@ -313,11 +329,8 @@ fn serve(
                     changed |= done.changed();
                     embedding |= done.changed() && provider.is_some();
                     let news = done.changed() || !done.kept.is_empty() || !done.skipped.is_empty();
-                    (news || done.held.is_some()).then(|| {
+                    news.then(|| {
                         let mut said = format!("memory: {}", done.summary());
-                        if let Some(held) = &done.held {
-                            said.push_str(&format!("\nmemory: {held}"));
-                        }
                         for path in &done.kept {
                             said.push_str(&format!("\nmemory: kept as it is: {path}"));
                         }

@@ -1,9 +1,8 @@
 //! `brain memory follow`: the memory import run again and again, so a copy changes when its
 //! source does and leaves search when its source is gone. Nothing is taken away on doubt: only a
-//! copy this folder gave, untouched since, whose source two passes in a row found gone. A project
-//! whose memory folder is now a link to another's was renamed, and its copies move with it. A pass
-//! with more than a few copies to archive archives none of them, and they stay held until their
-//! source is back or the person says to archive them.
+//! copy this folder gave, untouched since, whose source two passes in a row found gone. Nothing is
+//! taken away for good: an archived copy comes back, with its id, when its source does. A project
+//! whose memory folder is now a link to another's was renamed, and its copies move with it.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -11,14 +10,11 @@ use std::time::SystemTime;
 use anyhow::bail;
 use brain_note::{Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{archive, is_link, rename_within, set_modified};
+use brain_platform::fs::{is_link, rename_within, set_modified};
 use brain_reflex::trace::{Call, Kind, Reply};
 use serde_json::json;
 
-use super::{Ledger, LedgerEntry, Written, classify_sources, hash, memory, settle, write_one};
-
-/// The most gone memories a pass archives without asking.
-const UNASKED: usize = 10;
+use super::{Archive, Ledger, Written, classify_sources, hash, memory, settle, write_one};
 
 /// What one pass did, by vault path.
 #[derive(Debug, Default)]
@@ -26,55 +22,63 @@ pub struct Followed {
     pub new: Vec<String>,
     pub updated: Vec<String>,
     pub archived: Vec<String>,
+    /// Copies brought back because their source returned.
+    pub restored: Vec<String>,
     /// Copies taken to a renamed project's name.
     pub moved: Vec<String>,
     /// Copies left as they are because the person's hand is on them.
     pub kept: Vec<String>,
     /// Sources that could not be taken, and why.
     pub skipped: Vec<(String, String)>,
-    /// Why nothing gone was archived, and what to run if it should be.
-    pub held: Option<String>,
+    /// Each change made, for the pass's trace.
+    pub(super) changes: Vec<Change>,
 }
 
 impl Followed {
     pub fn summary(&self) -> String {
         format!(
-            "{} copied, {} updated, {} archived, {} moved, {} kept as they are, {} skipped",
+            "{} copied, {} updated, {} archived, {} moved, {} restored, {} kept as they are, {} skipped",
             self.new.len(),
             self.updated.len(),
             self.archived.len(),
             self.moved.len(),
+            self.restored.len(),
             self.kept.len(),
             self.skipped.len()
         )
     }
 
     pub fn changed(&self) -> bool {
-        [&self.new, &self.updated, &self.archived, &self.moved]
-            .iter()
-            .any(|changed| !changed.is_empty())
+        [
+            &self.new,
+            &self.updated,
+            &self.archived,
+            &self.moved,
+            &self.restored,
+        ]
+        .iter()
+        .any(|changed| !changed.is_empty())
     }
 }
 
 /// A change a pass made, for its trace.
-struct Change {
-    what: &'static str,
-    key: String,
-    file: PathBuf,
+#[derive(Debug)]
+pub(super) struct Change {
+    pub(super) what: &'static str,
+    pub(super) key: String,
+    pub(super) file: PathBuf,
     /// The note and its text, when the change put text in the vault. One that took text away
     /// holds neither: the trace would be purged with the note it records the going of.
-    put: Option<(Option<String>, String)>,
+    pub(super) put: Option<(Option<String>, String)>,
 }
 
-/// One pass over `followed`; `told` when the person has asked for what is held to be archived.
-/// The caller holds the import lock. `index` brings the index up to
+/// One pass over `followed`. The caller holds the import lock. `index` brings the index up to
 /// date with what was written, and the ledger is settled after it.
 pub fn sync(
     dirs: &Dirs,
     vault: &Vault,
     followed: &Path,
     w: &Written<'_>,
-    told: bool,
     index: impl FnOnce(&Vault) -> anyhow::Result<()>,
 ) -> anyhow::Result<Followed> {
     // A vault that is not there would be made again, empty but for the memories.
@@ -93,23 +97,24 @@ pub fn sync(
     let mut skipped = Vec::new();
     let all = memory::sources(followed, &vault.layout.memory, &mut skipped)?;
     let mut ledger = Ledger::load(dirs)?;
-    if all.is_empty() && ledger.holds_memory_of(followed, &vault.root) {
+    if all.is_empty() && ledger.holds_memory_of(followed, vault) {
         bail!(
             "{} holds no memory file, while brain has copies from it; nothing changed",
             followed.display()
         );
     }
     let found: Vec<String> = all.iter().map(|s| s.key.clone()).collect();
+    let mut archive = Archive::load(dirs)?;
+    archive.reconcile(dirs, vault, &mut ledger)?;
     let mut out = Followed::default();
-    let mut changes = Vec::new();
     let second = renamed(
         vault,
         followed,
         &mut skipped,
         &found,
+        &archive,
         &mut ledger,
         &mut out,
-        &mut changes,
     );
     // Projects this pass did not read, as one behind a link: what is under them is not gone.
     let unread: Vec<String> = skipped
@@ -123,18 +128,24 @@ pub fn sync(
         .iter()
         .filter_map(|s| Some((s.key.clone(), s.dst_rel.clone(), s.modified?)))
         .collect();
+    let mut written = Vec::new();
+    let (all, returning) =
+        archive.restore(vault, followed, all, &mut ledger, &mut written, &mut out);
+    if !out.restored.is_empty() {
+        ledger.save(dirs)?;
+    }
     let mut plan = Default::default();
     let todo = classify_sources(all, vault, &ledger, &mut plan);
     out.kept.extend(plan.conflicts);
-    let mut written = Vec::new();
     for (source, seen) in todo {
         let what = if seen.is_some() { "update" } else { "copy" };
         let (key, rel) = (source.key.clone(), rel_key(&source.dst_rel));
         let (file, text) = (source_of(followed, &key), source.raw.clone());
-        match write_one(&source, seen, vault, &mut ledger, w) {
+        let was = returning.get(&key).cloned();
+        match write_one(&source, seen, was, vault, &mut ledger, w) {
             Ok(()) => {
                 let id = ledger.0.get(&key).and_then(|e| e.id.clone());
-                changes.push(Change {
+                out.changes.push(Change {
                     what,
                     key: key.clone(),
                     file,
@@ -162,20 +173,17 @@ pub fn sync(
     }
     date_back(vault, &ledger, &dated);
     archive_due(
+        dirs,
         vault,
         followed,
-        Look {
-            told,
-            second,
-            unread,
-        },
+        Look { second, unread },
         &mut ledger,
+        &mut archive,
         &mut out,
-        &mut changes,
-    );
+    )?;
     // Saved before the index runs, so a pass cut short there never forgets what it wrote.
     ledger.save(dirs)?;
-    trace(dirs, &changes);
+    trace(dirs, &out.changes);
     if out.changed() {
         index(vault)?;
         settle(&mut ledger, vault, &written)?;
@@ -213,23 +221,23 @@ pub(super) fn source_of(followed: &Path, key: &str) -> PathBuf {
 }
 
 /// Where the copy of `key` is in the vault.
-fn copy_of(vault: &Vault, key: &str) -> PathBuf {
+pub(super) fn copy_of(vault: &Vault, key: &str) -> PathBuf {
     vault.layout.memory.join(key.trim_start_matches("memory/"))
 }
 
 /// A memory folder that is now a link to another project's folder here: Claude Code's folder was
 /// renamed and left the link behind. Its copies move to the new name, so a memory stays one note,
-/// with the person's edits and removals. Where the new name already has its own copy, the old one
-/// is a second copy and goes as a gone source's would. Such a link is read where it leads, so it
-/// is taken out of `skipped`.
+/// with the person's edits and removals. Where the new name already has its own copy, archived or
+/// not, the old one is a second copy and goes as a gone source's would. Such a link is read where
+/// it leads, so it is taken out of `skipped`.
 fn renamed(
     vault: &Vault,
     followed: &Path,
     skipped: &mut Vec<(String, Skip)>,
     found: &[String],
+    archive: &Archive,
     ledger: &mut Ledger,
     out: &mut Followed,
-    changes: &mut Vec<Change>,
 ) -> Vec<String> {
     let mut second = Vec::new();
     skipped.retain(|(link, why)| {
@@ -259,10 +267,12 @@ fn renamed(
             let (from, to) = (copy_of(vault, &key), copy_of(vault, &new));
             let there = |rel: &Path| std::fs::symlink_metadata(vault.root.join(rel)).is_ok();
             // A copy takes the new name only where nothing would then be written over it: the
-            // name has no record of its own, or one of the same words.
-            let same = ledger
+            // name has no record of its own, or one of the same words. An archived copy's record
+            // is the name's record too: the name has had a memory of its own.
+            let theirs = ledger
                 .current(&new, &vault.root)
-                .is_none_or(|e| e.src_hash == ledger.0[&key].src_hash);
+                .or_else(|| archive.of(&new, &vault.root));
+            let same = theirs.is_none_or(|e| e.src_hash == ledger.0[&key].src_hash);
             match (there(&from), there(&to) || !same) {
                 // The new name has its own: the old name's copy is archived, as a gone one is.
                 (true, true) => {
@@ -272,7 +282,7 @@ fn renamed(
                 (true, false) => match rename_within(&vault.root, &from, &to) {
                     Ok(()) => {
                         out.moved.push(rel_key(&to));
-                        changes.push(Change {
+                        out.changes.push(Change {
                             what: "move",
                             key: new.clone(),
                             file: source_of(followed, &new),
@@ -285,7 +295,7 @@ fn renamed(
                     }
                 },
                 // Nothing at the old place, and the new name has its own record.
-                (false, _) if ledger.current(&new, &vault.root).is_some() => {
+                (false, _) if theirs.is_some() => {
                     ledger.0.remove(&key);
                     continue;
                 }
@@ -314,64 +324,8 @@ fn project_behind(followed: &Path, link: &str) -> Option<String> {
     (beside.ends_with("memory") && !name.is_empty()).then(|| name.to_string())
 }
 
-/// Takes the copy of a source that is no more: archived as the ledger wrote it, kept and said when
-/// the person's hand is on it. False when it could not be dealt with, so the next pass tries again.
-fn retire(
-    vault: &Vault,
-    followed: &Path,
-    key: &str,
-    entry: &LedgerEntry,
-    out: &mut Followed,
-    changes: &mut Vec<Change>,
-) -> bool {
-    let rel = copy_of(vault, key);
-    match std::fs::read(vault.root.join(&rel)) {
-        Ok(copy) if hash(&copy) == entry.dst_hash => {
-            if let Err(e) = archive(&vault.root, &rel, &vault.layout.archive) {
-                out.skipped.push((key.into(), format!("not archived: {e}")));
-                return false;
-            }
-            out.archived.push(rel_key(&rel));
-            changes.push(Change {
-                what: "archive",
-                key: key.into(),
-                file: source_of(followed, key),
-                put: None,
-            });
-        }
-        // The person's own words now: kept, said once and no longer followed.
-        Ok(_) => out.kept.push(rel_key(&rel)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return false,
-    }
-    true
-}
-
-/// What to say of `held` copies that wait for the person's word.
-pub fn held_line(held: usize) -> String {
-    format!(
-        "{held} followed memories are gone or copied twice, and are held, not archived. If that is right, `brain memory run --archive-gone` archives them"
-    )
-}
-
-/// How many copies in `vault` are held for `followed`, of those still where brain put them.
-pub fn waiting(ledger: &Ledger, vault: &Vault, followed: &Path) -> usize {
-    ledger
-        .0
-        .iter()
-        .filter(|(key, e)| {
-            e.held
-                && e.of(&vault.root)
-                && e.from.as_deref().is_none_or(|from| from == followed)
-                && vault.root.join(copy_of(vault, key)).is_file()
-        })
-        .count()
-}
-
 /// What a pass found that bears on archiving.
 struct Look {
-    /// The person has asked for what is held to be archived.
-    told: bool,
     /// Copies of memories that already have one under another name.
     second: Vec<String>,
     /// `memory/<project>/` of each project not read.
@@ -379,17 +333,17 @@ struct Look {
 }
 
 /// The one way a copy is archived. Due are those whose source was not found on this pass and the
-/// one before, and the `second` copies of memories already under another name. Many at once looks
-/// like a folder reset, replaced, half restored or linked over, so then every one of them is held
-/// until its source is back or the person says so.
+/// one before, and the `second` copies of memories already under another name. Each is recorded,
+/// and the record saved, before any file moves, so a pass cut short never loses where one went.
 fn archive_due(
+    dirs: &Dirs,
     vault: &Vault,
     followed: &Path,
     look: Look,
     ledger: &mut Ledger,
+    archive: &mut Archive,
     out: &mut Followed,
-    changes: &mut Vec<Change>,
-) {
+) -> anyhow::Result<()> {
     let mut due = Vec::new();
     for (key, entry) in &mut ledger.0 {
         if look.second.contains(key) {
@@ -408,33 +362,48 @@ fn archive_due(
             std::fs::symlink_metadata(source_of(followed, key)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound
         );
-        let seen = std::mem::replace(&mut entry.missing, gone);
-        if !gone {
-            entry.held = false;
-        } else if seen {
+        if std::mem::replace(&mut entry.missing, gone) && gone {
             due.push(key.clone());
         }
     }
-    // What was held before this look is all the word covers: it is what the person was told of.
-    let (held, mut due): (Vec<String>, Vec<String>) =
-        due.into_iter().partition(|key| ledger.0[key].held);
-    if due.len() > UNASKED {
-        for key in due.drain(..) {
-            if let Some(entry) = ledger.0.get_mut(&key) {
-                entry.held = true;
-            }
-        }
-    }
-    if look.told {
-        due.extend(held);
-    }
+    let mut moves = Vec::new();
     for key in due {
-        if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
-            ledger.0.remove(&key);
+        let rel = copy_of(vault, &key);
+        let entry = &ledger.0[&key];
+        match std::fs::read(vault.root.join(&rel)) {
+            Ok(copy) if hash(&copy) == entry.dst_hash => {
+                let to = archive.name_for(vault, &rel);
+                archive.add(&key, to.clone(), entry, followed, &vault.root);
+                moves.push((key, rel, to));
+            }
+            // The person's own words now: kept, said once and no longer followed.
+            Ok(_) => {
+                out.kept.push(rel_key(&rel));
+                ledger.0.remove(&key);
+            }
+            // Removed by the person: the record stays, so it is not copied again.
+            Err(_) => {}
         }
     }
-    let held = waiting(ledger, vault, followed);
-    out.held = (held > 0).then(|| held_line(held));
+    if moves.is_empty() {
+        return Ok(());
+    }
+    archive.save(dirs)?;
+    for (key, rel, to) in moves {
+        if let Err(e) = rename_within(&vault.root, &rel, &to) {
+            out.skipped.push((key, format!("not archived: {e}")));
+            continue;
+        }
+        ledger.0.remove(&key);
+        out.archived.push(rel_key(&rel));
+        out.changes.push(Change {
+            what: "archive",
+            file: source_of(followed, &key),
+            key,
+            put: None,
+        });
+    }
+    Ok(())
 }
 
 /// Records a pass that changed something, so each change can be read afterwards. A trace that

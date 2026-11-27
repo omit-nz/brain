@@ -9,6 +9,8 @@ use brain_platform::fs::Lock;
 
 use super::Home;
 
+mod restore;
+
 /// Claude Code's projects folder, with one project's memory.
 struct Projects {
     dir: tempfile::TempDir,
@@ -410,7 +412,7 @@ fn a_copy_of_unknown_origin_is_never_archived() {
     assert!(copy(&h, "one").is_some());
 }
 
-/// The archive takes the note's text out of the traces; the record of the archiving stays.
+/// The archiving pass records what it did without the words it took away.
 #[test]
 fn a_pass_that_archives_keeps_its_trace() {
     let (h, p) = following(&["one", "two"]);
@@ -426,9 +428,9 @@ fn a_pass_that_archives_keeps_its_trace() {
         .collect();
     let spans: Vec<_> = runs
         .iter()
-        .flat_map(|r| store.spans(&r.id).unwrap())
-        .collect();
-    assert!(spans.iter().any(|s| s.name == "archive"), "{spans:?}");
+        .map(|r| store.spans(&r.id).unwrap())
+        .find(|spans| spans.iter().any(|s| s.name == "archive"))
+        .expect("a run that archived");
     assert!(!format!("{spans:?}").contains("one first"), "{spans:?}");
 }
 
@@ -685,30 +687,6 @@ fn a_copy_whose_source_is_deleted_keeps_its_date() {
     assert_eq!(crate::changed_at(&copied), before);
 }
 
-/// Twelve memories followed, then all gone at once with one new one in their place, as when
-/// Claude Code's folder is reset.
-#[test]
-fn a_folder_that_lost_most_of_what_it_held_archives_nothing_until_told() {
-    let names: Vec<String> = (0..12).map(|i| format!("m{i}")).collect();
-    let (h, p) = following(&names.iter().map(String::as_str).collect::<Vec<_>>());
-    for name in &names {
-        p.remove(name);
-    }
-    p.write("fresh", "fresh first");
-    pass(&h);
-    let said = pass(&h);
-    assert!(said.contains("0 archived"), "{said}");
-    assert!(said.contains("12 followed memories are gone"), "{said}");
-    assert!(said.contains("brain memory run --archive-gone"), "{said}");
-    pass(&h);
-    assert!(names.iter().all(|n| copy(&h, n).is_some()));
-    // Naming the folder again is not the word.
-    let said = follow(&h, &p);
-    assert!(said.contains("0 archived"), "{said}");
-    let said = archive_gone(&h);
-    assert!(said.contains("12 archived"), "{said}");
-}
-
 /// Two projects each with a memory of one name, the old one's folder then linked to the other's:
 /// neither's words are lost.
 #[cfg(unix)]
@@ -722,6 +700,10 @@ fn two_memories_of_one_name_keep_their_words_when_the_projects_are_linked() {
     fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
     std::os::unix::fs::symlink(&other, p.path().join("-proj/memory")).unwrap();
     pass(&h);
+    pass(&h);
+    pass(&h);
+    let records = fs::read_to_string(h.home.path().join("data/follow-archive.json")).unwrap();
+    assert!(records.contains("memory/-proj/one.md"), "{records}");
     // Wherever brain keeps them: the one in the vault or its archive, the live one in search.
     let mut dirs = vec![h.vault.path().to_path_buf()];
     let mut files = Vec::new();
@@ -739,79 +721,8 @@ fn two_memories_of_one_name_keep_their_words_when_the_projects_are_linked() {
     assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
 }
 
-fn many(prefix: &str, n: usize) -> Vec<String> {
-    (0..n).map(|i| format!("{prefix}{i}")).collect()
-}
-
-fn following_many(names: &[String]) -> (Home, Projects) {
-    following(&names.iter().map(String::as_str).collect::<Vec<_>>())
-}
-
-/// A reset folder coming back a part at a time: what has not arrived yet is still not archived.
-#[test]
-fn a_hold_outlasts_a_restore_half_done() {
-    let names = many("m", 40);
-    let (h, p) = following_many(&names);
-    for name in &names {
-        p.remove(name);
-    }
-    p.write("fresh", "fresh first");
-    pass(&h);
-    pass(&h);
-    for name in &names[..38] {
-        p.write(name, &format!("{name} first"));
-    }
-    let said = pass(&h);
-    assert!(said.contains("0 archived"), "{said}");
-    assert!(names.iter().all(|n| copy(&h, n).is_some()));
-}
-
-/// As many new memories as old ones gone is no smaller a loss.
-#[test]
-fn new_memories_never_dilute_a_hold() {
-    let old = many("old", 12);
-    let (h, p) = following_many(&old);
-    for name in &old {
-        p.remove(name);
-    }
-    for name in many("new", 20) {
-        p.write(&name, "new first");
-    }
-    pass(&h);
-    let said = pass(&h);
-    assert!(said.contains("0 archived"), "{said}");
-    assert!(old.iter().all(|n| copy(&h, n).is_some()));
-}
-
-#[test]
-fn status_says_what_waits_to_be_archived() {
-    let names = many("m", 12);
-    let (h, p) = following_many(&names);
-    assert!(!h.run(&["status"]).contains("--archive-gone"));
-    for name in &names {
-        p.remove(name);
-    }
-    p.write("fresh", "fresh first");
-    pass(&h);
-    pass(&h);
-    let said = h.run(&["status"]);
-    assert!(said.contains("12 followed memories are gone"), "{said}");
-    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
-    // A copy no longer at its path waits for nothing.
-    fs::remove_file(copy_path(h.vault.path(), "m0")).unwrap();
-    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 11);
-    fs::write(h.home.path().join("data/import-ledger.json"), "not json").unwrap();
-    let said = h.run(&["status"]);
-    assert!(said.contains("import ledger cannot be read"), "{said}");
-    assert!(h.json(&["status", "--json"])["memories_waiting"].is_null());
-}
-
-fn archive_gone(h: &Home) -> String {
-    h.run(&["memory", "run", "--archive-gone"])
-}
-
 #[cfg(unix)]
-mod held_links {
+mod links {
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -832,23 +743,6 @@ mod held_links {
     fn link_old_to_new(p: &Projects) {
         fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
         symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
-    }
-
-    #[test]
-    fn linking_one_project_to_another_archives_no_crowd_unasked() {
-        let names = many("m", 12);
-        let (h, p) = following_many(&names);
-        also_under_new(&p, &names);
-        pass(&h);
-        link_old_to_new(&p);
-        for _ in 0..3 {
-            let said = pass(&h);
-            assert!(said.contains("0 archived"), "{said}");
-        }
-        assert!(names.iter().all(|n| copy(&h, n).is_some()));
-        assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
-        let said = archive_gone(&h);
-        assert!(said.contains("12 archived"), "{said}");
     }
 
     /// Every markdown file's text anywhere in the vault, the archive included.
@@ -896,6 +790,10 @@ mod held_links {
             pass(&h);
         }
         assert!(vault_texts(&h).iter().any(|t| t.contains("one first")));
+        let records = fs::read_to_string(h.home.path().join("data/follow-archive.json")).unwrap();
+        assert!(records.contains("memory/-proj/one.md"), "{records}");
+        let ledger = fs::read_to_string(h.home.path().join("data/import-ledger.json")).unwrap();
+        assert!(!ledger.contains("memory/-proj/one.md"), "{ledger}");
         assert!(
             !h.vault.path().join("working-memory/-new/one.md").exists(),
             "a removed copy stays removed"
@@ -920,59 +818,4 @@ mod held_links {
         assert!(copy(&h, "one").is_some());
         assert!(!archived(&h, "one"));
     }
-
-    /// The README's way of moving a project's memory, while another project's hold stands.
-    #[test]
-    fn moving_a_project_releases_no_hold() {
-        let names = many("m", 12);
-        let (h, p) = following_many(&names);
-        for name in &names {
-            p.remove(name);
-        }
-        p.write("stays", "stays first");
-        pass(&h);
-        pass(&h);
-        h.run(&["memory", "unfollow"]);
-        let said = follow(&h, &p);
-        assert!(said.contains("0 archived"), "{said}");
-        assert!(names.iter().all(|n| copy(&h, n).is_some()));
-    }
-}
-
-/// The word is for what has been said to be held, not for whatever has gone by then.
-#[test]
-fn archive_gone_takes_only_what_is_held() {
-    let names = many("m", 12);
-    let (h, p) = following_many(&names);
-    for name in &names {
-        p.remove(name);
-    }
-    p.write("fresh", "fresh first");
-    pass(&h);
-    // Never shown: this look is the first to find them gone twice.
-    let said = archive_gone(&h);
-    assert!(said.contains("0 archived"), "{said}");
-    assert!(names.iter().all(|n| copy(&h, n).is_some()));
-    let said = archive_gone(&h);
-    assert!(said.contains("12 archived"), "{said}");
-}
-
-#[test]
-fn status_counts_no_hold_the_word_cannot_release() {
-    let names = many("m", 12);
-    let (h, p) = following_many(&names);
-    for name in &names {
-        p.remove(name);
-    }
-    p.write("fresh", "fresh first");
-    pass(&h);
-    pass(&h);
-    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 12);
-    h.run(&["memory", "unfollow"]);
-    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 0);
-    let other = Projects::new();
-    other.write("elsewhere", "elsewhere first");
-    let said = follow(&h, &other);
-    assert!(!said.contains("--archive-gone"), "{said}");
-    assert_eq!(h.json(&["status", "--json"])["memories_waiting"], 0);
 }

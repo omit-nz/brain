@@ -4,6 +4,7 @@
 //! A ledger remembers what was copied, so a second import updates only what changed and never
 //! overwrites a copy the person edited.
 
+mod archived;
 mod blocklist;
 mod follow;
 mod memory;
@@ -23,8 +24,9 @@ use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use archived::{Archive, archived_line};
 pub use blocklist::Blocklist;
-pub use follow::{Followed, held_line, sync, waiting};
+pub use follow::{Followed, sync};
 pub use report::report;
 
 /// Days over which first reviews are spread.
@@ -48,9 +50,6 @@ pub struct LedgerEntry {
     /// The last pass did not find the source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing: bool,
-    /// Its copy was due to be archived with too many others; it waits for the person's word.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub held: bool,
 }
 
 impl LedgerEntry {
@@ -113,12 +112,13 @@ impl Ledger {
             .count()
     }
 
-    /// Whether a memory copy in `vault` came from `folder`, or may have.
-    fn holds_memory_of(&self, folder: &Path, vault: &Path) -> bool {
+    /// Whether a memory copy that is still there came from `folder`, or may have.
+    fn holds_memory_of(&self, folder: &Path, vault: &Vault) -> bool {
         self.0.iter().any(|(key, e)| {
             key.starts_with("memory/")
-                && e.of(vault)
+                && e.of(&vault.root)
                 && e.from.as_deref().is_none_or(|from| from == folder)
+                && vault.root.join(follow::copy_of(vault, key)).is_file()
         })
     }
 
@@ -367,21 +367,26 @@ pub fn apply(
     let todo = classify_sources(all, dst, ledger, &mut plan);
     let mut written = Vec::new();
     for (s, seen) in todo {
-        write_one(&s, seen, dst, ledger, w)?;
+        write_one(&s, seen, None, dst, ledger, w)?;
         written.push(s.key);
     }
     Ok((plan, written))
 }
 
-/// Writes one source's copy and records it.
+/// Writes one source's copy and records it. `returning` is the id its copy had when it was
+/// archived, for a source that has no record because of that.
 fn write_one(
     s: &Source,
     seen: Option<String>,
+    returning: Option<String>,
     dst: &Vault,
     ledger: &mut Ledger,
     w: &Written<'_>,
 ) -> anyhow::Result<()> {
-    let prior = ledger.current(&s.key, &dst.root).and_then(|e| e.id.clone());
+    let prior = ledger
+        .current(&s.key, &dst.root)
+        .and_then(|e| e.id.clone())
+        .or(returning);
     let (text, id) = if s.memory {
         let id = prior.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         (memory::to_note(s, &id, w)?, Some(id))
@@ -415,7 +420,6 @@ fn write_one(
             from: s.from.clone(),
             vault: Some(dst.root.clone()),
             missing: false,
-            held: false,
         },
     );
     Ok(())
