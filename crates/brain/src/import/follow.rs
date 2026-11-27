@@ -1,7 +1,9 @@
 //! `brain memory follow`: the memory import run again and again, so a copy changes when its
 //! source does and leaves search when its source is gone. Nothing is taken away on doubt: only a
 //! copy this folder gave, untouched since, whose source two passes in a row found gone. A project
-//! whose memory folder is now a link to another's was renamed, and its copies move with it.
+//! whose memory folder is now a link to another's was renamed, and its copies move with it, as do
+//! those of a memory found unchanged under another project the moment its old place is empty. A
+//! pass that would take most of what it follows takes nothing until the person says so.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -13,7 +15,13 @@ use brain_platform::fs::{archive, is_link, rename_within, set_modified};
 use brain_reflex::trace::{Call, Kind, Reply};
 use serde_json::json;
 
-use super::{Ledger, LedgerEntry, Written, classify_sources, hash, memory, settle, write_one};
+use super::{
+    Ledger, LedgerEntry, Source, Written, classify_sources, copy_rel, hash, memory, settle,
+    write_one,
+};
+
+/// Gone memories archived without asking, when they are also most of those followed.
+const UNASKED: usize = 10;
 
 /// What one pass did, by vault path.
 #[derive(Debug, Default)]
@@ -27,6 +35,8 @@ pub struct Followed {
     pub kept: Vec<String>,
     /// Sources that could not be taken, and why.
     pub skipped: Vec<(String, String)>,
+    /// Why nothing gone was archived, and what to run if it should be.
+    pub held: Option<String>,
 }
 
 impl Followed {
@@ -59,13 +69,15 @@ struct Change {
     put: Option<(Option<String>, String)>,
 }
 
-/// One pass over `followed`. The caller holds the import lock. `index` brings the index up to
+/// One pass over `followed`; `told` when the person has just asked for this folder to be followed,
+/// which lets it archive however much is gone. The caller holds the import lock. `index` brings the index up to
 /// date with what was written, and the ledger is settled after it.
 pub fn sync(
     dirs: &Dirs,
     vault: &Vault,
     followed: &Path,
     w: &Written<'_>,
+    told: bool,
     index: impl FnOnce(&Vault) -> anyhow::Result<()>,
 ) -> anyhow::Result<Followed> {
     // A vault that is not there would be made again, empty but for the memories.
@@ -83,7 +95,7 @@ pub fn sync(
     }
     let mut skipped = Vec::new();
     let all = memory::sources(followed, &vault.layout.memory, &mut skipped)?;
-    let mut ledger = Ledger::load(dirs)?;
+    let mut ledger = Ledger::load(dirs, vault)?;
     if all.is_empty() && ledger.holds_memory_of(followed, &vault.root) {
         bail!(
             "{} holds no memory file, while brain has copies from it; nothing changed",
@@ -104,6 +116,21 @@ pub fn sync(
     );
     out.skipped
         .extend(skipped.into_iter().map(|(key, why)| (key, why.describe())));
+    for s in &all {
+        let free = ledger.current(&s.key, &vault.root).is_none()
+            && std::fs::symlink_metadata(vault.root.join(&s.dst_rel)).is_err();
+        if free && let Some(old) = left_empty(vault, followed, &ledger, &found, s) {
+            carry(
+                vault,
+                followed,
+                &mut ledger,
+                &old,
+                &s.key,
+                &mut out,
+                &mut changes,
+            );
+        }
+    }
     let dated: Vec<(String, PathBuf, SystemTime)> = all
         .iter()
         .filter_map(|s| Some((s.key.clone(), s.dst_rel.clone(), s.modified?)))
@@ -137,16 +164,21 @@ pub fn sync(
     }
     // A source seen here is this folder's from now on, and is not missing.
     for key in &found {
+        let present =
+            copy_rel(&vault.layout, key).is_some_and(|rel| vault.root.join(rel).is_file());
         if let Some(entry) = ledger.0.get_mut(key)
             && entry.of(&vault.root)
         {
             entry.from = Some(followed.to_path_buf());
-            entry.vault = Some(vault.root.clone());
             entry.missing = false;
+            // Only a copy that is here says which vault an older record is of.
+            if present {
+                entry.vault = Some(vault.root.clone());
+            }
         }
     }
     date_back(vault, &ledger, &dated);
-    gone(vault, followed, &mut ledger, &mut out, &mut changes);
+    gone(vault, followed, told, &mut ledger, &mut out, &mut changes);
     // Saved before the index runs, so a pass cut short never forgets what it wrote.
     ledger.save(dirs)?;
     trace(dirs, &changes);
@@ -186,7 +218,7 @@ pub(super) fn source_of(followed: &Path, key: &str) -> PathBuf {
     }
 }
 
-/// Where the copy of `key` is in the vault.
+/// Where the copy of the memory `key` is in the vault.
 fn copy_of(vault: &Vault, key: &str) -> PathBuf {
     vault.layout.memory.join(key.trim_start_matches("memory/"))
 }
@@ -229,41 +261,104 @@ fn renamed(
             if !found.contains(&new) {
                 continue;
             }
-            let (from, to) = (copy_of(vault, &key), copy_of(vault, &new));
-            let moved = match ledger.current(&new, &vault.root) {
-                Some(_) => Err(std::io::ErrorKind::AlreadyExists.into()),
-                None => rename_within(&vault.root, &from, &to),
-            };
-            match moved {
-                Ok(()) => {
-                    out.moved.push(rel_key(&to));
-                    changes.push(Change {
-                        what: "move",
-                        key: new.clone(),
-                        file: source_of(followed, &new),
-                        put: None,
-                    });
-                }
-                // Nothing at the old place: the person removed it, or a pass cut short had
-                // moved it already. The record moves either way.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
-                        ledger.0.remove(&key);
-                    }
+            // Two records of one memory, as when a pass saw both names: the copy brain made later
+            // gives way, unless the person has had their hand on it.
+            let later = ledger.current(&new, &vault.root).is_some_and(|made| {
+                made.id > ledger.0[&key].id
+                    && std::fs::read(vault.root.join(copy_of(vault, &new)))
+                        .is_ok_and(|copy| hash(&copy) == made.dst_hash)
+            });
+            if later {
+                if !retire(vault, followed, &new, &ledger.0[&new], out, changes) {
                     continue;
                 }
-                Err(e) => {
-                    out.skipped.push((key, format!("not moved: {e}")));
-                    continue;
+                ledger.forget(&new);
+            }
+            if ledger.current(&new, &vault.root).is_some() {
+                if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
+                    ledger.forget(&key);
                 }
+                continue;
             }
-            if let Some(entry) = ledger.0.remove(&key) {
-                ledger.0.insert(new, entry);
-            }
+            carry(vault, followed, ledger, &key, &new, out, changes);
         }
         false
     });
+}
+
+/// Takes `old`'s copy and record to `new`, the same memory under another project's name.
+fn carry(
+    vault: &Vault,
+    followed: &Path,
+    ledger: &mut Ledger,
+    old: &str,
+    new: &str,
+    out: &mut Followed,
+    changes: &mut Vec<Change>,
+) {
+    let (from, to) = (copy_of(vault, old), copy_of(vault, new));
+    match rename_within(&vault.root, &from, &to) {
+        Ok(()) => {
+            out.moved.push(rel_key(&to));
+            changes.push(Change {
+                what: "move",
+                key: new.into(),
+                file: source_of(followed, new),
+                put: None,
+            });
+        }
+        // Nothing at the old place: the person removed it, or a pass cut short had moved it
+        // already. The record moves either way.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // The person's own file is where the copy would go.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if retire(vault, followed, old, &ledger.0[old], out, changes) {
+                ledger.forget(old);
+            }
+            return;
+        }
+        Err(e) => {
+            out.skipped.push((old.into(), format!("not moved: {e}")));
+            return;
+        }
+    }
+    if let Some(entry) = ledger.0.remove(old) {
+        ledger.0.insert(new.into(), entry);
+    }
+}
+
+/// The record `source` is the same memory as: same file name and words, under another project
+/// where it is no longer found. A project moved with no link, or not yet linked, looks like this.
+fn left_empty(
+    vault: &Vault,
+    followed: &Path,
+    ledger: &Ledger,
+    found: &[String],
+    source: &Source,
+) -> Option<String> {
+    let words = hash(source.raw.as_bytes());
+    let name = source.key.rsplit('/').next()?;
+    ledger
+        .0
+        .iter()
+        .find(|(key, e)| {
+            key.starts_with("memory/")
+                && key.rsplit('/').next() == Some(name)
+                && e.src_hash == words
+                && e.of(&vault.root)
+                && e.from.as_deref().is_none_or(|from| from == followed)
+                && !found.contains(key)
+                && not_found(followed, key)
+        })
+        .map(|(key, _)| key.clone())
+}
+
+/// Whether nothing is where `key`'s source was: any other answer means unread, not gone.
+fn not_found(followed: &Path, key: &str) -> bool {
+    matches!(
+        std::fs::symlink_metadata(source_of(followed, key)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 /// The project whose memory folder `link`, a `memory/<project>` the pass did not follow, leads to
@@ -312,15 +407,18 @@ fn retire(
     true
 }
 
-/// Deals with the copies whose source is gone: not found, on this pass and the one before.
+/// Deals with the copies whose source is gone: not found, on this pass and the one before. Most of
+/// the followed memories going at once looks like a folder reset or replaced, so then nothing is
+/// taken until the person says so.
 fn gone(
     vault: &Vault,
     followed: &Path,
+    told: bool,
     ledger: &mut Ledger,
     out: &mut Followed,
     changes: &mut Vec<Change>,
 ) {
-    let mut forget = Vec::new();
+    let (mut all, mut ripe) = (0, Vec::new());
     for (key, entry) in &mut ledger.0 {
         if !key.starts_with("memory/")
             || entry.from.as_deref() != Some(followed)
@@ -328,21 +426,24 @@ fn gone(
         {
             continue;
         }
-        // Any other answer than "not found" means unread, not gone.
-        let not_found = matches!(
-            std::fs::symlink_metadata(source_of(followed, key)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound
-        );
-        if !not_found || !std::mem::replace(&mut entry.missing, true) {
-            entry.missing = not_found;
-            continue;
-        }
-        if retire(vault, followed, key, entry, out, changes) {
-            forget.push(key.clone());
+        all += 1;
+        let gone = not_found(followed, key);
+        if std::mem::replace(&mut entry.missing, gone) && gone {
+            ripe.push(key.clone());
         }
     }
-    for key in forget {
-        ledger.0.remove(&key);
+    if !told && ripe.len() > UNASKED && ripe.len() * 2 > all {
+        out.held = Some(format!(
+            "{} of {all} followed memories are gone from {followed}; none archived. If that is right, run `brain memory follow \"{followed}\"`",
+            ripe.len(),
+            followed = followed.display(),
+        ));
+        return;
+    }
+    for key in ripe {
+        if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
+            ledger.forget(&key);
+        }
     }
 }
 

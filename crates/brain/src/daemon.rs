@@ -91,7 +91,7 @@ fn follow_memory(
     };
     let vault = Vault::open(&config.vault)?;
     let w = Written::for_memory(&config.me, clock.today(), &vault);
-    let done = import::sync(dirs, &vault, followed, &w, |vault| {
+    let done = import::sync(dirs, &vault, followed, &w, false, |vault| {
         // The whole vault is read, so a note someone is typing gets no id here either.
         let now = clock.now();
         let r = idx.reindex_settled(vault, now.checked_sub(SETTLE)?, now)?;
@@ -312,15 +312,17 @@ fn serve(
                 Ok(Some(done)) => {
                     changed |= done.changed();
                     embedding |= done.changed() && provider.is_some();
-                    (done.changed() || !done.kept.is_empty() || !done.skipped.is_empty()).then(
-                        || {
-                            let mut said = format!("memory: {}", done.summary());
-                            for path in &done.kept {
-                                said.push_str(&format!("\nmemory: kept as it is: {path}"));
-                            }
-                            said
-                        },
-                    )
+                    let news = done.changed() || !done.kept.is_empty() || !done.skipped.is_empty();
+                    (news || done.held.is_some()).then(|| {
+                        let mut said = format!("memory: {}", done.summary());
+                        if let Some(held) = &done.held {
+                            said.push_str(&format!("\nmemory: {held}"));
+                        }
+                        for path in &done.kept {
+                            said.push_str(&format!("\nmemory: kept as it is: {path}"));
+                        }
+                        said
+                    })
                 }
                 Ok(None) => None,
                 Err(e) => Some(format!("memory: {e:#}")),

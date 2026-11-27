@@ -12,6 +12,8 @@ const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_verdicts.sql")];
 
 /// A hook has 250 ms in all, so it never waits long for another writer.
 const BUSY: Duration = Duration::from_millis(50);
+/// What the daemon waits, whose removals are not tried again.
+const PATIENT: Duration = Duration::from_secs(5);
 
 /// How long a verdict nobody labelled is kept.
 const RETENTION: SignedDuration = SignedDuration::from_hours(90 * 24);
@@ -55,6 +57,11 @@ impl Verdicts {
         let conn = db::open(path, MIGRATIONS)?;
         conn.busy_timeout(BUSY)?;
         Ok(Verdicts { conn })
+    }
+
+    /// For a caller with no hook's budget to keep.
+    pub(crate) fn wait_longer(&self) -> anyhow::Result<()> {
+        Ok(self.conn.busy_timeout(PATIENT)?)
     }
 
     pub fn insert(&mut self, row: &Row) -> anyhow::Result<()> {

@@ -417,3 +417,21 @@ fn a_kept_or_moved_note_is_not_purged() {
     h.run(&["index"]);
     assert_eq!(holding(&h, 1), 1);
 }
+
+/// A pass killed after it dropped a note and before it could say so.
+#[test]
+fn a_pass_cut_short_after_removing_a_note_still_purges_it() {
+    let h = briefed();
+    fs::remove_file(h.vault.path().join("due.md")).unwrap();
+    h.put("other.md", &note(2, "review: 2099-01-01"));
+    let cut = h
+        .brain()
+        .env("BRAIN_TEST_ABORT_AFTER_NOTES", "1")
+        .arg("index")
+        .output()
+        .unwrap();
+    assert!(!cut.status.success());
+    assert_eq!(holding(&h, 1), 1, "not purged yet");
+    h.run(&["index"]);
+    assert_eq!(holding(&h, 1), 0);
+}

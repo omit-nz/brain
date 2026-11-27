@@ -890,3 +890,43 @@ fn status_counts_copies_behind_their_source() {
     fs::remove_file(i.h.vault.path().join("3-permanent/heron.md")).unwrap();
     assert_eq!(i.h.json(&["status", "--json"])["behind_source"], 1);
 }
+
+/// A copy made before the ledger kept the source folder learns it when its source is read again.
+#[test]
+fn a_reimport_records_where_an_older_copy_came_from() {
+    let (i, note, memory) = imported_birds();
+    let path = i.h.home.path().join("data/import-ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for entry in ledger.as_object_mut().unwrap().values_mut() {
+        let entry = entry.as_object_mut().unwrap();
+        entry.remove("from");
+        entry.remove("vault");
+    }
+    fs::write(&path, ledger.to_string()).unwrap();
+    // The person's own words in one copy; the other is as brain wrote it.
+    let copy = i.h.vault.path().join("3-permanent/heron.md");
+    let edited = format!("{}mine too\n", fs::read_to_string(&copy).unwrap());
+    fs::write(&copy, edited).unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    i.h.run(&["index"]);
+    fs::write(&note, "the heron plan, revised\n").unwrap();
+    fs::write(&memory, "the egret plan, revised\n").unwrap();
+    assert!(flagged(&i.h, "heron"));
+    assert!(flagged(&i.h, "egret"));
+}
+
+#[test]
+fn a_long_open_search_sees_the_ledger_as_it_is_now() {
+    let (i, note, _) = imported_birds();
+    fs::write(&note, "the heron plan, revised\n").unwrap();
+    let mut m = crate::mcp::Mcp::start(&i.h);
+    let mut search = || {
+        m.text("search_my_brain", serde_json::json!({ "query": "heron" }))
+            .0
+    };
+    assert!(search().contains("source_newer"));
+    i.import(&[]);
+    assert!(!search().contains("source_newer"), "the copy was updated");
+}

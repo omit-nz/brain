@@ -165,6 +165,7 @@ pub fn purge(data: &Path, sources: &[String]) -> anyhow::Result<()> {
     let verdicts = data.join(VERDICTS);
     if verdicts.exists() {
         note(Verdicts::open(&verdicts).and_then(|verdicts| {
+            verdicts.wait_longer()?;
             let each = sources.iter().map(|s| verdicts.purge(s).map(drop));
             // Collected first, so one failure does not stop the others being tried.
             each.collect::<Vec<_>>().into_iter().collect()

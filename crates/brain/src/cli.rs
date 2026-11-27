@@ -446,6 +446,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
 
 fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::Result<()> {
     let mut config = Config::load(dirs)?;
+    // Naming the folder is the person's word that what is gone from it is gone.
+    let told = matches!(action, MemoryAction::Follow { .. });
     match action {
         MemoryAction::Unfollow => {
             config.memory.follow = None;
@@ -470,7 +472,7 @@ fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::R
     let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
     let writer = Lock::try_acquire(&writer_lock(dirs))?;
     let w = Written::for_memory(&config.me, clock.today(), &vault);
-    let done = import::sync(dirs, &vault, followed, &w, |vault| {
+    let done = import::sync(dirs, &vault, followed, &w, told, |vault| {
         if writer.is_some() {
             let r = index(dirs)?.reindex(vault)?;
             daemon::forget(dirs, &r);
@@ -478,6 +480,7 @@ fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::R
         Ok(())
     })?;
     let mut lines = vec![done.summary()];
+    lines.extend(done.held.clone());
     lines.extend(done.kept.iter().map(|p| format!("kept as it is: {p}")));
     lines.extend(
         done.skipped
@@ -684,10 +687,15 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     usage::searched(&usage::store(dirs), clock, Door::Cli, text, &found, ms);
     let gap = is_gap(&found);
     let hits = found.hits;
-    let newer = match Vault::open(&config.vault) {
-        Ok(vault) => import::newer_sources(dirs, &vault, hits.iter().map(|h| h.path.as_str())),
-        Err(_) => vec![None; hits.len()],
-    };
+    // An unreadable ledger flags nothing: the notes are still worth showing.
+    let vault = Vault::open(&config.vault).ok();
+    let ledger = vault
+        .as_ref()
+        .and_then(|vault| Ledger::load(dirs, vault).ok());
+    let newer: Vec<_> = hits
+        .iter()
+        .map(|h| ledger.as_ref()?.moved_on(vault.as_ref()?, &h.path))
+        .collect();
     if s.json {
         let rows: Vec<_> = hits
             .iter()
@@ -925,7 +933,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
     let behind = match Vault::open(&config.vault) {
-        Ok(vault) => Ledger::load(dirs).map_or(0, |ledger| ledger.behind(&vault)),
+        Ok(vault) => Ledger::load(dirs, &vault).map_or(0, |ledger| ledger.behind(&vault)),
         Err(_) => 0,
     };
     if let Some(why) = other {
@@ -1025,7 +1033,7 @@ fn import_learning_loop(
     } else {
         Some(Lock::acquire(&dirs.data.join(import::LOCK))?)
     };
-    let mut ledger = Ledger::load(dirs)?;
+    let mut ledger = Ledger::load(dirs, &dst)?;
     // Held through the copy too, so a daemon started mid-import waits for it.
     let lock = if a.dry_run {
         None

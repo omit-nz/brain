@@ -561,3 +561,21 @@ fn a_verdict_store_that_cannot_be_purged_still_purges_the_traces() {
     assert!(brain_reflex::purge(&env.data, &["session:s-1".to_string()]).is_err());
     assert_eq!(home.runs().len(), 0);
 }
+
+/// A purge runs in the daemon, which has no hook's budget to keep.
+#[test]
+fn a_purge_waits_for_a_writer() {
+    let home = Home::temp();
+    let env = home.env();
+    let payload = home.payload("s-1", "alpha\n");
+    fire(Point::Prompt, payload, &[], &[SHADOW], &env).unwrap();
+    let writer = rusqlite::Connection::open(env.data.join(VERDICTS)).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let held = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        writer.execute_batch("COMMIT").unwrap();
+    });
+    brain_reflex::purge(&env.data, &["session:s-1".to_string()]).unwrap();
+    held.join().unwrap();
+    assert_eq!(home.verdicts().rows().unwrap(), []);
+}

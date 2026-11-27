@@ -7,6 +7,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::SystemTime;
 
 use brain::fence::{attrs, escape, fence_ref};
 use brain::update;
@@ -29,7 +30,7 @@ use serde::Deserialize;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::daemon::writer_lock;
-use crate::import;
+use crate::import::{self, Ledger};
 use crate::out::terminal;
 use crate::room::{self, Post};
 use crate::usage;
@@ -118,7 +119,12 @@ pub fn fence_post(p: &Post) -> String {
     }
 }
 
+/// The import ledger as last read, and what it was read of: the vault, and the file's time and
+/// size. A server searches again and again, and the ledger holds a record for every copy.
+type Read = (PathBuf, SystemTime, u64, Arc<Ledger>);
+
 struct State {
+    ledger: Mutex<Option<Read>>,
     index: Mutex<Index>,
     provider: OnceLock<Option<Box<dyn EmbeddingProvider>>>,
     /// The config as it is now is read for each call: an AI app stays open across a `brain init`.
@@ -137,6 +143,22 @@ impl State {
     fn current(&self) -> anyhow::Result<(Vault, String)> {
         let config = Config::load(&self.dirs)?;
         Ok((Vault::open(&config.vault)?, config.me))
+    }
+
+    /// The ledger for `vault`, read again only when it or the vault has changed. `None` while it
+    /// cannot be read, which flags nothing.
+    fn ledger(&self, vault: &Vault) -> Option<Arc<Ledger>> {
+        let file = std::fs::metadata(self.dirs.data.join(import::LEDGER)).ok()?;
+        let (at, size) = (file.modified().ok()?, file.len());
+        let mut held = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((root, was_at, was_size, ledger)) = &*held
+            && (root, *was_at, *was_size) == (&vault.root, at, size)
+        {
+            return Some(ledger.clone());
+        }
+        let ledger = Arc::new(Ledger::load(&self.dirs, vault).ok()?);
+        *held = Some((vault.root.clone(), at, size, ledger.clone()));
+        Some(ledger)
     }
 
     /// The index to answer from: refused while it holds another vault's notes.
@@ -202,15 +224,11 @@ impl State {
                 Scope::SharedOnly => "Notes that are not private:".into(),
             });
         }
-        let paths = found.hits.iter().map(|h| h.path.as_str());
-        let newer = import::newer_sources(&self.dirs, &vault, paths);
-        out.extend(
-            found
-                .hits
-                .iter()
-                .zip(newer)
-                .map(|(hit, newer)| fence(hit, newer.is_some())),
-        );
+        let ledger = self.ledger(&vault);
+        out.extend(found.hits.iter().map(|hit| {
+            let newer = ledger.as_ref().and_then(|l| l.moved_on(&vault, &hit.path));
+            fence(hit, newer.is_some())
+        }));
         Ok(out.join("\n"))
     }
 }
@@ -519,6 +537,7 @@ pub fn run(
     // Refused at the start, not at the first call, when there is no vault to serve.
     Vault::open(&Config::load(dirs)?.vault)?;
     let state = State {
+        ledger: Mutex::new(None),
         index: Mutex::new(Index::open(&dirs.data.join("index.db"))?),
         provider: OnceLock::new(),
         dirs: Dirs {
