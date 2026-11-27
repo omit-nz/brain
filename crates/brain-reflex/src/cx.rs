@@ -17,6 +17,8 @@ pub struct Env {
     pub data: PathBuf,
     pub vault: PathBuf,
     pub me: String,
+    /// The memory folders whose indexes a session starts with.
+    pub indexes: Vec<PathBuf>,
     pub clock: Arc<dyn Clock>,
     /// How long to wait for the trace store before running untraced; `TRACE_WAIT` in a hook.
     pub trace_wait: Duration,

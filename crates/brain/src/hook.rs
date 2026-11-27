@@ -14,6 +14,7 @@ use brain_platform::clock::SystemClock;
 use brain_platform::dirs::Dirs;
 use brain_reflex::{Env, Point, REGISTRY, TRACE_WAIT, fire};
 
+use crate::brief;
 use crate::config::Config;
 use crate::out::terminal;
 
@@ -65,8 +66,9 @@ fn run(point: Point) -> anyhow::Result<Option<String>> {
         data: dirs.data,
         vault: config.vault,
         me: config.me,
+        indexes: config.session.indexes,
         clock: Arc::new(SystemClock),
         trace_wait: widened().unwrap_or(TRACE_WAIT),
     };
-    fire(point, payload, REGISTRY, &env)
+    fire(point, payload, &[brief::BRIEF], REGISTRY, &env)
 }

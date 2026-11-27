@@ -47,10 +47,11 @@ fn a_hook_records_a_run_that_replays() {
         vault: h.vault.path().into(),
         me: "robin".into(),
         clock: std::sync::Arc::new(brain_platform::clock::SystemClock),
+        indexes: Vec::new(),
         trace_wait: brain_reflex::TRACE_WAIT,
     };
     let mut replay = Run::replay(&store, &runs[0].id).unwrap();
-    let decided = decide(Point::Prompt, REGISTRY, &env, &mut replay, || {
+    let decided = decide(Point::Prompt, &[], REGISTRY, &env, &mut replay, || {
         panic!("went live")
     })
     .unwrap();

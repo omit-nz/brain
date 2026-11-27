@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use brain_reflex::{Point, REGISTRY, Reflex, Stage, TRACES, VERDICTS, fire};
+use brain_reflex::{Point, REGISTRY, Reflex, Stage, Standing, TRACES, VERDICTS, fire};
 use omit_agent_trace::Kind;
 use serde_json::{Value, json};
 
@@ -22,7 +22,7 @@ fn a_fire_is_traced_step_by_step() {
     let home = Home::temp();
     let payload = home.payload("s-1", "alpha\nbravo\n");
     let file = payload["file"].as_str().unwrap().to_string();
-    fire(Point::Prompt, payload, &[SHADOW], &home.env()).unwrap();
+    fire(Point::Prompt, payload, &[], &[SHADOW], &home.env()).unwrap();
 
     let runs = home.runs();
     assert_eq!(runs.len(), 1);
@@ -58,6 +58,7 @@ fn a_shadow_reflex_logs_and_says_nothing() {
     let out = fire(
         Point::Prompt,
         home.payload("s-1", "alpha\n"),
+        &[],
         &[SHADOW],
         &home.env(),
     )
@@ -82,11 +83,19 @@ fn a_shadow_reflex_logs_and_says_nothing() {
 fn a_live_reflex_says_its_picks_once_a_session() {
     let home = Home::temp();
     let env = home.env();
-    let first = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env).unwrap();
+    let first = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
     assert_eq!(said(first).as_deref(), Some("alpha"));
     let second = fire(
         Point::Prompt,
         home.payload("s-1", "alpha\nbravo\n"),
+        &[],
         &[LIVE],
         &env,
     )
@@ -95,12 +104,20 @@ fn a_live_reflex_says_its_picks_once_a_session() {
     let third = fire(
         Point::Prompt,
         home.payload("s-1", "alpha\nbravo\n"),
+        &[],
         &[LIVE],
         &env,
     )
     .unwrap();
     assert_eq!(third, None);
-    let other = fire(Point::Prompt, home.payload("s-2", "alpha\n"), &[LIVE], &env).unwrap();
+    let other = fire(
+        Point::Prompt,
+        home.payload("s-2", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
     assert_eq!(said(other).as_deref(), Some("alpha"));
 }
 
@@ -110,6 +127,7 @@ fn a_reflex_under_its_floor_logs_and_says_nothing() {
     let out = fire(
         Point::Prompt,
         home.payload("s-1", "ab\n"),
+        &[],
         &[LIVE],
         &home.env(),
     )
@@ -133,7 +151,13 @@ fn a_verdict_is_written_before_it_is_said() {
             "CREATE TRIGGER no BEFORE INSERT ON verdicts BEGIN SELECT RAISE(ABORT, 'no'); END",
         )
         .unwrap();
-    let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env);
+    let out = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    );
     assert!(out.is_err(), "{out:?}");
 }
 
@@ -151,6 +175,7 @@ fn one_reflex_failing_leaves_the_others_their_say() {
     let out = fire(
         Point::Prompt,
         home.payload("s-1", "alpha\n"),
+        &[],
         &[broken, LIVE],
         &home.env(),
     )
@@ -164,6 +189,7 @@ fn an_event_for_no_reflex_is_still_recorded() {
     let out = fire(
         Point::Stop,
         json!({ "session_id": "s-1" }),
+        &[],
         &[SHADOW],
         &home.env(),
     )
@@ -179,7 +205,14 @@ fn a_trace_store_that_cannot_open_never_changes_the_hook() {
     let home = Home::temp();
     let env = home.env();
     std::fs::create_dir_all(env.data.join(TRACES)).unwrap();
-    let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env).unwrap();
+    let out = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
     assert_eq!(said(out).as_deref(), Some("alpha"));
     assert_eq!(home.verdicts().rows().unwrap()[0].run, None);
 }
@@ -193,6 +226,7 @@ fn the_trace_and_verdict_files_are_private() {
     fire(
         Point::Prompt,
         home.payload("s-1", "alpha\n"),
+        &[],
         &[SHADOW],
         &env,
     )
@@ -229,6 +263,7 @@ fn old_unlabelled_verdicts_are_pruned() {
         fire(
             Point::Prompt,
             home.payload(session, "alpha\n"),
+            &[],
             &[SHADOW],
             &env,
         )
@@ -271,11 +306,25 @@ fn locked(db: &std::path::Path) -> rusqlite::Connection {
 fn a_locked_trace_store_does_not_silence_the_hook() {
     let home = Home::temp();
     let mut env = home.env();
-    fire(Point::Prompt, home.payload("s-0", "alpha\n"), &[LIVE], &env).unwrap();
+    fire(
+        Point::Prompt,
+        home.payload("s-0", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
     let _lock = locked(&env.data.join(TRACES));
     env.trace_wait = brain_reflex::TRACE_WAIT;
     let start = std::time::Instant::now();
-    let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env).unwrap();
+    let out = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "{:?}",
@@ -288,10 +337,23 @@ fn a_locked_trace_store_does_not_silence_the_hook() {
 fn a_locked_verdict_store_is_not_waited_on() {
     let home = Home::temp();
     let env = home.env();
-    fire(Point::Prompt, home.payload("s-0", "alpha\n"), &[LIVE], &env).unwrap();
+    fire(
+        Point::Prompt,
+        home.payload("s-0", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
     let _lock = locked(&env.data.join(VERDICTS));
     let start = std::time::Instant::now();
-    let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env);
+    let out = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[],
+        &[LIVE],
+        &env,
+    );
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "{:?}",
@@ -309,6 +371,7 @@ fn nothing_is_logged_as_said_while_the_trace_is_still_being_written() {
     fire(
         Point::Prompt,
         home.payload("s-0", "alpha\n"),
+        &[],
         &[SHADOW],
         &env,
     )
@@ -325,7 +388,8 @@ fn nothing_is_logged_as_said_while_the_trace_is_still_being_written() {
         .unwrap();
     let verdicts = home.verdicts();
     let payload = home.payload("s-1", "alpha\n");
-    let firing = std::thread::spawn(move || fire(Point::Prompt, payload, &[LIVE], &env).unwrap());
+    let firing =
+        std::thread::spawn(move || fire(Point::Prompt, payload, &[], &[LIVE], &env).unwrap());
     std::thread::sleep(Duration::from_millis(500));
     assert!(
         !firing.is_finished(),
@@ -346,7 +410,7 @@ fn a_row_names_its_backend_and_the_sources_it_read() {
     let env = home.env();
     let payload = home.payload("s-1", "alpha\n");
     let file = format!("file:{}", payload["file"].as_str().unwrap());
-    fire(Point::Prompt, payload, &[SHADOW], &env).unwrap();
+    fire(Point::Prompt, payload, &[], &[SHADOW], &env).unwrap();
     let row = &home.verdicts().rows().unwrap()[0];
     assert_eq!(row.backend, "rule");
     assert_eq!(row.sources, [file, "session:s-1".to_string()]);
@@ -360,6 +424,7 @@ fn only_a_backends_own_picks_are_remembered() {
     fire(
         Point::Prompt,
         home.payload("s-1", "alpha\n"),
+        &[],
         &[SHADOW],
         &env,
     )
@@ -378,5 +443,86 @@ fn only_a_backends_own_picks_are_remembered() {
             .unwrap()
             .len(),
         0
+    );
+}
+
+fn greets(cx: &mut brain_reflex::Cx<'_>) -> anyhow::Result<Option<String>> {
+    let word: String = cx.read("greeting", &json!(null), |_| {
+        Ok(("hello".to_string(), Vec::new()))
+    })?;
+    Ok(Some(word))
+}
+
+const GREETING: Standing = Standing {
+    name: "greeting",
+    point: Point::Prompt,
+    say: greets,
+};
+
+#[test]
+fn a_standing_says_first_and_is_traced() {
+    let home = Home::temp();
+    let out = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[GREETING],
+        &[LIVE],
+        &home.env(),
+    )
+    .unwrap();
+    assert_eq!(said(out).as_deref(), Some("hello\n\nalpha"));
+    let spans = &home.runs()[0].2;
+    let step = spans
+        .iter()
+        .find(|s| s.name == "greeting" && s.kind == Kind::Step)
+        .unwrap();
+    assert!(spans.iter().any(|s| s.parent.as_ref() == Some(&step.id)));
+}
+
+#[test]
+fn a_verdict_that_cannot_be_written_never_drops_a_standing() {
+    let home = Home::temp();
+    let env = home.env();
+    std::fs::create_dir_all(&env.data).unwrap();
+    home.verdicts();
+    rusqlite::Connection::open(env.data.join(VERDICTS))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER no BEFORE INSERT ON verdicts BEGIN SELECT RAISE(ABORT, 'no'); END",
+        )
+        .unwrap();
+    let out = fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[GREETING],
+        &[LIVE],
+        &env,
+    )
+    .unwrap();
+    assert_eq!(said(out).as_deref(), Some("hello"));
+}
+
+#[test]
+fn a_purge_takes_the_verdicts_and_traces_that_hold_a_source() {
+    let home = Home::temp();
+    let env = home.env();
+    let payload = home.payload("s-1", "alpha\n");
+    let file = format!("file:{}", payload["file"].as_str().unwrap());
+    fire(Point::Prompt, payload, &[], &[SHADOW], &env).unwrap();
+    fire(
+        Point::Prompt,
+        json!({ "session_id": "s-2" }),
+        &[],
+        &[SHADOW],
+        &env,
+    )
+    .unwrap();
+    brain_reflex::purge(&env.data, &[file]).unwrap();
+    assert_eq!(home.verdicts().rows().unwrap(), []);
+    let left: Vec<_> = home.runs().into_iter().map(|r| r.2.len()).collect();
+    assert_eq!(
+        left,
+        [2],
+        "only the run that never read the file: its payload read and step"
     );
 }

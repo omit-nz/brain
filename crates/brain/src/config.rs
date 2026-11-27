@@ -17,6 +17,22 @@ pub struct Config {
     pub me: String,
     #[serde(default, skip_serializing_if = "UsageConfig::is_default")]
     pub usage: UsageConfig,
+    #[serde(default, skip_serializing_if = "SessionConfig::is_default")]
+    pub session: SessionConfig,
+}
+
+/// What a Claude Code session starts with.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Memory folders whose `MEMORY.md` is shown.
+    pub indexes: Vec<PathBuf>,
+}
+
+impl SessionConfig {
+    fn is_default(&self) -> bool {
+        *self == SessionConfig::default()
+    }
 }
 
 /// Whether the day's usage counts go to omit, and where. On unless the owner switches it off.

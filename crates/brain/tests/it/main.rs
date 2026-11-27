@@ -1,3 +1,4 @@
+mod brief;
 mod capture;
 // The doors run on macOS; their stubs are shell scripts.
 #[cfg(unix)]

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::cx::{self, Cx, Env};
 use crate::store::{PickRow, Row, Verdicts};
-use crate::{Act, Input, Point, Reflex, Stage, TRACES, VERDICTS, Verdict};
+use crate::{Act, Input, Point, Reflex, Stage, Standing, TRACES, VERDICTS, Verdict};
 
 /// How long a hook waits for the trace store before it runs untraced. Opening it is a write, so
 /// another writer would be waited on for five seconds.
@@ -39,6 +39,8 @@ pub struct Decision {
 
 #[derive(Debug, Default)]
 pub struct Decided {
+    /// What the standing context said.
+    pub standing: Vec<String>,
     pub decisions: Vec<Decision>,
     /// The reflexes that failed, by name; the others still had their say.
     pub failed: Vec<&'static str>,
@@ -49,10 +51,11 @@ fn session(hook: &Value) -> Option<&str> {
     hook["session_id"].as_str().filter(|s| !s.is_empty())
 }
 
-/// Runs the point's reflexes over the payload, reading only through `run`, and writes nothing
+/// Runs the point's standing context and then its reflexes over the payload, reading only through `run`, and writes nothing
 /// but the trace. Given a replaying run it reads and does nothing for real.
 pub fn decide(
     point: Point,
+    standing: &[Standing],
     registry: &[Reflex],
     env: &Env,
     run: &mut Run,
@@ -68,6 +71,17 @@ pub fn decide(
         Ok((hook, sources))
     })?;
     let mut out = Decided::default();
+    for standing in standing.iter().filter(|s| s.point == point) {
+        let mut sources = BTreeSet::new();
+        let said = run.span(Kind::Step, standing.name, |run| {
+            let mut cx = Cx::new(env, run, &hook, &mut sources);
+            (standing.say)(&mut cx).map_err(|e| format!("{e:#}"))
+        });
+        match said {
+            Ok(said) => out.standing.extend(said),
+            Err(_) => out.failed.push(standing.name),
+        }
+    }
     for reflex in registry.iter().filter(|r| r.point == point) {
         let mut sources = payload_sources.clone();
         let decided = run.span(Kind::Step, reflex.name, |run| {
@@ -157,6 +171,7 @@ fn one(reflex: &Reflex, cx: &mut Cx<'_>) -> anyhow::Result<Option<Decision>> {
 pub fn fire(
     point: Point,
     payload: Value,
+    standing: &[Standing],
     registry: &[Reflex],
     env: &Env,
 ) -> anyhow::Result<Option<String>> {
@@ -165,21 +180,23 @@ pub fn fire(
     let mut run = record(env.data.join(TRACES), name, env.trace_wait);
     let traced = run.id().map(str::to_string);
     let session = session(&payload).map(str::to_string);
-    let decided = decide(point, registry, env, &mut run, || Ok(payload))?;
+    let decided = decide(point, standing, registry, env, &mut run, || Ok(payload))?;
     for name in &decided.failed {
-        eprintln!("brain: the {name} reflex failed");
+        eprintln!("brain: {name} failed");
     }
     if let Err(e) = run.finish() {
         eprintln!("brain: this hook was not fully traced: {e}");
     }
     // The last write before the words go out, so a row never says what a hook that ran out of
     // time did not say.
-    log(point, env, session, traced, &decided).map_err(|e| anyhow!("writing a verdict: {e:#}"))?;
-    let said: Vec<String> = decided
-        .decisions
-        .into_iter()
-        .filter_map(|d| d.say)
-        .collect();
+    let logged = log(point, env, session, traced, &decided);
+    let mut said = decided.standing;
+    match logged {
+        Ok(()) => said.extend(decided.decisions.into_iter().filter_map(|d| d.say)),
+        // A verdict that is not written is not said; the standing context has none to write.
+        Err(e) if said.is_empty() => return Err(anyhow!("writing a verdict: {e:#}")),
+        Err(e) => eprintln!("brain: writing a verdict failed: {e:#}"),
+    }
     Ok((!said.is_empty()).then(|| {
         json!({
             "hookSpecificOutput": {

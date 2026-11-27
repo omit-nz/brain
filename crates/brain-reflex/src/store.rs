@@ -162,6 +162,15 @@ impl Verdicts {
         Ok(keys.collect::<Result<_, _>>()?)
     }
 
+    /// Removes every verdict that holds `source`'s text, labelled or not.
+    pub fn purge(&self, source: &str) -> anyhow::Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM verdicts WHERE id IN
+                 (SELECT verdict_id FROM verdict_sources WHERE source = ?1)",
+            [source],
+        )?)
+    }
+
     /// Removes the verdicts nobody labelled that are more than 90 days older than `now`.
     pub fn prune(&self, now: Timestamp) -> anyhow::Result<usize> {
         Ok(self.conn.execute(

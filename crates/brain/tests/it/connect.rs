@@ -503,3 +503,45 @@ fn the_hook_command_exits_0_with_a_binary_that_knows_no_hook() {
         .unwrap();
     assert!(ran.success());
 }
+
+#[test]
+fn connect_saves_the_indexes_a_session_starts_with() {
+    let h = Home::new();
+    h.init();
+    install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    let memory = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--index"])
+        .arg(memory.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let config = || fs::read_to_string(h.home.path().join("config/config.toml")).unwrap();
+    let saved = memory.path().canonicalize().unwrap();
+    assert!(
+        config().contains(&saved.display().to_string()),
+        "{}",
+        config()
+    );
+    // Connecting again without the flag keeps what was named.
+    assert!(connect(&h, stub.path(), home.path()).status.success());
+    assert!(
+        config().contains(&saved.display().to_string()),
+        "{}",
+        config()
+    );
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--index", "/no/such/folder"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/no/such/folder"));
+}

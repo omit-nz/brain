@@ -10,6 +10,7 @@ use brain::update;
 use brain_platform::dirs::Dirs;
 use brain_platform::service;
 
+use crate::config::Config;
 use crate::plugin;
 
 /// The installed brain, which every door runs, so an update reaches every door at once.
@@ -26,11 +27,14 @@ pub fn installed(dirs: &Dirs) -> anyhow::Result<PathBuf> {
 
 /// `brain connect claude-code`: `claude mcp add` at user scope, after removing any brain added
 /// before, so a second connect replaces the first instead of failing on the name.
-pub fn claude_code(dirs: &Dirs, name: Option<&str>) -> anyhow::Result<()> {
+pub fn claude_code(dirs: &Dirs, name: Option<&str>, indexes: &[PathBuf]) -> anyhow::Result<()> {
     if let Some(n) = name {
         crate::room::check_name(n)?;
     }
     let exe = installed(dirs)?;
+    if !indexes.is_empty() {
+        show_at_start(dirs, indexes)?;
+    }
     let _ = Command::new("claude")
         .args(["mcp", "remove", "--scope", "user", "brain"])
         .stdout(Stdio::null())
@@ -54,6 +58,19 @@ pub fn claude_code(dirs: &Dirs, name: Option<&str>) -> anyhow::Result<()> {
     )?;
     println!("Claude Code can now search your brain; start a new session.");
     Ok(())
+}
+
+/// Names the memory folders every session starts with.
+fn show_at_start(dirs: &Dirs, indexes: &[PathBuf]) -> anyhow::Result<()> {
+    let mut config = Config::load(dirs)?;
+    config.session.indexes = indexes
+        .iter()
+        .map(|folder| {
+            let found = folder.canonicalize().ok().filter(|f| f.is_dir());
+            found.with_context(|| format!("--index {}: no such folder", folder.display()))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    config.save(dirs)
 }
 
 /// The plugin, through Claude Code's own `plugin` command, replacing one added before.

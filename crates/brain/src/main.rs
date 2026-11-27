@@ -10,13 +10,14 @@ mod hook;
 mod import;
 mod inbox;
 mod mcp;
-mod out;
 mod plugin;
 mod room;
 mod runtime;
 mod usage;
 
 use std::process::ExitCode;
+
+use brain::{brief, out};
 
 use brain_platform::dirs::Dirs;
 use clap::Parser;

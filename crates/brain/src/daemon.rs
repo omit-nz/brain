@@ -63,6 +63,20 @@ pub fn summary(r: &Reindexed) -> String {
     line
 }
 
+/// Drops what traces and verdicts kept of the notes a pass saw go. A failure is said and no
+/// more: both stores also prune by age.
+pub fn forget(dirs: &Dirs, r: &Reindexed) {
+    let sources: Vec<String> = r.gone.iter().map(|id| format!("note:{id}")).collect();
+    if let Err(e) = brain_reflex::purge(&dirs.data, &sources) {
+        eprintln!(
+            "{}",
+            terminal(&format!(
+                "purging removed notes from the traces failed: {e:#}"
+            ))
+        );
+    }
+}
+
 /// Installs a newer signed release over the install this daemon runs from, through the same
 /// checks `brain update` makes, and returns its version. A failure leaves this version running; a
 /// brain run from anywhere but its install (a dev build) never replaces anything.
@@ -200,6 +214,7 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
                 .and_then(|settled| idx.reindex_settled(&vault, settled, clock.now()))
             {
                 Ok(r) => {
+                    forget(dirs, &r);
                     eprintln!("{}", terminal(&format!("pass {passes}: {}", summary(&r))));
                     next = Instant::now() + if r.deferred > 0 { RETRY } else { BACKSTOP };
                     changed |= r.added + r.changed + r.removed > 0;

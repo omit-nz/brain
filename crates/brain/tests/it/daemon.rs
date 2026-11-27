@@ -832,3 +832,34 @@ fn a_daemon_start_writes_no_plugin_where_none_was() {
     d.wait_for_passes(1);
     assert!(!h.home.path().join("data/claude-plugin").exists());
 }
+
+#[test]
+fn a_removed_note_leaves_the_traces_while_the_daemon_runs() {
+    let h = Home::new();
+    h.init();
+    h.put(
+        "due.md",
+        "---\nid: 0195f2e0-0000-7000-8000-000000000001\nowner: robin\nreview: 2020-01-01\n---\nbody\n",
+    );
+    let d = Daemon::start(&h);
+    wait_for_notes(&h, &d, 1);
+    h.brain()
+        .args(["hook", "session-start"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    let db = h.home.path().join("data").join(brain_reflex::TRACES);
+    let held = || -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM span_sources WHERE source LIKE 'note:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(held(), 1);
+    fs::remove_file(h.vault.path().join("due.md")).unwrap();
+    until("the note purged", || held() == 0, || d.stderr());
+}

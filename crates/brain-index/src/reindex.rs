@@ -30,6 +30,9 @@ pub struct Reindexed {
     /// Notes indexed with their id left for a later pass: they need one but were saved too
     /// recently to write it.
     pub deferred: usize,
+    /// Ids no note holds any more, and ids whose note stopped being shared: whatever was kept of
+    /// their text elsewhere should go.
+    pub gone: Vec<uuid::Uuid>,
 }
 
 struct Row {
@@ -113,6 +116,7 @@ impl Index {
         );
         let abort_after = abort_after();
         let existing = self.rows()?;
+        let held = self.held()?;
         // Rows written under other reading rules are re-derived, changed or not.
         let rules: Option<String> = self
             .conn
@@ -313,7 +317,26 @@ impl Index {
             .conn
             .prepare("SELECT path FROM notes WHERE note_uuid IS NULL ORDER BY path")?;
         out.unidentified = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        drop(st);
+        let now = self.held()?;
+        out.gone = held
+            .into_iter()
+            .filter(|(id, was)| match now.get(id) {
+                None => true,
+                Some(is) => was == "shared" && is != "shared",
+            })
+            .filter_map(|(id, _)| id.parse().ok())
+            .collect();
         Ok(out)
+    }
+
+    /// Each id in the index with its note's disclosure.
+    fn held(&self) -> anyhow::Result<HashMap<String, String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT note_uuid, disclosure FROM notes WHERE note_uuid IS NOT NULL")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     fn rows(&self) -> anyhow::Result<HashMap<String, Row>> {

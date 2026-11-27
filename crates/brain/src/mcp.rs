@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
+use brain::fence::{attrs, escape, fence_ref};
 use brain::update;
 use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
@@ -75,38 +76,6 @@ const PAGE_CHARS: usize = 40_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
 
-/// Bidi embeddings, overrides and isolates, which reorder what a reader sees, and the tag block,
-/// which spells hidden ASCII. Joiners stay: emoji and several scripts need them.
-fn hidden(c: char) -> bool {
-    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{E0000}'..='\u{E007F}')
-}
-
-/// `&`, `<`, `>` and `"` as entities, after control and hidden characters are stripped.
-fn escape(text: &str) -> String {
-    terminal(text)
-        .replace(hidden, "")
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn attrs(id: Option<uuid::Uuid>, path: &str, title: &str, kind: Option<Kind>) -> String {
-    let mut a = String::new();
-    if let Some(id) = id {
-        a.push_str(&format!(" id=\"{id}\""));
-    }
-    a.push_str(&format!(
-        " path=\"{}\" title=\"{}\"",
-        escape(path),
-        escape(title)
-    ));
-    if let Some(k) = kind {
-        a.push_str(&format!(" kind=\"{}\"", k.as_str()));
-    }
-    a
-}
-
 /// `body` cut at 4,000 characters.
 fn cut(body: &str) -> String {
     let body = body.trim_end();
@@ -143,11 +112,6 @@ pub fn fence_post(p: &Post) -> String {
             escape(why)
         ),
     }
-}
-
-/// A note named without its body.
-pub fn fence_ref(id: Option<uuid::Uuid>, path: &str, title: &str, kind: Option<Kind>) -> String {
-    format!("<note{} />", attrs(id, path, title, kind))
 }
 
 struct State {

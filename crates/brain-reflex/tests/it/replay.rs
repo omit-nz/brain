@@ -11,7 +11,7 @@ fn a_recorded_run_replays_with_no_live_call() {
     let env = home.env();
     let payload = home.payload("s-1", "alpha\nbravo\n");
     let file = std::path::PathBuf::from(payload["file"].as_str().unwrap());
-    fire(Point::Prompt, payload, &[LIVE], &env).unwrap();
+    fire(Point::Prompt, payload, &[], &[LIVE], &env).unwrap();
     let rows = home.verdicts().rows().unwrap();
     let id = home.runs()[0].0.clone();
     std::fs::remove_file(&file).unwrap();
@@ -19,7 +19,7 @@ fn a_recorded_run_replays_with_no_live_call() {
 
     let store = Store::open(&env.data.join(TRACES)).unwrap();
     let mut run = Run::replay(&store, &id).unwrap();
-    let again = decide(Point::Prompt, &[LIVE], &env, &mut run, || {
+    let again = decide(Point::Prompt, &[], &[LIVE], &env, &mut run, || {
         panic!("went live")
     })
     .unwrap();
@@ -66,13 +66,14 @@ fn a_changed_reflex_fails_the_replay() {
     fire(
         Point::Prompt,
         home.payload("s-1", "alpha\n"),
+        &[],
         &[SHADOW],
         &env,
     )
     .unwrap();
     let store = Store::open(&env.data.join(TRACES)).unwrap();
     let mut run = Run::replay(&store, &home.runs()[0].0).unwrap();
-    let again = decide(Point::Prompt, &[changed], &env, &mut run, || {
+    let again = decide(Point::Prompt, &[], &[changed], &env, &mut run, || {
         panic!("went live")
     })
     .unwrap();
@@ -107,7 +108,7 @@ fn a_replay_sees_what_the_live_run_saw() {
     let home = Home::temp();
     let env = home.env();
     let payload = json!({ "session_id": "s-1", "prompt": "the wifi password: hunter2 changed" });
-    fire(Point::Prompt, payload, &[reflex], &env).unwrap();
+    fire(Point::Prompt, payload, &[], &[reflex], &env).unwrap();
     let rows = home.verdicts().rows().unwrap();
     assert!(
         !rows[0].input_text.contains("hunter2"),
@@ -122,7 +123,7 @@ fn a_replay_sees_what_the_live_run_saw() {
 
     let store = Store::open(&env.data.join(TRACES)).unwrap();
     let mut run = Run::replay(&store, &home.runs()[0].0).unwrap();
-    let again = decide(Point::Prompt, &[reflex], &env, &mut run, || {
+    let again = decide(Point::Prompt, &[], &[reflex], &env, &mut run, || {
         panic!("went live")
     })
     .unwrap();

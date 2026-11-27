@@ -122,6 +122,15 @@ pub struct Reflex {
     pub stage: Stage,
 }
 
+/// Context a hook point always gets: it judges nothing, so it has no verdict and no shadow. It is
+/// traced as a reflex is, and reads the same way.
+#[derive(Clone, Copy)]
+pub struct Standing {
+    pub name: &'static str,
+    pub point: Point,
+    pub say: fn(&mut Cx<'_>) -> anyhow::Result<Option<String>>,
+}
+
 /// The reflexes brain ships. Every one ships in shadow.
 pub const REGISTRY: &[Reflex] = &[];
 
@@ -136,6 +145,28 @@ pub fn prune(data: &Path, now: Timestamp) -> anyhow::Result<()> {
     let verdicts = data.join(VERDICTS);
     if verdicts.exists() {
         Verdicts::open(&verdicts)?.prune(now)?;
+    }
+    Ok(())
+}
+
+/// Removes every trace and verdict that holds one of `sources`' text.
+pub fn purge(data: &Path, sources: &[String]) -> anyhow::Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let verdicts = data.join(VERDICTS);
+    if verdicts.exists() {
+        let verdicts = Verdicts::open(&verdicts)?;
+        for source in sources {
+            verdicts.purge(source)?;
+        }
+    }
+    let traces = data.join(TRACES);
+    if traces.exists() {
+        let traces = Store::open(&traces)?;
+        for source in sources {
+            traces.purge(source)?;
+        }
     }
     Ok(())
 }

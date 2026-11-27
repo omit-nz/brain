@@ -27,6 +27,7 @@ impl Home {
             vault: self.dir.path().join("vault"),
             me: "robin".into(),
             clock: Arc::new(FixedClock("2026-11-27T10:00:00Z".parse().unwrap())),
+            indexes: Vec::new(),
             // A slow runner takes longer than a hook would wait to create a store.
             trace_wait: std::time::Duration::from_secs(30),
         }

@@ -36,7 +36,7 @@ Then `brain update` moves you to each new release once its signature checks. [do
 
 ## Connect your AI
 
-- Claude Code: `brain connect claude-code`. It runs Claude Code's own `claude mcp remove` and `claude mcp add` for a user-scope server named `brain`, so it replaces any server of that name you added yourself, and it writes no file of Claude Code's itself; start a new session afterwards. It also installs a plugin through `claude plugin`, from a folder in brain's own data folder, with four hooks that each call `brain hook`. A hook answers within 250 ms or says nothing, and never blocks a session. What brain records about each one is in [docs/traces.md](docs/traces.md).
+- Claude Code: `brain connect claude-code`. It runs Claude Code's own `claude mcp remove` and `claude mcp add` for a user-scope server named `brain`, so it replaces any server of that name you added yourself, and it writes no file of Claude Code's itself; start a new session afterwards. It also installs a plugin through `claude plugin`, from a folder in brain's own data folder, with four hooks that each call `brain hook`. A hook answers within 250 ms or says nothing, and never blocks a session. A session starts with the notes due for review; name a memory folder with `--index <folder>` and its `MEMORY.md` is shown too. What brain records about each one is in [docs/traces.md](docs/traces.md).
 - Claude Desktop: open `brain-<version>.mcpb` from the release page. The extension's copy of brain hands every connection to the brain you installed, so it needs the install above first.
 
 Both reach your notes through the same eight tools: search your brain, search only the notes that are not private, capture, correct, due, and three for rooms.

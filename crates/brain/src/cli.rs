@@ -115,6 +115,10 @@ enum Command {
         /// The name this tool's sessions post and read rooms under.
         #[arg(long = "as")]
         name: Option<String>,
+        /// A memory folder whose MEMORY.md every session starts with (repeatable); the ones
+        /// named before are replaced, and kept when none is named.
+        #[arg(long = "index")]
+        indexes: Vec<PathBuf>,
     },
     /// Your kept notes whose review has come, oldest first.
     Due {
@@ -369,7 +373,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Connect {
             tool: ConnectTool::ClaudeCode,
             name,
-        } => connect::claude_code(dirs, name.as_deref()),
+            indexes,
+        } => connect::claude_code(dirs, name.as_deref(), &indexes),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {
@@ -460,17 +465,19 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             create_dir_private(&path)?;
         }
     }
-    // A second init keeps the person's usage choice; an unreadable config fails rather than
-    // quietly switching sending back on.
-    let usage = if dirs.config.join(crate::config::FILE).exists() {
-        Config::load(dirs)?.usage
+    // A second init keeps everything else the person set; an unreadable config fails rather than
+    // quietly switching usage sending back on.
+    let before = if dirs.config.join(crate::config::FILE).exists() {
+        Some(Config::load(dirs)?)
     } else {
-        Default::default()
+        None
     };
+    let (usage, session) = before.map_or_else(Default::default, |c| (c.usage, c.session));
     Config {
         vault: vault.root.clone(),
         me: me.clone(),
         usage,
+        session,
     }
     .save(dirs)?;
     println!(
@@ -508,6 +515,7 @@ fn reindex(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     };
     let mut idx = index(dirs)?;
     let r = idx.reindex(&vault)?;
+    daemon::forget(dirs, &r);
     println!("{}", daemon::summary(&r));
     let provider = match embed::load() {
         Ok(provider) => {
@@ -938,7 +946,10 @@ fn import_learning_loop(
         return Ok(());
     }
     let reindexed = match lock {
-        Some(_) => index(dirs).and_then(|mut ix| ix.reindex(&dst)).map(Some),
+        Some(_) => index(dirs)
+            .and_then(|mut ix| ix.reindex(&dst))
+            .inspect(|r| daemon::forget(dirs, r))
+            .map(Some),
         None => Ok(None),
     };
     import::settle(&mut ledger, &dst, &written)?;
