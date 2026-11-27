@@ -501,6 +501,81 @@ mod renamed {
         assert_eq!(copy(&h, "one"), None);
     }
 
+    /// The move can come before brain follows anything: a one-time import by a release with no
+    /// follow, the project renamed with a link left behind, and only then the first pass.
+    #[test]
+    fn a_project_moved_between_the_import_and_the_first_follow_is_the_same_notes() {
+        let h = Home::new();
+        h.init();
+        let p = Projects::new();
+        for name in ["one", "two", "three"] {
+            p.write(name, &format!("{name} first"));
+        }
+        import(&h, p.path());
+        // The ledger as the release without follow wrote it: no source folder, no vault.
+        let path = h.home.path().join("data/import-ledger.json");
+        let mut ledger: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for entry in ledger.as_object_mut().unwrap().values_mut() {
+            let entry = entry.as_object_mut().unwrap();
+            entry.remove("from");
+            entry.remove("vault");
+        }
+        fs::write(&path, ledger.to_string()).unwrap();
+        let before = ["one", "two", "three"].map(|n| copy(&h, n).unwrap());
+        fs::create_dir_all(p.path().join("-new")).unwrap();
+        fs::rename(p.path().join("-proj/memory"), p.path().join("-new/memory")).unwrap();
+        symlink("../-new/memory", p.path().join("-proj/memory")).unwrap();
+        // Changed since the import, and written since the import.
+        new_source(&p, "one second");
+        fs::write(p.path().join("-new/memory/four.md"), "four first\n").unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("projects");
+        symlink(p.path(), &link).unwrap();
+        let said = h.run(&["memory", "follow", link.to_str().unwrap()]);
+        assert!(
+            said.contains("1 copied, 1 updated, 0 archived, 3 moved"),
+            "{said}"
+        );
+        assert!(said.contains("0 skipped"), "the link is not news: {said}");
+        let new = |n: &str| {
+            fs::read_to_string(h.vault.path().join(format!("working-memory/-new/{n}.md"))).unwrap()
+        };
+        assert_eq!(
+            [new("two"), new("three")],
+            [before[1].clone(), before[2].clone()]
+        );
+        let id = |text: &str| text.lines().nth(1).unwrap().to_string();
+        assert_eq!(id(&new("one")), id(&before[0]));
+        assert!(new("one").contains("one second"));
+        assert!(!h.vault.path().join("working-memory/-proj/one.md").exists());
+        for query in ["second", "two", "three"] {
+            assert_eq!(hits(&h, query), 1, "{query}");
+        }
+        for _ in 0..2 {
+            let said = pass(&h);
+            assert!(
+                said.contains("0 copied, 0 updated, 0 archived, 0 moved"),
+                "{said}"
+            );
+        }
+    }
+
+    /// A pass killed after it moved a copy and before it saved the ledger.
+    #[test]
+    fn a_rename_cut_short_is_finished_by_the_next_pass() {
+        let (h, p) = following(&["one"]);
+        rename_project(&p);
+        let moved = h.vault.path().join("working-memory/-new");
+        fs::create_dir_all(&moved).unwrap();
+        fs::rename(copy_path(h.vault.path(), "one"), moved.join("one.md")).unwrap();
+        pass(&h);
+        new_source(&p, "one second");
+        let said = pass(&h);
+        assert!(said.contains("1 updated"), "{said}");
+        assert!(new_copy(&h).unwrap().contains("one second"));
+    }
+
     #[test]
     fn an_edited_or_removed_copy_stays_so_after_a_rename() {
         let (h, p) = following(&["one", "two"]);
@@ -560,4 +635,52 @@ mod renamed {
         pass(&h);
         assert!(copy(&h, "one").unwrap().contains("one second"));
     }
+}
+
+#[test]
+fn a_followed_copy_keeps_its_sources_date() {
+    let h = Home::new();
+    h.init();
+    let p = Projects::new();
+    p.write("one", "one first");
+    crate::set_changed(&p.file("one"), "2026-03-05T12:00:00Z");
+    follow(&h, &p);
+    let at = || crate::changed_at(&copy_path(h.vault.path(), "one"));
+    assert_eq!(at(), crate::changed_at(&p.file("one")));
+    p.write("one", "one second");
+    crate::set_changed(&p.file("one"), "2026-04-06T12:00:00Z");
+    pass(&h);
+    assert_eq!(at(), crate::changed_at(&p.file("one")));
+}
+
+/// A copy made before copies took their source's date says when brain copied it, which is later
+/// than the words are.
+#[test]
+fn a_pass_dates_an_older_copy_back_and_never_forward() {
+    let (h, p) = following(&["one"]);
+    let (source, copy) = (p.file("one"), copy_path(h.vault.path(), "one"));
+    crate::set_changed(&source, "2026-03-05T12:00:00Z");
+    pass(&h);
+    assert_eq!(crate::changed_at(&copy), crate::changed_at(&source));
+    // Touched, as a move or a checkout does, with the words as they were.
+    crate::set_changed(&source, "2026-06-07T12:00:00Z");
+    pass(&h);
+    assert!(crate::changed_at(&copy) < crate::changed_at(&source));
+}
+
+#[test]
+fn a_copy_whose_source_is_deleted_keeps_its_date() {
+    let h = Home::new();
+    h.init();
+    let p = Projects::new();
+    p.write("one", "one first");
+    p.write("two", "two first");
+    crate::set_changed(&p.file("one"), "2026-03-05T12:00:00Z");
+    import(&h, p.path());
+    let copied = copy_path(h.vault.path(), "one");
+    let before = crate::changed_at(&copied);
+    p.remove("one");
+    let said = follow(&h, &p);
+    assert!(said.contains("0 skipped"), "{said}");
+    assert_eq!(crate::changed_at(&copied), before);
 }

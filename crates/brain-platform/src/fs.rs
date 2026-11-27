@@ -4,6 +4,7 @@
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 pub enum Privacy {
     /// Owner-only (`0600` on Unix): stores, ledgers, keys. On Windows the file takes the ACL of
@@ -52,6 +53,12 @@ fn parent_dirs(path: &Path) -> io::Result<&Path> {
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "no parent"))?;
     fs::create_dir_all(parent)?;
     Ok(parent)
+}
+
+/// Stamps the file at `rel` as last changed at `at`.
+pub fn set_modified(root: &Path, rel: &Path, at: SystemTime) -> io::Result<()> {
+    let path = checked(root, rel)?;
+    fs::File::options().write(true).open(path)?.set_modified(at)
 }
 
 /// `write_atomic`, but only when `unchanged` accepts the file as it is now (`None` when there is

@@ -696,6 +696,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                     "disclosure": h.disclosure.as_str(),
                     "score": h.score,
                     "snippet": h.snippet,
+                    "modified": h.modified.map(|d| d.to_string()),
                 })
             })
             .collect();
@@ -712,9 +713,16 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
         println!("nothing found");
     }
     for h in &hits {
+        let changed = h
+            .modified
+            .map(|d| format!(", changed {d}"))
+            .unwrap_or_default();
         println!(
             "{}",
-            terminal(&format!("{}  ({})\n    {}", h.title, h.path, h.snippet))
+            terminal(&format!(
+                "{}  ({}{changed})\n    {}",
+                h.title, h.path, h.snippet
+            ))
         );
     }
     Ok(())

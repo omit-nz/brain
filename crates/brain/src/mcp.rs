@@ -87,11 +87,11 @@ fn cut(body: &str) -> String {
 
 /// A hit with its body, cut at 4,000 characters, as data the AI cannot mistake for instructions.
 pub fn fence(hit: &Hit) -> String {
-    format!(
-        "<note{}>{}</note>",
-        attrs(hit.note_uuid, &hit.path, &hit.title, Some(hit.kind)),
-        escape(&cut(&hit.body))
-    )
+    let mut attrs = attrs(hit.note_uuid, &hit.path, &hit.title, Some(hit.kind));
+    if let Some(day) = hit.modified {
+        attrs.push_str(&format!(" modified=\"{day}\""));
+    }
+    format!("<note{attrs}>{}</note>", escape(&cut(&hit.body)))
 }
 
 /// A room post, fenced and escaped as a note is; one that cannot be read is named with why.

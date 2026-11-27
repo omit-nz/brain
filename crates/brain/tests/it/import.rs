@@ -787,3 +787,23 @@ fn an_import_reports_only_on_its_own_notes() {
         "{out}"
     );
 }
+
+#[test]
+fn a_copy_keeps_its_sources_date() {
+    let i = Import::new();
+    let note = "3-permanent/kept-idea.md";
+    let memory = i.mem.path().join("omit/memory/project_launch.md");
+    super::set_changed(&i.src.path().join(note), "2026-03-05T12:00:00Z");
+    super::set_changed(&memory, "2026-04-06T12:00:00Z");
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    let vault = i.h.vault.path();
+    assert_eq!(
+        super::changed_at(&vault.join(note)),
+        super::changed_at(&i.src.path().join(note))
+    );
+    assert_eq!(
+        super::changed_at(&vault.join("working-memory/omit/project_launch.md")),
+        super::changed_at(&memory)
+    );
+}

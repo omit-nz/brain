@@ -13,6 +13,9 @@ pub fn sources(src: &Vault, skipped: &mut Vec<(String, Skip)>) -> Vec<Source> {
             Entry::Skipped { rel, why } => skipped.push((format!("vault/{}", rel_key(&rel)), why)),
             Entry::Note { rel, .. } => match src.read(&rel) {
                 Ok(raw) => out.push(Source {
+                    modified: std::fs::metadata(src.root.join(&rel))
+                        .and_then(|m| m.modified())
+                        .ok(),
                     key: format!("vault/{}", rel_key(&rel)),
                     dst_rel: rel,
                     raw,

@@ -7,6 +7,9 @@ use std::path::Path;
 
 use anyhow::Context;
 use brain_note::{Disclosure, Kind, Place};
+use jiff::Timestamp;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
 use ll_core::embed::EmbeddingProvider;
 use ll_core::graph::{GraphEdges, personalized_pagerank};
 use ll_core::rerank::rerank;
@@ -44,6 +47,8 @@ pub struct Hit {
     pub score: f64,
     pub snippet: String,
     pub body: String,
+    /// The day, here, the note's file was last changed; `None` while it waits for its id.
+    pub modified: Option<Date>,
 }
 
 /// A search's hits, and how they were judged.
@@ -101,6 +106,13 @@ fn snippet(body: &str) -> String {
         Some((i, _)) => format!("{}...", &flat[..i]),
         None => flat,
     }
+}
+
+/// The day here of a file's time. No file has a time before 1970; a note waiting for its id is
+/// stored with one, to be read again.
+fn day(mtime_ns: i64) -> Option<Date> {
+    let at = (mtime_ns >= 0).then(|| Timestamp::from_nanosecond(mtime_ns.into()).ok())??;
+    Some(at.to_zoned(TimeZone::system()).date())
 }
 
 fn stem(path: &str) -> String {
@@ -187,7 +199,7 @@ impl Index {
 
         let mut hits = Vec::new();
         let mut st = self.conn.prepare(&format!(
-            "SELECT n.note_uuid, n.title, n.kind, n.disclosure, c.body, n.place
+            "SELECT n.note_uuid, n.title, n.kind, n.disclosure, c.body, n.place, n.mtime_ns
              FROM {items} n JOIN notes_content c ON c.id = n.id WHERE n.path = ?1"
         ))?;
         for (path, score) in finalize_rrf(fused, POOL) {
@@ -200,11 +212,12 @@ impl Index {
                         r.get::<_, String>(3)?,
                         r.get::<_, String>(4)?,
                         r.get::<_, String>(5)?,
+                        r.get::<_, i64>(6)?,
                     ))
                 })
                 .optional()?;
             // A path the scope's view does not hold is not a hit; any other failure is an error.
-            let Some((uuid, title, kind, disclosure, body, place)) = row else {
+            let Some((uuid, title, kind, disclosure, body, place, mtime_ns)) = row else {
                 continue;
             };
             let kind = Kind::parse(&kind);
@@ -221,6 +234,7 @@ impl Index {
                 score,
                 snippet: snippet(&body),
                 body,
+                modified: day(mtime_ns),
             });
         }
 

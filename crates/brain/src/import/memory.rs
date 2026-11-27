@@ -61,7 +61,9 @@ pub fn sources(
                 skipped.push((key, Skip::Link));
                 continue;
             }
+            let mut modified = None;
             let read = fs::metadata(&file).and_then(|m| {
+                modified = m.modified().ok();
                 if m.len() > MAX_NOTE_BYTES {
                     Ok(Err(Skip::TooLarge(m.len())))
                 } else {
@@ -75,6 +77,7 @@ pub fn sources(
                     raw,
                     memory: true,
                     from: Some(from.clone()),
+                    modified,
                 }),
                 Ok(Err(why)) => skipped.push((key, why)),
                 Err(e) => skipped.push((key, Skip::Unreadable(e.to_string()))),

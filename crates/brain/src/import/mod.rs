@@ -12,11 +12,12 @@ mod vault;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, bail};
 use brain_note::{Layout, Place, Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{Privacy, replace_unchanged, write_atomic};
+use brain_platform::fs::{Privacy, replace_unchanged, set_modified, write_atomic};
 use jiff::ToSpan;
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
@@ -121,6 +122,8 @@ pub struct Source {
     memory: bool,
     /// The memory folder it was found in.
     from: Option<PathBuf>,
+    /// When the source was last changed; its copy says the same.
+    modified: Option<SystemTime>,
 }
 
 /// What every copy is written with.
@@ -352,6 +355,10 @@ fn write_one(
         Privacy::Normal,
     )
     .with_context(|| format!("writing {}", rel_key(&s.dst_rel)))?;
+    // Best effort: a copy that could not be stamped says it changed when brain wrote it.
+    if let Some(at) = s.modified {
+        let _ = set_modified(&dst.root, &s.dst_rel, at);
+    }
     ledger.0.insert(
         s.key.clone(),
         LedgerEntry {

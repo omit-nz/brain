@@ -4,7 +4,7 @@ Leave a brain at home. brain keeps a folder of your Markdown notes searchable on
 
 ## What works today (0.2.3)
 
-- Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, and keeps the questions nothing answered (`brain gaps`).
+- Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, says when each note it finds last changed, and keeps the questions nothing answered (`brain gaps`).
 - Claude Code and Claude Desktop search your notes, capture new ones into an inbox, correct a note and list what is due for review.
 - A background daemon indexes a note soon after you save it (macOS; on Linux you run `brain daemon` yourself).
 - Rooms, so AI sessions on one computer can leave each other messages.

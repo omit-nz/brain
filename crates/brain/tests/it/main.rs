@@ -443,3 +443,21 @@ fn skip_archives_never_deletes() {
     let out = h.brain().args(["inbox", "skip", &id]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "a note no longer in the inbox");
 }
+
+/// Stamps `path` as last changed at `at`, and returns the date that is on this machine.
+fn set_changed(path: &std::path::Path, at: &str) -> String {
+    let at: jiff::Timestamp = at.parse().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at.into())
+        .unwrap();
+    at.to_zoned(jiff::tz::TimeZone::system()).date().to_string()
+}
+
+/// When `path` was last changed, to the second.
+fn changed_at(path: &std::path::Path) -> i64 {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    jiff::Timestamp::try_from(modified).unwrap().as_second()
+}

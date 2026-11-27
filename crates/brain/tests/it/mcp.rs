@@ -787,3 +787,22 @@ fn no_help_or_tool_speaks_of_a_team() {
         assert!(!text.to_lowercase().contains("team"), "{text}");
     }
 }
+
+#[test]
+fn a_hit_says_when_its_note_last_changed() {
+    let h = Home::new();
+    h.init();
+    h.put(
+        "a.md",
+        "---\nid: 0195f2e0-0000-7000-8000-000000000001\n---\nthe gate code is behind the mailbox\n",
+    );
+    let date = super::set_changed(&h.vault.path().join("a.md"), "2026-03-05T12:00:00Z");
+    h.run(&["index"]);
+    let said = h.run(&["search", "mailbox"]);
+    assert!(said.contains(&format!("a.md, changed {date}")), "{said}");
+    let json = h.json(&["search", "--json", "mailbox"]);
+    assert_eq!(json["hits"][0]["modified"], date);
+    let mut m = Mcp::start(&h);
+    let (text, _) = m.text("search_my_brain", json!({"query": "mailbox"}));
+    assert!(text.contains(&format!("modified=\"{date}\"")), "{text}");
+}

@@ -4,11 +4,12 @@
 //! whose memory folder is now a link to another's was renamed, and its copies move with it.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::bail;
 use brain_note::{Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{archive, is_link, rename_within};
+use brain_platform::fs::{archive, is_link, rename_within, set_modified};
 use brain_reflex::trace::{Call, Kind, Reply};
 use serde_json::json;
 
@@ -20,6 +21,8 @@ pub struct Followed {
     pub new: Vec<String>,
     pub updated: Vec<String>,
     pub archived: Vec<String>,
+    /// Copies taken to a renamed project's name.
+    pub moved: Vec<String>,
     /// Copies left as they are because the person's hand is on them.
     pub kept: Vec<String>,
     /// Sources that could not be taken, and why.
@@ -29,17 +32,20 @@ pub struct Followed {
 impl Followed {
     pub fn summary(&self) -> String {
         format!(
-            "{} copied, {} updated, {} archived, {} kept as they are, {} skipped",
+            "{} copied, {} updated, {} archived, {} moved, {} kept as they are, {} skipped",
             self.new.len(),
             self.updated.len(),
             self.archived.len(),
+            self.moved.len(),
             self.kept.len(),
             self.skipped.len()
         )
     }
 
     pub fn changed(&self) -> bool {
-        !(self.new.is_empty() && self.updated.is_empty() && self.archived.is_empty())
+        [&self.new, &self.updated, &self.archived, &self.moved]
+            .iter()
+            .any(|changed| !changed.is_empty())
     }
 }
 
@@ -90,7 +96,7 @@ pub fn sync(
     renamed(
         vault,
         followed,
-        &skipped,
+        &mut skipped,
         &found,
         &mut ledger,
         &mut out,
@@ -98,6 +104,10 @@ pub fn sync(
     );
     out.skipped
         .extend(skipped.into_iter().map(|(key, why)| (key, why.describe())));
+    let dated: Vec<(String, PathBuf, SystemTime)> = all
+        .iter()
+        .filter_map(|s| Some((s.key.clone(), s.dst_rel.clone(), s.modified?)))
+        .collect();
     let mut plan = Default::default();
     let todo = classify_sources(all, vault, &ledger, &mut plan);
     out.kept.extend(plan.conflicts);
@@ -135,6 +145,7 @@ pub fn sync(
             entry.missing = false;
         }
     }
+    date_back(vault, &ledger, &dated);
     gone(vault, followed, &mut ledger, &mut out, &mut changes);
     // Saved before the index runs, so a pass cut short never forgets what it wrote.
     ledger.save(dirs)?;
@@ -145,6 +156,26 @@ pub fn sync(
         ledger.save(dirs)?;
     }
     Ok(out)
+}
+
+/// A copy brain made that says it changed after its source did, as one made before copies took
+/// their source's date, is stamped with the source's. Never forward: a source only touched has
+/// the words it had.
+fn date_back(vault: &Vault, ledger: &Ledger, dated: &[(String, PathBuf, SystemTime)]) {
+    for (key, rel, at) in dated {
+        let copy = vault.root.join(rel);
+        let later = std::fs::metadata(&copy)
+            .and_then(|m| m.modified())
+            .is_ok_and(|has| has > *at);
+        let untouched = || {
+            ledger.current(key, &vault.root).is_some_and(|entry| {
+                std::fs::read(&copy).is_ok_and(|text| hash(&text) == entry.dst_hash)
+            })
+        };
+        if later && untouched() {
+            let _ = set_modified(&vault.root, rel, *at);
+        }
+    }
 }
 
 fn source_of(followed: &Path, key: &str) -> PathBuf {
@@ -163,33 +194,23 @@ fn copy_of(vault: &Vault, key: &str) -> PathBuf {
 /// A memory folder that is now a link to another project's folder here: Claude Code's folder was
 /// renamed and left the link behind. Its copies move to the new name, so a memory stays one note,
 /// with the person's edits and removals. Where the new name already has its own copy, the old one
-/// is a second copy and goes as a gone source's would.
+/// is a second copy and goes as a gone source's would. Such a link is read where it leads, so it
+/// is taken out of `skipped`.
 fn renamed(
     vault: &Vault,
     followed: &Path,
-    skipped: &[(String, Skip)],
+    skipped: &mut Vec<(String, Skip)>,
     found: &[String],
     ledger: &mut Ledger,
     out: &mut Followed,
     changes: &mut Vec<Change>,
 ) {
-    for (link, why) in skipped {
+    skipped.retain(|(link, why)| {
         if !matches!(why, Skip::Link) {
-            continue;
+            return true;
         }
-        let Some(target) = source_of(followed, &format!("{link}/"))
-            .canonicalize()
-            .ok()
-            .filter(|t| t.ends_with("memory"))
-            .and_then(|t| {
-                t.parent()?
-                    .strip_prefix(followed)
-                    .ok()?
-                    .to_str()
-                    .map(String::from)
-            })
-        else {
-            continue;
+        let Some(target) = project_behind(followed, link) else {
+            return true;
         };
         let under = format!("{link}/");
         let keys: Vec<String> = ledger
@@ -204,22 +225,18 @@ fn renamed(
             .collect();
         for key in keys {
             let new = format!("memory/{target}/{}", &key[under.len()..]);
-            // A target read this pass: one of its files is not there to move to otherwise.
+            // Only a file read this pass is one to move to.
             if !found.contains(&new) {
                 continue;
             }
             let (from, to) = (copy_of(vault, &key), copy_of(vault, &new));
-            let taken = ledger.current(&new, &vault.root).is_some()
-                || std::fs::symlink_metadata(vault.root.join(&to)).is_ok();
-            if taken {
-                if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
-                    ledger.0.remove(&key);
-                }
-                continue;
-            }
-            match rename_within(&vault.root, &from, &to) {
+            let moved = match ledger.current(&new, &vault.root) {
+                Some(_) => Err(std::io::ErrorKind::AlreadyExists.into()),
+                None => rename_within(&vault.root, &from, &to),
+            };
+            match moved {
                 Ok(()) => {
-                    out.updated.push(rel_key(&to));
+                    out.moved.push(rel_key(&to));
                     changes.push(Change {
                         what: "move",
                         key: new.clone(),
@@ -227,8 +244,15 @@ fn renamed(
                         put: None,
                     });
                 }
-                // A copy the person removed stays removed under the new name.
+                // Nothing at the old place: the person removed it, or a pass cut short had
+                // moved it already. The record moves either way.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if retire(vault, followed, &key, &ledger.0[&key], out, changes) {
+                        ledger.0.remove(&key);
+                    }
+                    continue;
+                }
                 Err(e) => {
                     out.skipped.push((key, format!("not moved: {e}")));
                     continue;
@@ -238,7 +262,21 @@ fn renamed(
                 ledger.0.insert(new, entry);
             }
         }
-    }
+        false
+    });
+}
+
+/// The project whose memory folder `link`, a `memory/<project>` the pass did not follow, leads to
+/// among the followed projects.
+fn project_behind(followed: &Path, link: &str) -> Option<String> {
+    let project = link.strip_prefix("memory/")?;
+    let target = followed.join(project).join("memory").canonicalize().ok()?;
+    let beside = target.strip_prefix(followed).ok()?;
+    let name = beside
+        .parent()?
+        .to_str()
+        .filter(|n| !n.contains(['/', '\\']))?;
+    (beside.ends_with("memory") && !name.is_empty()).then(|| name.to_string())
 }
 
 /// Takes the copy of a source that is no more: archived as the ledger wrote it, kept and said when
