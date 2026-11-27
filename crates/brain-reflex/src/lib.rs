@@ -7,7 +7,7 @@ mod fire;
 mod store;
 
 pub use cx::{Cx, Env};
-pub use fire::{Decided, Decision, decide, fire};
+pub use fire::{Decided, Decision, TRACE_WAIT, decide, fire};
 pub use store::{PickRow, Row, Verdicts};
 
 use std::path::Path;

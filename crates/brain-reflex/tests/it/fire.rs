@@ -270,9 +270,10 @@ fn locked(db: &std::path::Path) -> rusqlite::Connection {
 #[test]
 fn a_locked_trace_store_does_not_silence_the_hook() {
     let home = Home::temp();
-    let env = home.env();
+    let mut env = home.env();
     fire(Point::Prompt, home.payload("s-0", "alpha\n"), &[LIVE], &env).unwrap();
     let _lock = locked(&env.data.join(TRACES));
+    env.trace_wait = brain_reflex::TRACE_WAIT;
     let start = std::time::Instant::now();
     let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env).unwrap();
     assert!(

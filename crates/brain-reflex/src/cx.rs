@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use brain_platform::clock::Clock;
@@ -17,6 +18,8 @@ pub struct Env {
     pub vault: PathBuf,
     pub me: String,
     pub clock: Arc<dyn Clock>,
+    /// How long to wait for the trace store before running untraced; `TRACE_WAIT` in a hook.
+    pub trace_wait: Duration,
 }
 
 pub struct Cx<'a> {

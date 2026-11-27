@@ -16,7 +16,7 @@ use crate::{Act, Input, Point, Reflex, Stage, TRACES, VERDICTS, Verdict};
 
 /// How long a hook waits for the trace store before it runs untraced. Opening it is a write, so
 /// another writer would be waited on for five seconds.
-const TRACE_WAIT: Duration = Duration::from_millis(150);
+pub const TRACE_WAIT: Duration = Duration::from_millis(150);
 
 /// The backend that decides at the hook.
 const RULE: &str = "rule";
@@ -161,7 +161,8 @@ pub fn fire(
     env: &Env,
 ) -> anyhow::Result<Option<String>> {
     create_dir_private(&env.data)?;
-    let mut run = record(env.data.join(TRACES), format!("hook {}", point.as_str()));
+    let name = format!("hook {}", point.as_str());
+    let mut run = record(env.data.join(TRACES), name, env.trace_wait);
     let traced = run.id().map(str::to_string);
     let session = session(&payload).map(str::to_string);
     let decided = decide(point, registry, env, &mut run, || Ok(payload))?;
@@ -192,10 +193,10 @@ pub fn fire(
 
 /// A run recorded in the trace store, or one that records nothing when the store cannot be
 /// opened in time: a trace that cannot be written never changes what the hook does.
-fn record(path: PathBuf, name: String) -> Run {
+fn record(path: PathBuf, name: String, wait: Duration) -> Run {
     let (done, waiting) = mpsc::channel();
     std::thread::spawn(move || done.send(Store::open(&path).map(|s| Run::record(&s, &name))));
-    match waiting.recv_timeout(TRACE_WAIT) {
+    match waiting.recv_timeout(wait) {
         Ok(Ok(run)) => run,
         Ok(Err(e)) => {
             eprintln!("brain: this hook is not traced: {e}");

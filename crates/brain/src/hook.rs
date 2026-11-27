@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::Context;
 use brain_platform::clock::SystemClock;
 use brain_platform::dirs::Dirs;
-use brain_reflex::{Env, Point, REGISTRY, fire};
+use brain_reflex::{Env, Point, REGISTRY, TRACE_WAIT, fire};
 
 use crate::config::Config;
 use crate::out::terminal;
@@ -20,14 +20,15 @@ use crate::out::terminal;
 /// What a hook may add to a prompt.
 pub const BUDGET: Duration = Duration::from_millis(250);
 
-/// `BUDGET`, which a debug build lets a test widen so a slow runner is not a failed test.
-fn budget() -> Duration {
-    let widened = cfg!(debug_assertions)
+/// The budget a test asked for instead, in a debug build only, so a slow runner is not a failed
+/// test.
+fn widened() -> Option<Duration> {
+    let asked = cfg!(debug_assertions)
         .then(|| std::env::var("BRAIN_TEST_HOOK_BUDGET_MS").ok())
         .flatten();
-    widened
+    asked
         .and_then(|ms| ms.parse().ok())
-        .map_or(BUDGET, Duration::from_millis)
+        .map(Duration::from_millis)
 }
 
 pub fn main(word: Option<String>) -> ExitCode {
@@ -39,7 +40,7 @@ pub fn main(word: Option<String>) -> ExitCode {
     let (done, waiting) = mpsc::channel();
     std::thread::spawn(move || done.send(run(point)));
     let name = point.as_str();
-    match waiting.recv_timeout(budget()) {
+    match waiting.recv_timeout(widened().unwrap_or(BUDGET)) {
         Ok(Ok(Some(out))) => {
             // Claude Code may have stopped reading; that is not an error of the session's.
             let _ = writeln!(std::io::stdout(), "{out}");
@@ -65,6 +66,7 @@ fn run(point: Point) -> anyhow::Result<Option<String>> {
         vault: config.vault,
         me: config.me,
         clock: Arc::new(SystemClock),
+        trace_wait: widened().unwrap_or(TRACE_WAIT),
     };
     fire(point, payload, REGISTRY, &env)
 }
