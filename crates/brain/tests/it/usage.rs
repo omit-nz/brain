@@ -929,3 +929,29 @@ fn a_hook_payload_never_reaches_a_usage_report() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(!String::from_utf8_lossy(&got[0].body).contains(SENTINEL));
 }
+
+#[test]
+fn no_due_count_from_another_vault_is_sent() {
+    let day = "2026-11-24";
+    let h = counted(&[day]);
+    h.put(
+        "due.md",
+        "---\nowner: robin\nreview: 2020-01-01\n---\nbody\n",
+    );
+    h.run(&["index"]);
+    let next = tempfile::tempdir().unwrap();
+    h.run(&[
+        "init",
+        "--me",
+        "robin",
+        "--vault",
+        next.path().to_str().unwrap(),
+    ]);
+    let e = Endpoint::start(Answer::Status(204));
+    e.point(&h);
+    send(&h);
+    let got = e.got();
+    assert_eq!(got.len(), 1, "{got:?}");
+    let body = String::from_utf8_lossy(&got[0].body).into_owned();
+    assert!(!body.contains(Event::NotesDue.as_str()), "{body}");
+}

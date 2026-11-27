@@ -318,6 +318,13 @@ fn index(dirs: &Dirs) -> anyhow::Result<Index> {
     Index::open(&dirs.data.join("index.db"))
 }
 
+/// The index, to answer from: refused while it holds another vault's notes.
+fn reader(dirs: &Dirs, config: &Config) -> anyhow::Result<Index> {
+    let idx = index(dirs)?;
+    idx.check(&config.vault)?;
+    Ok(idx)
+}
+
 pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     let clock: Box<dyn Clock> = match cli.now {
         Some(t) => Box::new(FixedClock(t)),
@@ -353,7 +360,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             let config = Config::load(dirs)?;
             let vault = Vault::open(&config.vault)?;
             let today = clock.today();
-            let w = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
+            let idx = reader(dirs, &config)?;
+            let w = capture::correct(&vault, &idx, &config.me, today, &target, &text)?;
             println!("{}", terminal(&w.rel));
             usage::count(
                 &usage::store(dirs),
@@ -656,8 +664,8 @@ fn list_gaps(dirs: &Dirs, clock: &dyn Clock, as_json: bool) -> anyhow::Result<()
 }
 
 fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::Result<()> {
-    Config::load(dirs)?;
-    let idx = index(dirs)?;
+    let config = Config::load(dirs)?;
+    let idx = reader(dirs, &config)?;
     let provider = embed::load().ok();
     let q = Query {
         text,
@@ -773,7 +781,7 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
 fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let by = clock.today().checked_add(within.days())?;
-    let due = index(dirs)?.due(&config.me, by)?;
+    let due = reader(dirs, &config)?.due(&config.me, by)?;
     if as_json {
         let rows: Vec<_> = due
             .iter()
@@ -805,7 +813,7 @@ fn show(dirs: &Dirs, target: &str) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let vault = Vault::open(&config.vault)?;
     let path = match uuid::Uuid::parse_str(target) {
-        Ok(id) => index(dirs)?
+        Ok(id) => reader(dirs, &config)?
             .path_of(&id)?
             .with_context(|| format!("no indexed note has id {id}; run `brain index`"))?,
         Err(_) => target.to_string(),
@@ -887,10 +895,34 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Resu
 
 fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
-    let s = index(dirs)?.stats()?;
+    let idx = index(dirs)?;
+    // Another vault's counts are not this one's.
+    let other = idx.check(&config.vault).err().map(|e| e.to_string());
+    let s = idx.stats()?;
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
+    if let Some(why) = other {
+        if as_json {
+            let v = json!({
+                "daemon": daemon,
+                "index": why,
+                "vault": config.vault,
+                "version": version,
+            });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else {
+            println!(
+                "{}",
+                terminal(&format!(
+                    "brain {version}, vault {}\n{why}\ndaemon: {}",
+                    config.vault.display(),
+                    if daemon { "running" } else { "not running" }
+                ))
+            );
+        }
+        return Ok(());
+    }
     if as_json {
         let v = json!({
             "daemon": daemon,

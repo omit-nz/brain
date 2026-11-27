@@ -142,6 +142,11 @@ pub fn send_due(dirs: &Dirs, index: &Index, clock: &dyn Clock) -> anyhow::Result
         out.busy = true;
         return Ok(out);
     };
+    // Another vault's due notes are not counted.
+    let current = index
+        .check(&Config::load(dirs)?.vault)
+        .is_ok()
+        .then_some(index);
     let activity = Activity::open(&store(dirs))?;
     let today = clock.today();
     // Nothing counted yet leaves nothing to send: the window starts today.
@@ -170,7 +175,7 @@ pub fn send_due(dirs: &Dirs, index: &Index, clock: &dyn Clock) -> anyhow::Result
                     Some(k) => k,
                     None => key.insert(install_key(dirs)?),
                 };
-                let (body, signature) = report(&activity, index, &config.me, key, day)?;
+                let (body, signature) = report(&activity, current, &config.me, key, day)?;
                 activity.ledger(day, clock.now(), &body, &signature)?;
                 activity
                     .send(day)?
@@ -198,7 +203,7 @@ pub fn send_due(dirs: &Dirs, index: &Index, clock: &dyn Clock) -> anyhow::Result
 /// `day`'s report: its counts, whether anyone was active, and the notes due by then.
 fn report(
     activity: &Activity,
-    index: &Index,
+    index: Option<&Index>,
     me: &str,
     key: &SigningKey,
     day: Date,
@@ -219,7 +224,10 @@ fn report(
                 | Event::ErrorUpdate
         )
     }));
-    let due = index.due(me, day)?.len() as u64;
+    let due = match index {
+        Some(index) => index.due(me, day)?.len() as u64,
+        None => 0,
+    };
     if due > 0 {
         counts.push(Count {
             event: Event::NotesDue,

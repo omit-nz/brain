@@ -13,6 +13,7 @@ mod room;
 mod service;
 mod update;
 mod usage;
+mod vault;
 
 use std::fs;
 use std::path::Path;

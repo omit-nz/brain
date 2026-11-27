@@ -50,7 +50,13 @@ fn say(cx: &mut Cx<'_>) -> anyhow::Result<Option<String>> {
         if !index.exists() {
             return Ok((Due::default(), Vec::new()));
         }
-        let due = Index::open(&index)?.due(&env.me, today.parse()?)?;
+        let index = Index::open(&index)?;
+        // Another vault's due notes are nothing to show; the indexes still are.
+        if let Err(e) = index.check(&env.vault) {
+            eprintln!("{}", crate::out::terminal(&format!("brain: {e}")));
+            return Ok((Due::default(), Vec::new()));
+        }
+        let due = index.due(&env.me, today.parse()?)?;
         let all = due.len();
         // Only what is shown is read into the trace: thousands can be due at once.
         let shown: Vec<Overdue> = due

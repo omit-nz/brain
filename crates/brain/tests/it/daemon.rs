@@ -901,3 +901,38 @@ fn the_daemon_picks_up_a_changed_and_a_deleted_memory() {
         || d.stderr(),
     );
 }
+
+#[test]
+fn a_running_daemon_follows_a_new_vault() {
+    let h = Home::new();
+    h.init();
+    h.put("old.md", &note_with_id(1, "a note about herons"));
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "300")]);
+    wait_for_notes(&h, &d, 1);
+    let next = tempfile::tempdir().unwrap();
+    h.run(&[
+        "init",
+        "--me",
+        "robin",
+        "--vault",
+        next.path().to_str().unwrap(),
+    ]);
+    fs::write(
+        next.path().join("new.md"),
+        note_with_id(2, "a note about egrets"),
+    )
+    .unwrap();
+    until(
+        "the new vault indexed",
+        || {
+            let out = h
+                .brain()
+                .args(["search", "--json", "egrets"])
+                .output()
+                .unwrap();
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("new.md")
+        },
+        || d.stderr(),
+    );
+    assert_eq!(found(&h, "herons"), Vec::<String>::new());
+}

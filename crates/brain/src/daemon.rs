@@ -164,7 +164,12 @@ pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyho
             terminal(&format!("the Claude Code plugin was not updated: {e:#}"))
         );
     }
-    let v = serve(dirs, &clock, from_dir)?;
+    // A `brain init` over another folder ends one service and starts the next on that vault.
+    let v = loop {
+        if let Some(v) = serve(dirs, &clock, from_dir)? {
+            break v;
+        }
+    };
     eprintln!("installed brain {v}; starting it");
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -173,8 +178,12 @@ pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyho
 }
 
 /// The daemon's work, holding the writer lock and the vault watcher, which it lets go of when it
-/// returns the version it installed.
-fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<String> {
+/// returns: with the version it installed, or with nothing when the config names another vault.
+fn serve(
+    dirs: &Dirs,
+    clock: &Arc<dyn Clock>,
+    from_dir: Option<&Path>,
+) -> anyhow::Result<Option<String>> {
     let path = writer_lock(dirs);
     let _lock = match Lock::try_acquire(&path)? {
         Some(lock) => lock,
@@ -240,6 +249,11 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
     let mut follow_said = None;
     let mut next = Instant::now();
     loop {
+        // An unreadable config is a passing state, not another vault.
+        if Config::load(dirs).is_ok_and(|c| c.vault != root) {
+            eprintln!("the vault has changed; starting over on it");
+            return Ok(None);
+        }
         if due {
             passes += 1;
             if rewatch && watcher.watch(&vault.root, RecursiveMode::Recursive).is_ok() {
@@ -286,7 +300,7 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
             {
                 last_update = Some(Instant::now());
                 if let Some(v) = update_self(dirs, &store, &**clock, from_dir) {
-                    return Ok(v);
+                    return Ok(Some(v));
                 }
             }
         }

@@ -115,6 +115,7 @@ impl Index {
             vault.root.display()
         );
         let abort_after = abort_after();
+        self.belong_to(&vault.root)?;
         let existing = self.rows()?;
         let held = self.held()?;
         // Rows written under other reading rules are re-derived, changed or not.
@@ -328,6 +329,33 @@ impl Index {
             .filter_map(|(id, _)| id.parse().ok())
             .collect();
         Ok(out)
+    }
+
+    /// Makes the index `vault`'s, dropping every row of another vault in the same transaction: a
+    /// file with the same path, size and time would otherwise never be read again.
+    fn belong_to(&mut self, vault: &Path) -> anyhow::Result<()> {
+        let vault = vault.to_string_lossy();
+        let held: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'vault'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if held.as_deref() == Some(&*vault) {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        if held.is_some() {
+            tx.execute("DELETE FROM notes", [])?;
+            tx.execute("DELETE FROM skipped", [])?;
+        }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('vault', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&*vault],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Each id in the index with its note's disclosure.
