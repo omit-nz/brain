@@ -31,7 +31,7 @@ use crate::usage;
 #[command(
     name = "brain",
     version = concat!(env!("CARGO_PKG_VERSION"), " (protocol 1)"),
-    about = "A team's notes, searchable on your own machine."
+    about = "Your notes, searchable on your own machine."
 )]
 pub struct Cli {
     /// Read the clock at this instant instead of the system's (for tests).
@@ -307,7 +307,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
         Command::Index => reindex(dirs, &*clock),
-        Command::Daemon { from_dir } => daemon::run(dirs, &*clock, from_dir.as_deref()),
+        Command::Daemon { from_dir } => daemon::run(dirs, clock.into(), from_dir.as_deref()),
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
         Command::Add { text, title, kind } => {

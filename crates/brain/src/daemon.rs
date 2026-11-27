@@ -13,12 +13,11 @@ use brain::update;
 use brain_index::activity::Activity;
 use brain_index::{Index, Reindexed, embed};
 use brain_note::Vault;
-use brain_platform::clock::{Clock, FixedClock};
+use brain_platform::clock::Clock;
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::Lock;
 use brain_platform::process;
 use brain_report::Event;
-use jiff::Timestamp;
 use ll_core::embed::EmbeddingProvider;
 use notify::event::ModifyKind;
 use notify::{EventKind, EventKindMask, RecursiveMode};
@@ -107,8 +106,8 @@ fn newer<S: update::Source>(
 
 /// Runs the daemon until it installs a newer release, then runs that release in its place with
 /// the same arguments: the same process under launchd, and the same terminal elsewhere.
-pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<()> {
-    let v = serve(dirs, clock, from_dir)?;
+pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<()> {
+    let v = serve(dirs, &clock, from_dir)?;
     eprintln!("installed brain {v}; starting it");
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -118,7 +117,7 @@ pub fn run(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::R
 
 /// The daemon's work, holding the writer lock and the vault watcher, which it lets go of when it
 /// returns the version it installed.
-fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Result<String> {
+fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<String> {
     let path = writer_lock(dirs);
     let _lock = match Lock::try_acquire(&path)? {
         Some(lock) => lock,
@@ -212,14 +211,18 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
             // At start and hourly; a pass comes at least every BACKSTOP, so the hour holds.
             if last_send.is_none_or(|t: Instant| t.elapsed() >= SEND_EVERY) {
                 last_send = Some(Instant::now());
-                match usage::send_due(dirs, &idx, clock) {
+                match usage::send_due(dirs, &idx, &**clock) {
                     Ok(s) => eprintln!("{}", s.line()),
                     Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),
                 }
             }
-            if last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY) {
+            // Not while a recheck runs: off Unix the old process waits on the new one, and the
+            // recheck would run on beside it.
+            if rechecking.as_ref().is_none_or(JoinHandle::is_finished)
+                && last_update.is_none_or(|t: Instant| t.elapsed() >= UPDATE_EVERY)
+            {
                 last_update = Some(Instant::now());
-                if let Some(v) = update_self(dirs, &store, clock, from_dir) {
+                if let Some(v) = update_self(dirs, &store, &**clock, from_dir) {
                     return Ok(v);
                 }
             }
@@ -250,7 +253,7 @@ fn serve(dirs: &Dirs, clock: &dyn Clock, from_dir: Option<&Path>) -> anyhow::Res
         {
             changed = false;
             last_recheck = Some(Instant::now());
-            rechecking = Some(recheck(&index_db, &store, provider.clone(), clock.now()));
+            rechecking = Some(recheck(&index_db, &store, provider.clone(), clock.clone()));
         }
         let wait = if embedding {
             Duration::ZERO
@@ -280,13 +283,13 @@ fn recheck(
     index_db: &Path,
     store: &Path,
     provider: Option<Arc<dyn EmbeddingProvider>>,
-    now: Timestamp,
+    clock: Arc<dyn Clock>,
 ) -> JoinHandle<()> {
     let (index_db, store) = (index_db.to_path_buf(), store.to_path_buf());
     std::thread::spawn(move || {
         let filled = Index::open(&index_db).and_then(|idx| {
             let activity = Activity::open(&store)?;
-            gaps::recheck(&idx, &activity, provider.as_deref(), &FixedClock(now))
+            gaps::recheck(&idx, &activity, provider.as_deref(), &*clock)
         });
         match filled {
             Ok(n) => eprintln!("recheck: {n} gaps filled"),

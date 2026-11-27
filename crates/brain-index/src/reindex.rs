@@ -381,9 +381,15 @@ fn upsert(tx: &Transaction<'_>, w: &Work) -> anyhow::Result<()> {
         params![id, n.title, n.tags.join(" "), n.body],
     )?;
     if rewritten > 0 {
-        tx.execute("UPDATE notes SET embedded = 0 WHERE id = ?1", [id])?;
         tx.execute("DELETE FROM embeddings WHERE id = ?1", [id])?;
     }
+    // A note with no vector is pending: a new one, a rewritten one, and one the embedder failed
+    // on, which is tried again.
+    tx.execute(
+        "UPDATE notes SET embedded = 0
+         WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM embeddings WHERE id = ?1)",
+        [id],
+    )?;
     tx.execute("DELETE FROM links WHERE source_id = ?1", [id])?;
     for target in &n.links {
         tx.execute(

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use brain_index::activity::Activity;
 use brain_platform::clock::{Clock, SystemClock};
-use brain_report::Door;
+use brain_report::{Door, Event};
 use serde_json::Value;
 
 use super::Home;
@@ -654,7 +654,7 @@ fn a_daemon_started_before_its_vault_waits_for_it() {
 }
 
 /// A recheck searches every open gap, which takes minutes on a big vault with many gaps. The
-/// daemon does it a gap a turn, so a note saved meanwhile is indexed without waiting for it.
+/// daemon does it on a thread of its own, so a note saved meanwhile is indexed without waiting.
 #[test]
 fn a_save_during_a_gap_recheck_is_indexed_without_waiting_for_it() {
     let h = Home::new();
@@ -715,4 +715,41 @@ fn a_gap_recheck_waits_for_the_pending_embeddings() {
         || d.stderr(),
     );
     assert_eq!(h.json(&["status", "--json"])["embedded"], NOTES);
+}
+
+/// A recheck's counts go to the day the person is living, as every other count does: a day that
+/// is not theirs may already have been sent.
+#[test]
+fn a_gap_a_recheck_fills_is_counted_on_the_local_day() {
+    // A zone whose date differs from UTC's at this hour.
+    let hour = SystemClock.now().to_zoned(jiff::tz::TimeZone::UTC).hour();
+    let zone = if hour < 11 {
+        "Etc/GMT+12"
+    } else {
+        "Etc/GMT-14"
+    };
+    let h = Home::new();
+    h.init();
+    h.run(&["search", "pelicans"]);
+    let d = Daemon::start_with(&h, &[("TZ", zone)]);
+    d.wait_for_passes(1);
+    h.put("a.md", &note_with_id(1, "a note about pelicans"));
+    until(
+        "a finished recheck",
+        || d.stderr().contains("recheck: 1 gaps filled"),
+        || d.stderr(),
+    );
+    let local = SystemClock
+        .now()
+        .to_zoned(jiff::tz::TimeZone::get(zone).unwrap())
+        .date();
+    let activity = Activity::open(&h.home.path().join("data/activity.db")).unwrap();
+    let filled: u64 = activity
+        .day(local)
+        .unwrap()
+        .iter()
+        .filter(|(e, _, _)| *e == Event::GapFilled)
+        .map(|(_, _, n)| n)
+        .sum();
+    assert_eq!(filled, 1, "{zone} {local}");
 }

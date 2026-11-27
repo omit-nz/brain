@@ -314,35 +314,53 @@ fn an_edit_outside_the_embedded_text_keeps_the_vector() {
 #[test]
 fn the_newest_notes_are_embedded_first() {
     let f = Fixture::with_notes(4);
-    let at = |name: &str, secs: u64| {
-        fs::File::options()
-            .write(true)
-            .open(f.vault.path().join(name))
-            .unwrap()
-            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
-            .unwrap();
-    };
-    at("n000.md", 1_000);
-    at("n001.md", 3_000);
-    at("n002.md", 2_000);
-    at("n003.md", 500);
     let mut idx = f.indexed();
-    f.sql()
-        .execute("UPDATE notes SET mtime_ns = -1 WHERE path = 'n003.md'", [])
-        .unwrap();
-    // Writing the ids saved each note again, so the mtimes are set back before ordering.
-    for (name, secs) in [
+    for (name, mtime_ns) in [
         ("n000.md", 1_000_i64),
         ("n001.md", 3_000),
         ("n002.md", 2_000),
+        ("n003.md", -1),
     ] {
         f.sql()
             .execute(
                 "UPDATE notes SET mtime_ns = ?1 WHERE path = ?2",
-                rusqlite::params![secs * 1_000_000_000, name],
+                rusqlite::params![mtime_ns, name],
             )
             .unwrap();
     }
     idx.embed_batch(&HashEmbedder::new(8), 2).unwrap();
     assert_eq!(embedded(&f), ["n001.md", "n003.md"]);
+}
+
+/// A note the embedder once failed on is tried again when its file changes, as before.
+#[test]
+fn a_failed_note_is_tried_again_after_any_edit() {
+    let f = Fixture::with_notes(1);
+    let mut idx = f.indexed();
+    idx.embed_pending(&Picky::new("number", false), 10).unwrap();
+    assert_eq!(f.count("SELECT count(*) FROM notes WHERE embedded = -1"), 1);
+    let raw = fs::read_to_string(f.vault.path().join("n000.md")).unwrap();
+    f.put("n000.md", &raw.replacen("---\n", "---\nowner: sam\n", 1));
+    f.reindex(&mut idx);
+    let e = idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    assert_eq!(e.done, 1);
+}
+
+/// Search reads only the running model's vectors, so a note embedded by another model is pending
+/// again.
+#[test]
+fn a_vector_of_another_model_is_made_again() {
+    let f = Fixture::with_notes(3);
+    let mut idx = f.indexed();
+    idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    f.sql()
+        .execute("UPDATE embeddings SET model = 'an older model'", [])
+        .unwrap();
+    let e = idx.embed_batch(&HashEmbedder::new(8), 2).unwrap();
+    assert_eq!((e.done, e.pending), (2, 1));
+    idx.embed_pending(&HashEmbedder::new(8), 10).unwrap();
+    assert_eq!(
+        f.count("SELECT count(*) FROM embeddings WHERE model = 'hash'"),
+        3
+    );
 }
