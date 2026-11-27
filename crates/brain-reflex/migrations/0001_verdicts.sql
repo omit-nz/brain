@@ -6,9 +6,12 @@ CREATE TABLE meta (
 );
 
 CREATE TABLE verdicts (
-    id INTEGER PRIMARY KEY,
+    -- Never reused: a person labels a verdict by this number.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     reflex TEXT NOT NULL,
     version INTEGER NOT NULL,
+    -- Which decider made it: `rule` at the hook, others scoring afterwards.
+    backend TEXT NOT NULL,
     point TEXT NOT NULL,
     at INTEGER NOT NULL,
     session TEXT,
@@ -22,7 +25,16 @@ CREATE TABLE verdicts (
     label TEXT CHECK (label IN ('right', 'wrong'))
 );
 
-CREATE INDEX verdicts_session ON verdicts(reflex, session);
+CREATE INDEX verdicts_session ON verdicts(reflex, backend, session);
+
+-- Whose text a verdict's row holds, so a note that goes takes its words with it.
+CREATE TABLE verdict_sources (
+    verdict_id INTEGER NOT NULL REFERENCES verdicts(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    PRIMARY KEY (verdict_id, source)
+);
+
+CREATE INDEX verdict_sources_source ON verdict_sources(source);
 
 CREATE TABLE picks (
     verdict_id INTEGER NOT NULL REFERENCES verdicts(id) ON DELETE CASCADE,

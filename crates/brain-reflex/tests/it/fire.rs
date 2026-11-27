@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use brain_reflex::{Point, REGISTRY, Reflex, Stage, TRACES, VERDICTS, fire};
 use omit_agent_trace::Kind;
 use serde_json::{Value, json};
@@ -256,4 +258,124 @@ fn old_unlabelled_verdicts_are_pruned() {
         .map(|r| r.session.unwrap())
         .collect();
     assert_eq!(left, ["labelled", "pick-labelled"]);
+}
+
+/// A lock held on `db`, as another process would hold one.
+fn locked(db: &std::path::Path) -> rusqlite::Connection {
+    let lock = rusqlite::Connection::open(db).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    lock
+}
+
+#[test]
+fn a_locked_trace_store_does_not_silence_the_hook() {
+    let home = Home::temp();
+    let env = home.env();
+    fire(Point::Prompt, home.payload("s-0", "alpha\n"), &[LIVE], &env).unwrap();
+    let _lock = locked(&env.data.join(TRACES));
+    let start = std::time::Instant::now();
+    let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env).unwrap();
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(said(out).as_deref(), Some("alpha"));
+}
+
+#[test]
+fn a_locked_verdict_store_is_not_waited_on() {
+    let home = Home::temp();
+    let env = home.env();
+    fire(Point::Prompt, home.payload("s-0", "alpha\n"), &[LIVE], &env).unwrap();
+    let _lock = locked(&env.data.join(VERDICTS));
+    let start = std::time::Instant::now();
+    let out = fire(Point::Prompt, home.payload("s-1", "alpha\n"), &[LIVE], &env);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(out.is_err(), "{out:?}");
+}
+
+/// A row says what was said, so it is written last: a hook killed while the trace is still being
+/// written has logged nothing as said.
+#[test]
+fn nothing_is_logged_as_said_while_the_trace_is_still_being_written() {
+    let home = Home::temp();
+    let env = home.env();
+    fire(
+        Point::Prompt,
+        home.payload("s-0", "alpha\n"),
+        &[SHADOW],
+        &env,
+    )
+    .unwrap();
+    // The last write of a trace, made to take seconds.
+    rusqlite::Connection::open(env.data.join(TRACES))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER slow BEFORE UPDATE ON runs BEGIN
+                 SELECT count(*) FROM (WITH RECURSIVE c(x) AS
+                     (SELECT 1 UNION ALL SELECT x + 1 FROM c LIMIT 20000000) SELECT x FROM c);
+             END",
+        )
+        .unwrap();
+    let verdicts = home.verdicts();
+    let payload = home.payload("s-1", "alpha\n");
+    let firing = std::thread::spawn(move || fire(Point::Prompt, payload, &[LIVE], &env).unwrap());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !firing.is_finished(),
+        "the trigger is too quick to prove anything"
+    );
+    assert_eq!(
+        verdicts.rows().unwrap().len(),
+        1,
+        "only the first fire's row"
+    );
+    assert!(firing.join().unwrap().is_some());
+    assert_eq!(verdicts.rows().unwrap().len(), 2);
+}
+
+#[test]
+fn a_row_names_its_backend_and_the_sources_it_read() {
+    let home = Home::temp();
+    let env = home.env();
+    let payload = home.payload("s-1", "alpha\n");
+    let file = format!("file:{}", payload["file"].as_str().unwrap());
+    fire(Point::Prompt, payload, &[SHADOW], &env).unwrap();
+    let row = &home.verdicts().rows().unwrap()[0];
+    assert_eq!(row.backend, "rule");
+    assert_eq!(row.sources, [file, "session:s-1".to_string()]);
+}
+
+/// A scored row shows nothing, so it never counts against what the rule may say.
+#[test]
+fn only_a_backends_own_picks_are_remembered() {
+    let home = Home::temp();
+    let env = home.env();
+    fire(
+        Point::Prompt,
+        home.payload("s-1", "alpha\n"),
+        &[SHADOW],
+        &env,
+    )
+    .unwrap();
+    let verdicts = home.verdicts();
+    assert_eq!(
+        verdicts
+            .passed_keys("fixture", "rule", "s-1")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        verdicts
+            .passed_keys("fixture", "embed", "s-1")
+            .unwrap()
+            .len(),
+        0
+    );
 }
