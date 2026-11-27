@@ -2,12 +2,14 @@
 
 Leave a brain at home. brain keeps a folder of your Markdown notes searchable on your own computer, and gives your AI tool the same search, so it answers from what you have written down. A Rust daemon and command line with a local MCP server. Apache-2.0. Built by [omit](https://omit.nz).
 
-## What works today (0.2.3)
+## What works today (0.2.5)
 
 - Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, says when each note it finds last changed and whether the file it was copied from has changed since, and keeps the questions nothing answered (`brain gaps`).
 - Claude Code and Claude Desktop search your notes, capture new ones into an inbox, correct a note and list what is due for review.
 - A background daemon indexes a note soon after you save it (macOS; on Linux you run `brain daemon` yourself).
 - Rooms, so AI sessions on one computer can leave each other messages.
+- A Claude Code plugin: a session starts with the notes due for review and the memory indexes you name. What brain reads and decides at each hook is kept on your computer for 30 days ([docs/traces.md](docs/traces.md)).
+- Copies of Claude Code's auto-memory that follow their sources (`brain memory follow`).
 - Import of a learning-loop vault.
 - Signed releases and updates.
 
