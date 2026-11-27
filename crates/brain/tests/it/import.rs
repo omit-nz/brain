@@ -757,3 +757,33 @@ fn a_quoted_memory_name_imports_as_written() {
         "{copy}"
     );
 }
+
+/// An import of a few notes into a large vault once listed the whole vault's gaps, which reads
+/// like data loss.
+#[test]
+fn an_import_reports_only_on_its_own_notes() {
+    let h = Home::new();
+    h.init();
+    h.put("elsewhere.md", "no source here, and [[nowhere-at-all]]\n");
+    h.put("target.md", "---\nsource: me\n---\nsomething\n");
+    let from = tempfile::tempdir().unwrap();
+    fs::write(
+        from.path().join("brought.md"),
+        "---\nsource: me\n---\nsee [[target]] and [[no-such-note]]\n",
+    )
+    .unwrap();
+    let out = h.run(&[
+        "import",
+        "learning-loop",
+        "--from",
+        from.path().to_str().unwrap(),
+    ]);
+    assert!(!out.contains("elsewhere.md"), "{out}");
+    assert!(!out.contains("nowhere-at-all"), "{out}");
+    assert!(!out.contains("[[target]]"), "{out}");
+    assert!(out.contains("brought.md -> [[no-such-note]]"), "{out}");
+    assert!(
+        out.contains("visibility: 0 shared, 0 listed, 1 private"),
+        "{out}"
+    );
+}

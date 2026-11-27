@@ -106,6 +106,8 @@ pub struct ImportPlan {
     pub unchanged: usize,
     pub conflicts: Vec<String>,
     pub skipped: Vec<(String, Skip)>,
+    /// Where every source's copy goes, written this run or not.
+    pub scope: HashSet<String>,
 }
 
 /// A source to write, with the hash of its copy as classified (`None`: no copy yet).
@@ -267,6 +269,7 @@ fn classify_sources(
     let mut todo = Vec::new();
     let mut claimed = HashSet::new();
     for s in all {
+        plan.scope.insert(rel_key(&s.dst_rel));
         let src_hash = hash(s.raw.as_bytes());
         let dst_path = dst.root.join(&s.dst_rel);
         let dst_hash = std::fs::read(&dst_path).ok().map(|b| hash(&b));

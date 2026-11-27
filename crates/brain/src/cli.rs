@@ -1059,6 +1059,9 @@ fn import_learning_loop(
             "brain's daemon will index them; with no daemon running, run `brain index` once the other brain command finishes\n"
         );
     }
-    println!("{}", terminal(&import::report(&dst, today).to_string()));
+    println!(
+        "{}",
+        terminal(&import::report(&dst, today, &plan.scope).to_string())
+    );
     Ok(())
 }
