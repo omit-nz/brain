@@ -9,8 +9,13 @@ step can be read and replayed later on the same machine.
 - The same file holds a run for each pass of `brain memory follow` that changed something, with the
   full text of each memory it copied or updated.
 - When a note is removed, or stops being shared, the runs and verdicts holding its text are purged
-  at the next index pass. That is tried once: what a pass that was cut short or a busy store misses
-  ages out with the rest.
+  at the next index pass, labelled verdicts too. That is tried once: what a pass that was cut short
+  or a busy store misses ages out with the rest.
+- A followed memory that `brain memory follow` archived is set aside, not removed: its runs and
+  verdicts are kept until you delete its archived file. An id is archived when brain's archive
+  records name it and no note in the index holds it. Anything that gives an agent or a person text
+  from a run or a verdict must say which of its sources are archived, worked out when it is read.
+  Nothing reads that text back yet.
 - `verdicts.db`, beside it: one row per reflex per hook, with what it picked and any label you
   give it. A row with no label is dropped after 90 days.
 

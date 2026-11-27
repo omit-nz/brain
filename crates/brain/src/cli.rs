@@ -164,6 +164,10 @@ enum Command {
     /// Stop the daemon, and keep it from starting at login.
     Stop,
     /// Check a release archive's signature against this build's release key.
+    /// What Claude Code's hooks call. `main` takes it before this parser, so that nothing here
+    /// can make a hook exit non-zero; it is listed so the parser knows every command.
+    #[command(hide = true)]
+    Hook { point: Option<String> },
     #[command(hide = true)]
     ReleaseVerify { archive: PathBuf },
     /// Print the folder an install lives in, for scripts/install.sh.
@@ -333,6 +337,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
         Command::Index => reindex(dirs, &*clock),
+        Command::Hook { .. } => anyhow::bail!("`brain hook` takes no option before it"),
         Command::Daemon { from_dir } => daemon::run(dirs, clock.into(), from_dir.as_deref()),
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
@@ -1115,4 +1120,75 @@ fn import_learning_loop(
         terminal(&import::report(&dst, today, &plan.scope).to_string())
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    const README: &str = include_str!("../../../README.md");
+
+    /// Every `` `brain ...` `` in `text`, without the backticks.
+    fn spans(text: &str) -> impl Iterator<Item = &str> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| s.starts_with("brain "))
+    }
+
+    /// The command `span` names, as its path; `None` when a word where a command goes is none.
+    /// What follows a command that takes no further command is its arguments.
+    fn named(cli: &clap::Command, span: &str) -> Option<String> {
+        let mut at = cli;
+        let mut path = Vec::new();
+        for word in span.split_whitespace().skip(1) {
+            let plain = word.chars().all(|c| c.is_ascii_lowercase() || c == '-');
+            if !at.has_subcommands() || !plain || word.starts_with('-') {
+                break;
+            }
+            at = at.find_subcommand(word)?;
+            path.push(word);
+        }
+        (!path.is_empty()).then(|| path.join(" "))
+    }
+
+    /// Every command a person can run: each not hidden that takes no further command, and each
+    /// that also runs alone.
+    fn runnable(at: &clap::Command, path: &str, out: &mut Vec<String>) {
+        for sub in at.get_subcommands().filter(|s| !s.is_hide_set()) {
+            let path = format!("{path} {}", sub.get_name()).trim().to_string();
+            if !sub.has_subcommands() || !sub.is_subcommand_required_set() {
+                out.push(path.clone());
+            }
+            runnable(sub, &path, out);
+        }
+    }
+
+    #[test]
+    fn a_span_names_a_command_only_when_every_command_word_is_one() {
+        let cli = Cli::command();
+        assert_eq!(
+            named(&cli, "brain memory follow ~/x").unwrap(),
+            "memory follow"
+        );
+        assert_eq!(named(&cli, "brain init --me <you>").unwrap(), "init");
+        assert_eq!(named(&cli, "brain memory mend"), None);
+        assert_eq!(named(&cli, "brain mend"), None);
+    }
+
+    #[test]
+    fn the_readme_names_the_commands_the_cli_has() {
+        let cli = Cli::command();
+        let unknown: Vec<&str> = spans(README).filter(|s| named(&cli, s).is_none()).collect();
+        assert_eq!(unknown, Vec::<&str>::new(), "named, and not a command");
+        let (_, rest) = README.split_once("\n## Commands\n").expect("## Commands");
+        let list = rest.split_once("\n## ").map_or(rest, |(list, _)| list);
+        let listed: Vec<String> = spans(list).filter_map(|s| named(&cli, s)).collect();
+        let mut commands = Vec::new();
+        runnable(&cli, "", &mut commands);
+        commands.retain(|c| !listed.contains(c));
+        assert_eq!(commands, Vec::<String>::new(), "a command, and not listed");
+    }
 }

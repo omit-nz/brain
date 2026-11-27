@@ -528,6 +528,108 @@ fn an_archived_file_moved_back_while_its_source_is_gone_is_archived_again() {
     assert!(archive_path(&h, "one").exists());
 }
 
+/// A project folder moved with nothing to say it was moved.
+#[test]
+fn a_folder_moved_with_no_link_is_copied_anew() {
+    let (h, p) = two();
+    let copied = copy(&h, "one").unwrap();
+    fs::remove_file(copy_path(h.vault.path(), "stays")).unwrap();
+    let (old, new) = (p.path().join("-proj"), p.path().join("-new"));
+    fs::rename(&old, &new).unwrap();
+    pass(&h);
+    pass(&h);
+    let moved = h.vault.path().join("working-memory/-new/one.md");
+    assert_ne!(id_of(&fs::read_to_string(&moved).unwrap()), id_of(&copied));
+    assert_eq!(copy(&h, "one"), None);
+    let back = h.vault.path().join("working-memory/-new/stays.md");
+    assert!(back.exists(), "a removed copy is copied again");
+    fs::rename(&new, &old).unwrap();
+    pass(&h);
+    assert_eq!(copy(&h, "one"), Some(copied));
+}
+
+/// Renames the vault folder and sets brain up over it where it now is.
+fn rename_vault(h: &Home) -> (tempfile::TempDir, PathBuf) {
+    let aside = tempfile::tempdir().unwrap();
+    let renamed = aside.path().join("renamed");
+    fs::rename(h.vault.path(), &renamed).unwrap();
+    h.brain()
+        .current_dir(h.home.path())
+        .args([
+            "init",
+            "--me",
+            "robin",
+            "--vault",
+            renamed.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    (aside, renamed)
+}
+
+#[test]
+fn a_renamed_vault_folder_stops_following_its_copies() {
+    let (h, p) = following(&["one", "two"]);
+    fs::remove_file(copy_path(h.vault.path(), "two")).unwrap();
+    let (_aside, renamed) = rename_vault(&h);
+    p.write("one", "one second");
+    let run = || {
+        h.brain()
+            .current_dir(h.home.path())
+            .args(["memory", "run"])
+            .assert()
+            .success()
+    };
+    run();
+    let text = fs::read_to_string(copy_path(&renamed, "one")).unwrap();
+    assert!(text.contains("one first"), "no longer followed: {text}");
+    assert!(
+        copy_path(&renamed, "two").exists(),
+        "a removed copy is back"
+    );
+}
+
+#[test]
+fn a_pass_killed_before_the_ledger_save_leaves_its_copies_as_the_persons() {
+    let (h, p) = two();
+    let before = ledger(&h);
+    p.write("one", "one second");
+    pass(&h);
+    set_ledger(&h, &before);
+    p.write("one", "one third");
+    let said = pass(&h);
+    assert!(said.contains("kept as it is"), "{said}");
+    assert!(copy(&h, "one").unwrap().contains("one second"));
+}
+
+#[test]
+fn a_source_that_comes_and_goes_moves_its_file_each_time() {
+    let (h, p) = two();
+    let source = fs::read(p.file("one")).unwrap();
+    for _ in 0..2 {
+        archive_one(&h, &p);
+        assert!(archive_path(&h, "one").exists());
+        fs::write(p.file("one"), &source).unwrap();
+        let said = pass(&h);
+        assert!(said.contains("1 restored"), "{said}");
+    }
+}
+
+#[test]
+fn a_vault_without_its_archive_folder_reads_as_the_files_deleted() {
+    let (h, p) = two();
+    let one = id(&h, "one");
+    let source = fs::read(p.file("one")).unwrap();
+    archive_one(&h, &p);
+    fs::remove_dir_all(h.vault.path().join("_archive")).unwrap();
+    pass(&h);
+    pass(&h);
+    assert_eq!(traced(&h, &one), 0);
+    fs::write(p.file("one"), source).unwrap();
+    pass(&h);
+    assert_eq!(copy(&h, "one"), None);
+}
+
 #[cfg(unix)]
 mod linked {
     use std::os::unix::fs::symlink;
@@ -595,6 +697,31 @@ mod linked {
         assert!(texts.iter().any(|t| t.contains("one first")), "{texts:?}");
         assert!(texts.contains(&new_text), "{texts:?}");
         assert!(new_copy(&h).unwrap().contains("another memory, changed"));
+    }
+
+    #[test]
+    fn a_linked_name_never_copied_takes_the_old_copy_and_its_words() {
+        let (h, p) = following(&["one"]);
+        new_memory(&p, "another memory entirely\n");
+        link_old_to_new(&p);
+        pass(&h);
+        assert!(new_copy(&h).unwrap().contains("another memory entirely"));
+        let texts = vault_texts(&h);
+        assert!(!texts.iter().any(|t| t.contains("one first")), "{texts:?}");
+    }
+
+    #[test]
+    fn an_import_between_a_move_and_the_first_follow_copies_the_project_again() {
+        let h = Home::new();
+        h.init();
+        let p = Projects::new();
+        p.write("one", "one first");
+        import(&h, p.path());
+        fs::create_dir_all(p.path().join("-new")).unwrap();
+        fs::rename(p.path().join("-proj/memory"), p.path().join("-new/memory")).unwrap();
+        symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
+        import(&h, p.path());
+        assert!(copy(&h, "one").is_some() && new_copy(&h).is_some());
     }
 
     /// Every markdown file's text anywhere in the vault, the archive included.

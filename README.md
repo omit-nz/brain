@@ -38,9 +38,25 @@ Then `brain update` moves you to each new release once its signature checks. [do
 
 ## Auto-memory
 
-`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source it has seen there and two looks in a row then found gone. A copy you have edited is left as it is, and a folder that is missing or empty changes nothing. When more than ten copies are due to be archived at the same look, as when the folder is reset, none of them is: they are held until their sources are back or you run `brain memory run --archive-gone`, which archives those held and names each; `brain status` says how many. Ten or fewer at one look are archived without asking. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
+`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source it has seen there and two looks in a row then found gone. A copy you have edited is left as it is, a copy you have removed stays removed, and a followed folder that is missing or empty changes nothing. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
 
-When a project's memory folder becomes a link to another project's, its copies move to the new name; where brain had already copied a memory under both, the copy under the old name is archived, or kept if you edited it, and counts toward those ten like any other. To move a project's memory yourself, run `brain memory unfollow`, move it, link the old name to it, and follow again; run no import in between. Do not rename or switch your notes folder once brain has followed memory, even after `brain memory unfollow`: copies made before stop following their sources, ones you had removed or moved can be copied again, and there is no supported way yet to tie them back.
+Archiving is undone when the source returns: the same file comes back under the same id. If its words changed while it was away, a new copy is written under that id and the old one stays in `_archive`. An archived memory is out of search, and `brain status` says how many there are. brain does not purge it from its traces unless you delete its archived file (they age out as usual), and a memory whose archived file you deleted is not copied again.
+
+When a project's memory folder becomes a link to another project's, its copies move to the new name; where brain had already copied a memory under both, the copy under the old name is archived, or kept if you edited it. To move a project's memory yourself, run `brain memory unfollow`, move it, link the old name to it, and follow again; run no import in between.
+
+## Limits
+
+- A project's memory folder moved before the old name is linked to the new one gets new copies, ones you had removed included. The old copies are archived, or kept if you edited them, and the archived ones come back if you move the folder back. (`a_folder_moved_with_no_link_is_copied_anew`)
+- Do not rename or switch your notes folder once brain has followed memory, even after `brain memory unfollow`: copies made before stop following their sources, ones you had removed can be copied again, and there is no supported way yet to tie them back. (`a_renamed_vault_folder_stops_following_its_copies`)
+- `brain import` run between a memory folder's move and the next pass copies that project again under its new name. (`an_import_between_a_move_and_the_first_follow_copies_the_project_again`)
+- A linked project whose new name brain has never copied: a file of the same name there is taken for the old memory renamed, and the copy takes its words. If it was a different memory, the old words are not kept. (`a_linked_name_never_copied_takes_the_old_copy_and_its_words`)
+- A pass killed after writing copies and before saving its record leaves those copies reading as yours, so they stop following. (`a_pass_killed_before_the_ledger_save_leaves_its_copies_as_the_persons`, `a_changed_copy_cut_short_before_the_ledger_save_is_not_taken_for_the_old_one`)
+- A followed folder that is reset takes those memories out of search until it is restored. (`a_folder_reset_and_restored_in_halves_leaves_the_vault_as_it_was`)
+- A memory that is removed and written again every few minutes moves its file each time. (`a_source_that_comes_and_goes_moves_its_file_each_time`)
+- An archived file you move elsewhere, or rewrite without its id, reads as deleted. So does every one of them if your notes folder is copied without `_archive`. (`an_archived_file_rewritten_without_its_id_reads_as_deleted`, `a_vault_without_its_archive_folder_reads_as_the_files_deleted`)
+- An archived file you move back by hand while its source is still gone is archived again. (`an_archived_file_moved_back_while_its_source_is_gone_is_archived_again`)
+- After you follow a different folder, memories archived before are not brought back; one that returns is copied afresh. (`another_followed_folder_restores_nothing_and_takes_no_id`)
+- `brain import` of an archived memory's source writes a fresh copy with a new id, and the archived one stays. (`an_import_copies_an_archived_memory_afresh`)
 
 ## Connect your AI
 
@@ -52,6 +68,18 @@ Both reach your notes through the same eight tools: search your brain, search on
 ## Rooms
 
 A room lets your AI sessions leave each other messages on this computer, even sessions signed in to different Claude accounts. A room is the folder `rooms/<name>/` in your vault and each post is a private note in it, so search finds posts and nothing leaves the machine. `room_post` writes a post (to `squads` unless a room is named), `room_new` shows the posts a session has not seen yet, and `room_list` lists the rooms. Give each session its own name with `brain connect claude-code --as "<name>"`, or pass `as` on a call; without one, posts carry the name you gave `brain init`. The same works from a terminal: `brain room post <text>`, `brain room new` and `brain room list`.
+
+## Commands
+
+- `brain init`, `brain status`, `brain update`: set up over a folder of notes, see what the index holds, install the newest signed release.
+- `brain start`, `brain stop`, `brain daemon`: keep the index up to date at every login or in a terminal.
+- `brain index`, `brain search`, `brain show`, `brain gaps`, `brain due`: index now, search, print a note, list unanswered questions and notes due for review.
+- `brain add`, `brain correct`, `brain inbox`, `brain inbox keep`, `brain inbox skip`: write a note into the inbox, correct one, and work through the inbox.
+- `brain connect`, `brain mcp`: connect an AI tool, and serve it.
+- `brain memory follow`, `brain memory run`, `brain memory unfollow`: follow Claude Code's auto-memory.
+- `brain import learning-loop`: copy another brain's notes in.
+- `brain room post`, `brain room new`, `brain room list`: leave and read messages between sessions.
+- `brain usage`, `brain usage on`, `brain usage off`: see and set what omit is sent.
 
 ## What omit sees
 

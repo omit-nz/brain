@@ -516,6 +516,76 @@ fn the_readme_names_unbuilt_parts_only_as_planned() {
     assert_eq!(claimed, Vec::<&str>::new());
 }
 
+/// The limits in `readme` that no test pins: a bullet under `## Limits` naming none in its closing
+/// brackets, and a name there that is no `#[test]` in `sources`.
+fn unpinned(readme: &str, sources: &[String]) -> Vec<String> {
+    let Some((_, rest)) = readme.split_once("\n## Limits\n") else {
+        return vec!["no `## Limits` section".into()];
+    };
+    let section = rest
+        .split_once("\n## ")
+        .map_or(rest, |(section, _)| section);
+    let is_test = |name: &str| {
+        let head = format!("fn {name}(");
+        sources.iter().any(|text| {
+            text.match_indices(&head).any(|(at, _)| {
+                let above = text[..at].rsplit("\n\n").next().unwrap_or_default();
+                above.contains("#[test]")
+            })
+        })
+    };
+    let mut out = Vec::new();
+    for bullet in section.lines().filter(|l| l.starts_with("- ")) {
+        let names: Vec<&str> = bullet
+            .trim_end()
+            .strip_suffix(')')
+            .and_then(|b| b.rsplit_once("(`"))
+            .map(|(_, names)| names.trim_end_matches('`').split("`, `").collect())
+            .unwrap_or_default();
+        if names.is_empty() {
+            out.push(format!("names no test: {bullet}"));
+        }
+        out.extend(
+            names
+                .iter()
+                .filter(|name| !is_test(name))
+                .map(|name| format!("no such test: {name}")),
+        );
+    }
+    out
+}
+
+#[test]
+fn a_limit_without_its_test_is_found() {
+    let sources = ["#[test]\nfn kept() {}\n\nfn not_a_test() {}\n".to_string()];
+    let readme = "# x\n\n## Limits\n\n- One. (`kept`)\n- Two.\n- Three. (`gone`, `not_a_test`)\n\n## Next\n\n- Four.\n";
+    assert_eq!(
+        unpinned(readme, &sources),
+        [
+            "names no test: - Two.",
+            "no such test: gone",
+            "no such test: not_a_test"
+        ]
+    );
+}
+
+#[test]
+fn every_readme_limit_names_a_test_that_exists() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    let mut files = Vec::new();
+    let mut dirs = vec![root().join("crates")];
+    while let Some(dir) = dirs.pop() {
+        for path in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+            if path.is_dir() && !path.ends_with("target") {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(fs::read_to_string(path).unwrap());
+            }
+        }
+    }
+    assert_eq!(unpinned(&readme, &files), Vec::<String>::new());
+}
+
 /// The release job checks the macOS build against what an installed brain asks of an update
 /// (brain_platform::codesign::developer_id, with brain's own identifier for brain), so a build the
 /// release passes is a build every Mac takes. Both scripts write the team as `\"$team\"`.
