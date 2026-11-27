@@ -689,9 +689,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     let hits = found.hits;
     // An unreadable ledger flags nothing: the notes are still worth showing.
     let vault = Vault::open(&config.vault).ok();
-    let ledger = vault
-        .as_ref()
-        .and_then(|vault| Ledger::load(dirs, vault).ok());
+    let ledger = Ledger::load(dirs).ok();
     let newer: Vec<_> = hits
         .iter()
         .map(|h| ledger.as_ref()?.moved_on(vault.as_ref()?, &h.path))
@@ -933,7 +931,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
     let behind = match Vault::open(&config.vault) {
-        Ok(vault) => Ledger::load(dirs, &vault).map_or(0, |ledger| ledger.behind(&vault)),
+        Ok(vault) => Ledger::load(dirs).map_or(0, |ledger| ledger.behind(&vault)),
         Err(_) => 0,
     };
     if let Some(why) = other {
@@ -1033,7 +1031,7 @@ fn import_learning_loop(
     } else {
         Some(Lock::acquire(&dirs.data.join(import::LOCK))?)
     };
-    let mut ledger = Ledger::load(dirs, &dst)?;
+    let mut ledger = Ledger::load(dirs)?;
     // Held through the copy too, so a daemon started mid-import waits for it.
     let lock = if a.dry_run {
         None

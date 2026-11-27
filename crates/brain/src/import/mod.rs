@@ -48,9 +48,6 @@ pub struct LedgerEntry {
     /// The last pass did not find the source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing: bool,
-    /// What was recorded of this source's copies in other vaults.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    others: Vec<LedgerEntry>,
 }
 
 impl LedgerEntry {
@@ -67,50 +64,14 @@ impl LedgerEntry {
 pub struct Ledger(BTreeMap<String, LedgerEntry>);
 
 impl Ledger {
-    /// The ledger, each record the one of its copy in `vault`.
-    pub fn load(dirs: &Dirs, vault: &Vault) -> anyhow::Result<Ledger> {
+    pub fn load(dirs: &Dirs) -> anyhow::Result<Ledger> {
         let path = dirs.data.join(LEDGER);
-        let mut ledger: Ledger = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .with_context(|| format!("reading {}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
-        ledger.turn_to(vault);
-        Ok(ledger)
-    }
-
-    /// A source has one record a vault. Brings forward the one of `vault`: kept from when it was
-    /// the vault last, or, where its copy is here with the id brain gave it, that of a vault
-    /// folder renamed or copied.
-    fn turn_to(&mut self, vault: &Vault) {
-        for (key, entry) in &mut self.0 {
-            if entry.of(&vault.root) {
-                continue;
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
             }
-            if let Some(i) = entry.others.iter().position(|o| o.of(&vault.root)) {
-                let mut was = entry.others.swap_remove(i);
-                std::mem::swap(entry, &mut was);
-                entry.others = std::mem::take(&mut was.others);
-                entry.others.push(was);
-            } else if holds(vault, key, entry) {
-                if entry.vault.as_ref().is_some_and(|v| v.is_dir()) {
-                    let mut was = entry.clone();
-                    was.others = Vec::new();
-                    entry.others.push(was);
-                }
-                entry.vault = Some(vault.root.clone());
-            }
-        }
-    }
-
-    /// Drops `key`'s record for this vault, keeping those of other vaults.
-    fn forget(&mut self, key: &str) {
-        if let Some(mut was) = self.0.remove(key)
-            && let Some(mut next) = was.others.pop()
-        {
-            next.others = was.others;
-            self.0.insert(key.to_string(), next);
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ledger::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
 
@@ -140,8 +101,11 @@ impl Ledger {
     pub fn behind(&self, vault: &Vault) -> usize {
         self.0
             .keys()
-            .filter_map(|key| copy_rel(&vault.layout, key))
-            .map(|rel| rel_key(&rel))
+            .filter_map(|key| match key.split_once('/')? {
+                ("vault", path) => Some(path.to_string()),
+                ("memory", rest) => Some(rel_key(&vault.layout.memory.join(rest))),
+                _ => None,
+            })
             .filter(|path| vault.root.join(path).is_file() && self.moved_on(vault, path).is_some())
             .count()
     }
@@ -165,32 +129,6 @@ impl Ledger {
         )?;
         Ok(())
     }
-}
-
-/// Where in the vault the copy of the source `key` goes.
-fn copy_rel(layout: &Layout, key: &str) -> Option<PathBuf> {
-    match key.split_once('/')? {
-        ("vault", rel) => Some(PathBuf::from(rel)),
-        ("memory", rest) => Some(layout.memory.join(rest)),
-        _ => None,
-    }
-}
-
-/// Whether the file where `key`'s copy goes in `vault` is the copy `entry` records.
-fn holds(vault: &Vault, key: &str, entry: &LedgerEntry) -> bool {
-    let Some(rel) = copy_rel(&vault.layout, key) else {
-        return false;
-    };
-    let Ok(bytes) = std::fs::read(vault.root.join(&rel)) else {
-        return false;
-    };
-    hash(&bytes) == entry.dst_hash
-        || entry.id.as_ref().is_some_and(|id| {
-            let text = String::from_utf8_lossy(&bytes);
-            brain_note::Note::parse(&rel, &text, brain_note::Place::Kept)
-                .id
-                .is_some_and(|has| has.to_string() == *id)
-        })
 }
 
 #[derive(Debug, Default)]
@@ -465,13 +403,6 @@ fn write_one(
     if let Some(at) = s.modified {
         let _ = set_modified(&dst.root, &s.dst_rel, at);
     }
-    let mut others = Vec::new();
-    if let Some(mut was) = ledger.0.remove(&s.key) {
-        others = std::mem::take(&mut was.others);
-        if !was.of(&dst.root) {
-            others.push(was);
-        }
-    }
     ledger.0.insert(
         s.key.clone(),
         LedgerEntry {
@@ -481,7 +412,6 @@ fn write_one(
             from: s.from.clone(),
             vault: Some(dst.root.clone()),
             missing: false,
-            others,
         },
     );
     Ok(())
@@ -494,8 +424,10 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
         let Some(entry) = ledger.0.get_mut(key) else {
             continue;
         };
-        let Some(rel) = copy_rel(&dst.layout, key) else {
-            continue;
+        let rel = match key.split_once('/') {
+            Some(("vault", rel)) => PathBuf::from(rel),
+            Some(("memory", rest)) => dst.layout.memory.join(rest),
+            _ => continue,
         };
         if let Ok(bytes) = std::fs::read(dst.root.join(&rel)) {
             entry.dst_hash = hash(&bytes);

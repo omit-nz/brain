@@ -16,11 +16,6 @@ const BATCH: usize = 200;
 /// The mtime stored for a note indexed before its id was written. No file has it (`stat` gives
 /// none below 0), so the next pass always reads the note again.
 const UNSETTLED: i64 = -1;
-/// Notes down, in the transaction that drops or rewrites a note, what the index held of it, until
-/// a pass has reported what is gone.
-const REMEMBER: &str = "INSERT OR IGNORE INTO meta(key, value)
-    SELECT 'held:' || note_uuid, disclosure FROM notes WHERE path = ?1 AND note_uuid IS NOT NULL";
-const FORGET: &str = "DELETE FROM meta WHERE key LIKE 'held:%'";
 
 #[derive(Debug, Default)]
 pub struct Reindexed {
@@ -122,9 +117,7 @@ impl Index {
         let abort_after = abort_after();
         self.belong_to(&vault.root)?;
         let existing = self.rows()?;
-        let mut held = self.held()?;
-        // What a pass that was cut short dropped or reshared and never reported.
-        held.extend(self.unreported()?);
+        let held = self.held()?;
         // Rows written under other reading rules are re-derived, changed or not.
         let rules: Option<String> = self
             .conn
@@ -269,7 +262,6 @@ impl Index {
         }
         let tx = self.conn.transaction()?;
         for key in existing.keys().filter(|k| !seen.contains(*k)) {
-            tx.execute(REMEMBER, [key])?;
             tx.execute("DELETE FROM notes WHERE path = ?1", [key])?;
             out.removed += 1;
         }
@@ -291,7 +283,6 @@ impl Index {
                         )?;
                     }
                     Some(_) => {
-                        tx.execute(REMEMBER, [&w.key])?;
                         upsert(&tx, w)?;
                         out.changed += 1;
                     }
@@ -337,7 +328,6 @@ impl Index {
             })
             .filter_map(|(id, _)| id.parse().ok())
             .collect();
-        self.conn.execute(FORGET, [])?;
         Ok(out)
     }
 
@@ -356,8 +346,6 @@ impl Index {
         }
         let tx = self.conn.transaction()?;
         if held.is_some() {
-            // Another vault is not this one's notes going.
-            tx.execute(FORGET, [])?;
             tx.execute("DELETE FROM notes", [])?;
             tx.execute("DELETE FROM skipped", [])?;
         }
@@ -368,15 +356,6 @@ impl Index {
         )?;
         tx.commit()?;
         Ok(())
-    }
-
-    /// Each id a pass dropped or rewrote before it was cut short, with the disclosure it had.
-    fn unreported(&self) -> anyhow::Result<HashMap<String, String>> {
-        let mut st = self
-            .conn
-            .prepare("SELECT substr(key, 6), value FROM meta WHERE key LIKE 'held:%'")?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Each id in the index with its note's disclosure.

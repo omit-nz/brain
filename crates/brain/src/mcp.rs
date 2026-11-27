@@ -119,9 +119,9 @@ pub fn fence_post(p: &Post) -> String {
     }
 }
 
-/// The import ledger as last read, and what it was read of: the vault, and the file's time and
-/// size. A server searches again and again, and the ledger holds a record for every copy.
-type Read = (PathBuf, SystemTime, u64, Arc<Ledger>);
+/// The import ledger as last read, with the file's time and size then. A server searches again and
+/// again, and the ledger holds a record for every copy.
+type Read = (SystemTime, u64, Arc<Ledger>);
 
 struct State {
     ledger: Mutex<Option<Read>>,
@@ -145,19 +145,19 @@ impl State {
         Ok((Vault::open(&config.vault)?, config.me))
     }
 
-    /// The ledger for `vault`, read again only when it or the vault has changed. `None` while it
-    /// cannot be read, which flags nothing.
-    fn ledger(&self, vault: &Vault) -> Option<Arc<Ledger>> {
+    /// The ledger, read again only when its file has changed. `None` while it cannot be read,
+    /// which flags nothing.
+    fn ledger(&self) -> Option<Arc<Ledger>> {
         let file = std::fs::metadata(self.dirs.data.join(import::LEDGER)).ok()?;
         let (at, size) = (file.modified().ok()?, file.len());
         let mut held = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((root, was_at, was_size, ledger)) = &*held
-            && (root, *was_at, *was_size) == (&vault.root, at, size)
+        if let Some((was_at, was_size, ledger)) = &*held
+            && (*was_at, *was_size) == (at, size)
         {
             return Some(ledger.clone());
         }
-        let ledger = Arc::new(Ledger::load(&self.dirs, vault).ok()?);
-        *held = Some((vault.root.clone(), at, size, ledger.clone()));
+        let ledger = Arc::new(Ledger::load(&self.dirs).ok()?);
+        *held = Some((at, size, ledger.clone()));
         Some(ledger)
     }
 
@@ -224,7 +224,7 @@ impl State {
                 Scope::SharedOnly => "Notes that are not private:".into(),
             });
         }
-        let ledger = self.ledger(&vault);
+        let ledger = self.ledger();
         out.extend(found.hits.iter().map(|hit| {
             let newer = ledger.as_ref().and_then(|l| l.moved_on(&vault, &hit.path));
             fence(hit, newer.is_some())

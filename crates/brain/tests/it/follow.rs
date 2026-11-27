@@ -576,58 +576,6 @@ mod renamed {
         assert!(new_copy(&h).unwrap().contains("one second"));
     }
 
-    /// Two memories followed: the person edits one's copy and removes the other's.
-    fn edited_and_removed() -> (Home, Projects, String) {
-        let (h, p) = following(&["one", "two"]);
-        let edited = format!("{}my own words\n", copy(&h, "one").unwrap());
-        fs::write(copy_path(h.vault.path(), "one"), &edited).unwrap();
-        fs::remove_file(copy_path(h.vault.path(), "two")).unwrap();
-        (h, p, edited)
-    }
-
-    /// The person's two choices as they made them, under the new name and no other.
-    fn assert_as_they_left_them(h: &Home, edited: &str) {
-        assert_eq!(new_copy(h).as_deref(), Some(edited));
-        assert_eq!(copy(h, "one"), None);
-        assert_eq!(copy(h, "two"), None);
-        assert!(!h.vault.path().join("working-memory/-new/two.md").exists());
-    }
-
-    /// A move is two steps, and a pass can come between them.
-    #[test]
-    fn a_pass_between_the_move_and_the_link_keeps_every_note_itself() {
-        let (h, p, edited) = edited_and_removed();
-        fs::create_dir_all(p.path().join("-new")).unwrap();
-        fs::rename(p.path().join("-proj/memory"), p.path().join("-new/memory")).unwrap();
-        pass(&h);
-        pass(&h);
-        pass(&h);
-        symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
-        pass(&h);
-        assert_as_they_left_them(&h, &edited);
-        assert!(!archived(&h, "one"));
-    }
-
-    /// A pass that read the old name before the move and the new one after it saw every memory
-    /// twice. The copies brain made then give way to the ones the person has had.
-    #[test]
-    fn a_pass_that_saw_both_names_gives_way_to_the_older_copies() {
-        let (h, p, edited) = edited_and_removed();
-        fs::create_dir_all(p.path().join("-new/memory")).unwrap();
-        for name in ["one.md", "two.md"] {
-            fs::copy(
-                p.path().join("-proj/memory").join(name),
-                p.path().join("-new/memory").join(name),
-            )
-            .unwrap();
-        }
-        pass(&h);
-        fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
-        symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
-        pass(&h);
-        assert_as_they_left_them(&h, &edited);
-    }
-
     #[test]
     fn an_edited_or_removed_copy_stays_so_after_a_rename() {
         let (h, p) = following(&["one", "two"]);
@@ -639,27 +587,20 @@ mod renamed {
         assert!(!h.vault.path().join("working-memory/-new/two.md").exists());
     }
 
-    /// Both names were copied before the old one became a link: one copy is left in search, the
-    /// one brain had first.
+    /// Both names were copied before the old one became a link: one copy is left in search.
     #[test]
     fn a_second_copy_of_a_renamed_project_leaves_search() {
         let (h, p) = following(&["one"]);
         fs::create_dir_all(p.path().join("-new/memory")).unwrap();
         new_source(&p, "one first");
         pass(&h);
-        let first = copy(&h, "one").unwrap();
         assert!(new_copy(&h).is_some());
         fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
         symlink(p.path().join("-new/memory"), p.path().join("-proj/memory")).unwrap();
         pass(&h);
         assert_eq!(copy(&h, "one"), None);
-        assert_eq!(new_copy(&h), Some(first));
-        assert!(
-            h.vault
-                .path()
-                .join("_archive/working-memory/-new/one.md")
-                .exists()
-        );
+        assert!(archived(&h, "one"));
+        assert!(new_copy(&h).is_some());
     }
 
     #[test]
@@ -765,61 +706,54 @@ fn a_folder_that_lost_most_of_what_it_held_archives_nothing_until_told() {
     assert!(said.contains("12 archived"), "{said}");
 }
 
-fn init_over(h: &Home, vault: &Path) {
-    h.run(&["init", "--me", "robin", "--vault", vault.to_str().unwrap()]);
-}
-
-/// Follows `name`'s changes and then its going, in the vault at `vault`.
-fn assert_followed(h: &Home, p: &Projects, vault: &Path) {
-    p.write("one", "one changed since");
-    pass(h);
-    let text = fs::read_to_string(copy_path(vault, "one")).unwrap();
-    assert!(text.contains("one changed since"), "{text}");
-    p.remove("one");
-    pass(h);
-    pass(h);
-    assert!(!copy_path(vault, "one").exists());
-}
-
+/// What the README says to do after the notes folder is renamed.
 #[test]
-fn a_renamed_vault_folder_keeps_following_its_copies() {
-    let (h, p) = following(&["one", "two"]);
+fn moving_the_copies_aside_follows_a_renamed_vault_again() {
+    let (h, p) = following(&["one"]);
     let parent = tempfile::tempdir().unwrap();
     let (before, after) = (parent.path().join("notes"), parent.path().join("renamed"));
+    let init = |vault: &Path| {
+        h.run(&["init", "--me", "robin", "--vault", vault.to_str().unwrap()]);
+    };
     fs::create_dir(&before).unwrap();
-    init_over(&h, &before);
+    init(&before);
     pass(&h);
     fs::rename(&before, &after).unwrap();
-    init_over(&h, &after);
+    init(&after);
+    fs::rename(after.join("working-memory"), parent.path().join("aside")).unwrap();
     pass(&h);
-    assert_followed(&h, &p, &after);
+    p.write("one", "one second");
+    pass(&h);
+    let text = fs::read_to_string(copy_path(&after, "one")).unwrap();
+    assert!(text.contains("one second"), "{text}");
 }
 
+/// Two projects each with a memory of one name, the old one's folder then linked to the other's:
+/// neither's words are lost.
+#[cfg(unix)]
 #[test]
-fn switching_back_to_a_vault_follows_its_copies_again() {
-    let (h, p) = following(&["one", "two"]);
-    let other = tempfile::tempdir().unwrap();
-    init_over(&h, other.path());
+fn two_memories_of_one_name_keep_their_words_when_the_projects_are_linked() {
+    let (h, p) = following(&["one"]);
+    let other = p.path().join("-new/memory");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("one.md"), "another memory entirely\n").unwrap();
     pass(&h);
-    assert!(copy_path(other.path(), "one").exists());
-    init_over(&h, h.vault.path());
-    assert_followed(&h, &p, h.vault.path());
-}
-
-/// A ledger from before copies named their vault is not tied to whichever is followed next.
-#[test]
-fn an_old_ledger_is_not_tied_to_a_vault_its_copies_are_not_in() {
-    let (h, p) = following(&["one", "two"]);
-    let path = h.home.path().join("data/import-ledger.json");
-    let mut ledger: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    for entry in ledger.as_object_mut().unwrap().values_mut() {
-        entry.as_object_mut().unwrap().remove("vault");
+    fs::remove_dir_all(p.path().join("-proj/memory")).unwrap();
+    std::os::unix::fs::symlink(&other, p.path().join("-proj/memory")).unwrap();
+    pass(&h);
+    // Wherever brain keeps them: the one in the vault or its archive, the live one in search.
+    let mut dirs = vec![h.vault.path().to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        for e in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+            if e.is_dir() {
+                dirs.push(e);
+            } else {
+                files.push(fs::read_to_string(e).unwrap_or_default());
+            }
+        }
     }
-    fs::write(&path, ledger.to_string()).unwrap();
-    let other = tempfile::tempdir().unwrap();
-    init_over(&h, other.path());
-    pass(&h);
-    init_over(&h, h.vault.path());
-    assert_followed(&h, &p, h.vault.path());
+    assert!(files.iter().any(|text| text.contains("one first")));
+    let found = h.json(&["search", "--json", "entirely"]);
+    assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
 }
