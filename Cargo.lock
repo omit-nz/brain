@@ -305,6 +305,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-reflex"
+version = "0.2.4"
+dependencies = [
+ "anyhow",
+ "brain-index",
+ "brain-platform",
+ "jiff",
+ "omit-agent-trace",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "brain-repo-rules"
 version = "0.2.4"
 dependencies = [
@@ -2016,6 +2031,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "omit-agent-trace"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9d7cae6b8e9e7a6627fbc5c424a9e2fa9cacc65e56fac00ed491e50085713c1"
+dependencies = [
+ "hex",
+ "rusqlite",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2677,6 +2708,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "ryu-js"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f232fd0249f55adbe7f15bee58bbbd3d40708000b84e6482066d2ba599e08a9"
 
 [[package]]
 name = "same-file"

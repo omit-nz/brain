@@ -11,6 +11,7 @@ const LAYERS: &[&str] = &[
     "brain-platform",
     "brain-note",
     "brain-index",
+    "brain-reflex",
     "brain",
     "brain-usage",
 ];

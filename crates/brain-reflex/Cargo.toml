@@ -1,0 +1,25 @@
+[package]
+name = "brain-reflex"
+description = "brain's reflexes: the engine, its verdict store and the trace of every run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+brain-index = { path = "../brain-index" }
+brain-platform = { path = "../brain-platform" }
+jiff.workspace = true
+omit-agent-trace.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

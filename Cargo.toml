@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.2.4"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.93"
 license = "Apache-2.0"
 repository = "https://github.com/omit-nz/brain"
 
@@ -21,7 +21,9 @@ tempfile = "3"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: a replayed score is the recorded one to the last bit.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+omit-agent-trace = "0.1"
 toml = "0.9"
 sha2 = "0.11"
 globset = "0.4"
