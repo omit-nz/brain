@@ -70,19 +70,19 @@ def copy_of(key):
 
 def checked(record):
     """`record`, whose old hash is one a file could be compared with."""
-    if not isinstance(record["was"], str):
-        raise ValueError("a hash that is not text")
+    if not isinstance(record["was"], str) or len(record["was"]) != 64:
+        raise ValueError("a hash that is not one")
     return record
 
 
 def standing_for(data, vault):
     """Each vault and file a record with an old hash stands for, with the record's two hashes."""
     for key, entry in load(data / "import-ledger.json", dict).items():
-        if entry.get("was"):
+        if "was" in entry:
             root = pathlib.Path(entry.get("vault") or vault)
             yield root, copy_of(key), checked(entry)
     for record in load(data / "follow-archive.json", list, missing=[]):
-        if record.get("was"):
+        if "was" in record:
             root = pathlib.Path(checked(record)["vault"])
             yield root, record["path"], record
             yield root, copy_of(record["key"]), record
