@@ -157,6 +157,7 @@ fn the_hook_command_runs_from_a_path_with_a_space() {
             .tempdir()
             .unwrap(),
         vault: tempfile::tempdir().unwrap(),
+        user: tempfile::tempdir().unwrap(),
     };
     let exe = install(&h);
     let stub = stub_claude();
@@ -180,6 +181,7 @@ fn connect_refuses_a_path_the_shell_would_break_on() {
             .tempdir()
             .unwrap(),
         vault: tempfile::tempdir().unwrap(),
+        user: tempfile::tempdir().unwrap(),
     };
     install(&h);
     let stub = stub_claude();
@@ -188,6 +190,31 @@ fn connect_refuses_a_path_the_shell_would_break_on() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("single quote"));
     assert!(!plugin(&h).exists());
+}
+
+#[test]
+fn connect_waits_for_the_config_lock() {
+    let h = Home::new();
+    install(&h);
+    h.init();
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let config = h.home.path().join("config");
+    let held = brain_platform::fs::Lock::acquire(&config.join("config.lock")).unwrap();
+    let mut child = h
+        .command()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--index"])
+        .arg(folder.path())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(child.try_wait().unwrap().is_none(), "it did not wait");
+    drop(held);
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]

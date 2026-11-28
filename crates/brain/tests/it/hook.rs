@@ -105,7 +105,7 @@ fn a_hook_over_budget_says_nothing() {
     let h = Home::new();
     h.init();
     let start = Instant::now();
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+    let mut child = crate::confined(&crate::built(), h.user.path())
         .args(["hook", "prompt"])
         .env("BRAIN_HOME", h.home.path())
         .stdin(Stdio::piped())

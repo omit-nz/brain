@@ -29,7 +29,7 @@ impl Daemon {
     }
 
     fn start_with(h: &Home, env: &[(&str, &str)]) -> Daemon {
-        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+        let mut child = crate::confined(&crate::built(), h.user.path())
             .arg("daemon")
             .envs(env.iter().copied())
             .env("BRAIN_HOME", h.home.path())
@@ -191,6 +191,7 @@ fn the_daemon_catches_up_after_a_burst_an_atomic_save_and_a_folder_rename() {
     let fresh = Home {
         home: tempfile::tempdir().unwrap(),
         vault: tempfile::tempdir().unwrap(),
+        user: tempfile::tempdir().unwrap(),
     };
     fresh.run(&[
         "init",
@@ -470,7 +471,7 @@ fn installed_home() -> (Home, std::path::PathBuf) {
     let current = h.home.path().join("data/bin/brain-current");
     std::fs::create_dir_all(current.join("lib")).unwrap();
     let exe = current.join(brain::update::exe_name());
-    std::fs::copy(assert_cmd::cargo::cargo_bin("brain"), &exe).unwrap();
+    std::fs::copy(crate::built(), &exe).unwrap();
     (h, exe)
 }
 
@@ -495,7 +496,7 @@ fn updating_daemon(
     releases: &std::path::Path,
     hex: &str,
 ) -> std::process::Child {
-    std::process::Command::new(exe)
+    crate::confined(exe, h.user.path())
         .args(["daemon", "--from-dir", releases.to_str().unwrap()])
         .env("BRAIN_HOME", h.home.path())
         .env("BRAIN_TEST_RELEASE_KEY", hex)
@@ -577,7 +578,7 @@ fn a_daemon_outside_the_install_never_updates() {
     let (h, exe) = installed_home();
     let before = std::fs::read(&exe).unwrap();
     let (dir, hex) = releases(7);
-    let mut d = updating_daemon(&h, &assert_cmd::cargo::cargo_bin("brain"), dir.path(), &hex);
+    let mut d = updating_daemon(&h, &crate::built(), dir.path(), &hex);
     stderr_with(&h, "not run from its install, so it never updates itself");
     std::thread::sleep(std::time::Duration::from_millis(500));
     let alive = d.try_wait().unwrap().is_none();
@@ -618,7 +619,7 @@ fn a_failed_update_is_counted_and_tried_once_a_day_not_once_a_pass() {
 fn a_daemon_outside_the_install_says_so_once() {
     let (h, _) = installed_home();
     let (dir, hex) = releases(7);
-    let mut d = updating_daemon(&h, &assert_cmd::cargo::cargo_bin("brain"), dir.path(), &hex);
+    let mut d = updating_daemon(&h, &crate::built(), dir.path(), &hex);
     stderr_with(&h, "never updates itself");
     wake_pass(&h, 2);
     let err = std::fs::read_to_string(h.home.path().join("daemon.err")).unwrap();

@@ -463,6 +463,80 @@ fn a_message_naming_install_sh_is_caught() {
     assert_eq!(naming_install_sh(&files), ["crates/brain/src/cli.rs"]);
 }
 
+/// The files holding a character `bad` picks out.
+fn holding(files: &[(PathBuf, String)], bad: impl Fn(char) -> bool) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(_, text)| text.chars().any(&bad))
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+/// Every test starts brain through one helper, which gives it a home folder and a launchd of its
+/// own: no test can change anything of whoever runs it.
+#[test]
+fn only_main_rs_names_cargo_bin() {
+    let names = |files: &[(PathBuf, String)]| -> Vec<String> {
+        files
+            .iter()
+            .filter(|(path, text)| !path.ends_with("it/main.rs") && text.contains("cargo_bin"))
+            .map(|(path, _)| path.display().to_string())
+            .collect()
+    };
+    let mut files = Vec::new();
+    rust_files(&root().join("crates/brain/tests"), &mut files);
+    assert!(!files.is_empty());
+    assert_eq!(names(&files), Vec::<String>::new());
+    let stray = [(
+        PathBuf::from("crates/brain/tests/it/x.rs"),
+        "Command::cargo_bin(\"brain\")".to_string(),
+    )];
+    assert_eq!(names(&stray), ["crates/brain/tests/it/x.rs"]);
+}
+
+#[test]
+fn nothing_a_person_reads_holds_a_dash_or_an_emoji() {
+    let bad = |c: char| {
+        matches!(c, '\u{2013}' | '\u{2014}' | '\u{2600}'..='\u{27BF}'
+            | '\u{2B00}'..='\u{2BFF}' | '\u{1F000}'..='\u{1FAFF}')
+    };
+    let mut files = Vec::new();
+    for krate in fs::read_dir(root().join("crates")).unwrap() {
+        let src = krate.unwrap().path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    files.extend(plugin_files());
+    let mut pages: Vec<PathBuf> = [
+        "README.md",
+        "SECURITY.md",
+        "ARCHITECTURE.md",
+        "mcpb/manifest.json",
+    ]
+    .iter()
+    .map(|page| root().join(page))
+    .collect();
+    for (dir, ending) in [("docs", "md"), ("pkg/scripts", ""), ("scripts", "sh")] {
+        for entry in fs::read_dir(root().join(dir)).unwrap() {
+            let path = entry.unwrap().path();
+            if ending.is_empty() || path.extension().is_some_and(|e| e == ending) {
+                pages.push(path);
+            }
+        }
+    }
+    files.extend(pages.into_iter().map(|path| {
+        let text = fs::read_to_string(&path).unwrap();
+        (path, text)
+    }));
+    assert_eq!(holding(&files, bad), Vec::<String>::new());
+    let strays = [
+        (PathBuf::from("a"), "a \u{2014} b".to_string()),
+        (PathBuf::from("b"), "done \u{2705}".to_string()),
+    ];
+    assert_eq!(holding(&strays, bad), ["a", "b"]);
+}
+
 /// The spec's one plain line (spec:353), in every page a person reads about what brain sends.
 #[test]
 fn the_privacy_line_is_on_every_page_about_what_brain_sends() {

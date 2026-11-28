@@ -292,8 +292,8 @@ fn init_starts_the_daemon_when_installed() {
             .path()
             .join("data/bin/brain-current")
             .join(brain::update::exe_name());
-    fs::copy(assert_cmd::cargo::cargo_bin("brain"), &exe).unwrap();
-    let out = std::process::Command::new(&exe)
+    fs::copy(crate::built(), &exe).unwrap();
+    let out = crate::confined(&exe, s.user.path())
         .args(["init", "--me", "robin", "--vault"])
         .arg(s.h.vault.path())
         .env("BRAIN_HOME", s.h.home.path())

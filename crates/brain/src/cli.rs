@@ -481,11 +481,9 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
 }
 
 fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
-    let mut config = Config::load(dirs)?;
-    match action {
+    let config = match action {
         MemoryAction::Unfollow => {
-            config.memory.follow = None;
-            config.save(dirs)?;
+            Config::edit(dirs, |config| config.memory.follow = None)?;
             println!("brain no longer follows your auto-memory; its copies stay");
             return Ok(());
         }
@@ -493,11 +491,10 @@ fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
             // A link is stored as what it points at: the pass follows no link.
             let found = projects.canonicalize().ok().filter(|p| p.is_dir());
             let found = found.with_context(|| format!("{}: no such folder", projects.display()))?;
-            config.memory.follow = Some(found);
-            config.save(dirs)?;
+            Config::edit(dirs, |config| config.memory.follow = Some(found))?
         }
-        MemoryAction::Run => {}
-    }
+        MemoryAction::Run => Config::load(dirs)?,
+    };
     let Some(followed) = &config.memory.follow else {
         anyhow::bail!("brain follows no auto-memory; run `brain memory follow <projects folder>`");
     };
@@ -573,21 +570,12 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     }
     // A second init keeps everything else the person set; an unreadable config fails rather than
     // quietly switching usage sending back on.
-    let before = if dirs.config.join(crate::config::FILE).exists() {
-        Some(Config::load(dirs)?)
-    } else {
-        None
-    };
-    let (usage, session, memory) =
-        before.map_or_else(Default::default, |c| (c.usage, c.session, c.memory));
-    Config {
-        vault: vault.root.clone(),
-        me: me.clone(),
-        usage,
-        session,
-        memory,
-    }
-    .save(dirs)?;
+    Config::update(dirs, |before| {
+        let mut config = before.unwrap_or_else(|| Config::new(vault.root.clone(), me.clone()));
+        config.vault = vault.root.clone();
+        config.me = me.clone();
+        Ok(config)
+    })?;
     println!(
         "{}",
         terminal(&format!(

@@ -18,7 +18,7 @@ mod usage;
 mod vault;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -32,9 +32,26 @@ fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The binary under test.
+pub(crate) fn built() -> PathBuf {
+    PathBuf::from(assert_cmd::cargo::cargo_bin!("brain"))
+}
+
+/// `program` as every test starts brain: `user` as its home folder and no launchd, so no run
+/// reads or changes anything of whoever runs the tests.
+pub(crate) fn confined(program: &Path, user: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    c.env("HOME", user)
+        .env("USERPROFILE", user)
+        .env("BRAIN_LAUNCHCTL", user.join("no-launchctl"));
+    c
+}
+
 struct Home {
     home: tempfile::TempDir,
     vault: tempfile::TempDir,
+    /// The person's home folder, empty.
+    user: tempfile::TempDir,
 }
 
 impl Home {
@@ -42,6 +59,7 @@ impl Home {
         Home {
             home: tempfile::tempdir().unwrap(),
             vault: tempfile::tempdir().unwrap(),
+            user: tempfile::tempdir().unwrap(),
         }
     }
 
@@ -51,7 +69,7 @@ impl Home {
 
     /// `brain` as every test runs it, for one that has to spawn it.
     fn command(&self) -> std::process::Command {
-        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"));
+        let mut c = confined(&built(), self.user.path());
         c.env("BRAIN_HOME", self.home.path())
             // A loaded CI runner must not turn a hook test into a timing test.
             .env("BRAIN_TEST_HOOK_BUDGET_MS", "30000")
@@ -97,7 +115,23 @@ impl Home {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// Configured, and setup run: nothing is offered.
     fn init(&self) {
+        self.init_without_setup();
+        let path = self.home.path().join("config/config.toml");
+        let config = fs::read_to_string(&path).unwrap();
+        // Before `[usage]`, which `usage` replaces with all that follows it.
+        let at = config.find("[usage]").unwrap();
+        let (kept, usage) = config.split_at(at);
+        fs::write(
+            &path,
+            format!("{kept}[setup]\nran = \"2026-01-01\"\n\n{usage}"),
+        )
+        .unwrap();
+    }
+
+    /// Configured by `brain init`, with setup never run.
+    fn init_without_setup(&self) {
         self.run(&[
             "init",
             "--me",
@@ -236,6 +270,86 @@ fn init_never_touches_existing_notes() {
     for (rel, text) in notes {
         assert_eq!(fs::read_to_string(h.vault.path().join(rel)).unwrap(), text);
     }
+}
+
+/// The config as it is on disk.
+fn config_of(h: &Home) -> String {
+    fs::read_to_string(h.home.path().join("config/config.toml")).unwrap()
+}
+
+#[test]
+fn a_second_init_keeps_every_setup_table() {
+    let h = Home::new();
+    h.init();
+    let path = h.home.path().join("config/config.toml");
+    fs::write(
+        &path,
+        format!("{}\n[session]\nindexes = [\"x\"]\n", config_of(&h)),
+    )
+    .unwrap();
+    let vault = h.vault.path().to_str().unwrap();
+    h.run(&["init", "--me", "robin", "--vault", vault]);
+    let config = config_of(&h);
+    assert!(config.contains("ran = \"2026-01-01\""), "{config}");
+    assert!(config.contains("indexes = [\"x\"]"), "{config}");
+}
+
+/// Whoever writes the config reads it and saves it under one lock, so a key another writer adds
+/// meanwhile survives.
+#[test]
+fn two_setup_writes_never_lose_a_key() {
+    let followed = tempfile::tempdir().unwrap();
+    let followed = followed.path().to_str().unwrap();
+    // Each command, with what the config holds afterwards because of it. `usage on` is the
+    // default, so its mark is that sending is no longer written as off.
+    let writes: [(&[&str], &str); 4] = [
+        (&["init", "--me", "sam", "--vault"], "me = \"sam\""),
+        (&["usage", "on"], "!send = false"),
+        (&["memory", "follow", followed], "follow = "),
+        (&["memory", "unfollow"], "[setup]"),
+    ];
+    for (args, change) in writes {
+        let h = Home::new();
+        h.init();
+        let mut args: Vec<&str> = args.to_vec();
+        if args[0] == "init" {
+            args.push(h.vault.path().to_str().unwrap());
+        }
+        let config = h.home.path().join("config");
+        let held = brain_platform::fs::Lock::acquire(&config.join("config.lock")).unwrap();
+        let mut child = h.command().args(&args).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(child.try_wait().unwrap().is_none(), "{args:?} did not wait");
+        fs::write(
+            config.join("config.toml"),
+            format!("{}\n[session]\nindexes = [\"kept\"]\n", config_of(&h)),
+        )
+        .unwrap();
+        drop(held);
+        assert!(child.wait().unwrap().success(), "{args:?}");
+        let after = config_of(&h);
+        assert!(after.contains("indexes = [\"kept\"]"), "{args:?} {after}");
+        match change.strip_prefix('!') {
+            Some(gone) => assert!(!after.contains(gone), "{args:?} {after}"),
+            None => assert!(after.contains(change), "{args:?} {after}"),
+        }
+    }
+}
+
+#[test]
+fn a_command_before_setup_writes_nothing() {
+    let followed = tempfile::tempdir().unwrap();
+    let followed = followed.path().to_str().unwrap();
+    let h = Home::new();
+    for args in [
+        vec!["usage", "off"],
+        vec!["memory", "unfollow"],
+        vec!["memory", "follow", followed],
+    ] {
+        let out = h.brain().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+    }
+    assert_eq!(fs::read_dir(h.home.path()).unwrap().count(), 0);
 }
 
 #[test]

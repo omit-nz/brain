@@ -371,7 +371,7 @@ fn an_import_and_a_follow_never_write_the_ledger_at_once() {
     let mut waiting: Vec<_> = [follow, import]
         .into_iter()
         .map(|args| {
-            std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+            crate::confined(&crate::built(), h.user.path())
                 .args(args)
                 .env("BRAIN_HOME", h.home.path())
                 .env_remove("ORT_DYLIB_PATH")

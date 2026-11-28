@@ -306,9 +306,7 @@ fn install_key(dirs: &Dirs) -> anyhow::Result<SigningKey> {
 
 /// `brain usage on|off`. Either way today had sending off for part of it, so it is never sent.
 pub fn set(dirs: &Dirs, clock: &dyn Clock, send: bool) -> anyhow::Result<()> {
-    let mut config = Config::load(dirs)?;
-    config.usage.send = send;
-    config.save(dirs)?;
+    Config::edit(dirs, |config| config.usage.send = send)?;
     Activity::open(&store(dirs))?.off(clock.today())?;
     println!("Usage sending: {}", if send { "on" } else { "off" });
     Ok(())

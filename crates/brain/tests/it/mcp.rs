@@ -41,7 +41,7 @@ impl Mcp {
     }
 
     pub(crate) fn spawn(h: &Home, env: &[(&str, &str)], extra: &[&str]) -> Mcp {
-        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+        let mut child = crate::confined(&crate::built(), h.user.path())
             .args(["mcp", "--door", "claude-code"])
             .args(extra)
             .env("BRAIN_HOME", h.home.path())
@@ -674,7 +674,7 @@ fn a_search_without_the_daemon_says_the_index_may_be_behind() {
     let mut m = Mcp::start(&h);
     let (text, _) = m.text("search_my_brain", json!({"query": "mailbox"}));
     assert!(text.starts_with(notice), "{text}");
-    let mut daemon = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+    let mut daemon = crate::confined(&crate::built(), h.user.path())
         .arg("daemon")
         .env("BRAIN_HOME", h.home.path())
         .env_remove("ORT_DYLIB_PATH")

@@ -62,15 +62,15 @@ pub fn claude_code(dirs: &Dirs, name: Option<&str>, indexes: &[PathBuf]) -> anyh
 
 /// Names the memory folders every session starts with.
 fn show_at_start(dirs: &Dirs, indexes: &[PathBuf]) -> anyhow::Result<()> {
-    let mut config = Config::load(dirs)?;
-    config.session.indexes = indexes
+    let indexes: Vec<PathBuf> = indexes
         .iter()
         .map(|folder| {
             let found = folder.canonicalize().ok().filter(|f| f.is_dir());
             found.with_context(|| format!("--index {}: no such folder", folder.display()))
         })
         .collect::<anyhow::Result<_>>()?;
-    config.save(dirs)
+    Config::edit(dirs, |config| config.session.indexes = indexes)?;
+    Ok(())
 }
 
 /// The plugin, through Claude Code's own `plugin` command, replacing one added before.

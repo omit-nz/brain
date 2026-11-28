@@ -395,9 +395,9 @@ fn an_update_installs_what_check_names() {
 
 #[test]
 fn install_dir_names_the_folder_update_replaces() {
+    let user = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    let out = assert_cmd::Command::cargo_bin("brain")
-        .unwrap()
+    let out = assert_cmd::Command::from_std(crate::confined(&crate::built(), user.path()))
         .env("BRAIN_HOME", home.path())
         .arg("install-dir")
         .output()
@@ -415,9 +415,9 @@ fn install_dir_names_the_folder_update_replaces() {
 
 #[test]
 fn update_from_a_build_with_no_install_is_refused() {
+    let user = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    let out = assert_cmd::Command::cargo_bin("brain")
-        .unwrap()
+    let out = assert_cmd::Command::from_std(crate::confined(&crate::built(), user.path()))
         .env("BRAIN_HOME", home.path())
         .arg("update")
         .output()
@@ -462,8 +462,8 @@ fn the_shipped_key_set_is_the_committed_key() {
 
 #[test]
 fn version_prints_the_protocol() {
-    let out = assert_cmd::Command::cargo_bin("brain")
-        .unwrap()
+    let user = tempfile::tempdir().unwrap();
+    let out = assert_cmd::Command::from_std(crate::confined(&crate::built(), user.path()))
         .arg("--version")
         .output()
         .unwrap();
@@ -475,13 +475,13 @@ fn version_prints_the_protocol() {
 
 #[test]
 fn release_verify_without_a_key_exits_1() {
+    let user = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let a = archive(dir.path(), NEW, &[key(1)]);
     if !update::shipped_trust().keys.is_empty() {
         return;
     }
-    let out = assert_cmd::Command::cargo_bin("brain")
-        .unwrap()
+    let out = assert_cmd::Command::from_std(crate::confined(&crate::built(), user.path()))
         .env("BRAIN_HOME", dir.path())
         .args(["release-verify", a.to_str().unwrap()])
         .output()
@@ -583,14 +583,11 @@ fn a_signed_archive_under_another_name_is_refused() {
 #[cfg(unix)]
 #[test]
 fn an_install_run_through_its_link_finds_its_runtime() {
+    let user = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let current = root.path().join("bin").join("brain-current");
     fs::create_dir_all(current.join("lib")).unwrap();
-    fs::copy(
-        assert_cmd::cargo::cargo_bin("brain"),
-        current.join(update::exe_name()),
-    )
-    .unwrap();
+    fs::copy(crate::built(), current.join(update::exe_name())).unwrap();
     let runtime = current.join("lib").join(update::runtime_name());
     fs::write(&runtime, "runtime").unwrap();
     fs::create_dir_all(root.path().join("local")).unwrap();
@@ -600,7 +597,7 @@ fn an_install_run_through_its_link_finds_its_runtime() {
     let home = tempfile::tempdir().unwrap();
     let vault = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        let out = std::process::Command::new(&link)
+        let out = crate::confined(&link, user.path())
             .env("BRAIN_HOME", home.path())
             .env_remove("ORT_DYLIB_PATH")
             .args(args)

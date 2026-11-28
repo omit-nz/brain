@@ -13,7 +13,7 @@ repository = "https://github.com/omit-nz/brain"
 ll-core = { version = "=0.2.3", features = ["bge"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 uuid = { version = "1", features = ["v7"] }
-jiff = "0.2"
+jiff = { version = "0.2", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 walkdir = "2"

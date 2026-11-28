@@ -570,7 +570,7 @@ fn a_send_that_finds_sending_off_holds_back_the_days_before() {
 /// stderr.
 fn daemon_until_sent(h: &Home) -> String {
     let err = h.home.path().join("daemon.err");
-    let mut d = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+    let mut d = crate::confined(&crate::built(), h.user.path())
         .args(["--now", &at(TODAY), "daemon"])
         .env("BRAIN_HOME", h.home.path())
         .env_remove("ORT_DYLIB_PATH")
@@ -707,7 +707,7 @@ fn two_senders_send_one_body() {
     });
     e.point(&h);
     let spawn = || {
-        std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+        crate::confined(&crate::built(), h.user.path())
             .args(["--now", &at(TODAY), "usage", "send"])
             .env("BRAIN_HOME", h.home.path())
             .spawn()
@@ -855,8 +855,9 @@ fn a_short_install_key_is_not_replaced() {
 fn switching_off_mid_run_stops_the_next_day() {
     let h = counted(&["2026-11-23", "2026-11-24"]);
     let home = h.home.path().to_path_buf();
+    let user = h.user.path().to_path_buf();
     let e = Endpoint::with(Answer::Status(204), move |_| {
-        let off = std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+        let off = crate::confined(&crate::built(), &user)
             .args(["usage", "off"])
             .env("BRAIN_HOME", &home)
             .output()
@@ -889,7 +890,7 @@ fn a_second_sender_says_another_is_sending() {
     });
     e.point(&h);
     let spawn = || {
-        std::process::Command::new(assert_cmd::cargo::cargo_bin("brain"))
+        crate::confined(&crate::built(), h.user.path())
             .args(["--now", &at(TODAY), "usage", "send"])
             .env("BRAIN_HOME", h.home.path())
             .stdout(std::process::Stdio::piped())
