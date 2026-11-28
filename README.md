@@ -2,7 +2,7 @@
 
 Leave a brain at home. brain keeps a folder of your Markdown notes searchable on your own computer, and gives your AI tool the same search, so it answers from what you have written down. A Rust daemon and command line with a local MCP server. Apache-2.0. Built by [omit](https://omit.nz).
 
-## What works today (0.2.9)
+## What works today (0.2.10)
 
 - Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, says when each note it finds was written, marks one that another note corrects or supersedes, orders by date when you ask for the latest decision, says for a copy whose source it has recorded whether that file has changed since, and keeps the questions nothing answered (`brain gaps`).
 - Claude Code and Claude Desktop search your notes, capture new ones into an inbox, correct a note and list what is due for review.
