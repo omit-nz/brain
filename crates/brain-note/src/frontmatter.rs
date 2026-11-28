@@ -225,6 +225,38 @@ impl Frontmatter {
         }
     }
 
+    /// A key's words on one line, however many it was written over: a block or folded scalar,
+    /// or a value carried onto indented lines. Every line break becomes a space.
+    pub fn one_line(&self, key: &str) -> Option<String> {
+        if self.get(key) == Some(Value::Conflict) {
+            return None;
+        }
+        let start = self
+            .lines
+            .iter()
+            .position(|l| value_after(l, key).is_some())?;
+        let first = value_after(&self.lines[start], key)?.trim();
+        // `|` or `>`, with the marks after it, says how the lines below join and is no word.
+        let block = first.strip_prefix(['|', '>']).is_some_and(|marks| {
+            marks
+                .chars()
+                .all(|c| matches!(c, '+' | '-') || c.is_ascii_digit())
+        });
+        let below = self.lines[start + 1..]
+            .iter()
+            .take_while(|l| continues(l) || l.trim().is_empty());
+        let words: Vec<&str> = std::iter::once(if block { "" } else { first })
+            .chain(below.map(|l| l.trim()))
+            .filter(|l| !l.is_empty())
+            .collect();
+        let joined = words.join(" ");
+        // A block's quotes are its own words.
+        if block {
+            return Some(joined).filter(|t| !t.is_empty());
+        }
+        text_of(Some(Value::Text(joined)))
+    }
+
     /// One level of block mapping: `get_path(&["metadata", "type"])`.
     pub fn get_path(&self, path: &[&str]) -> Option<Value> {
         let [parent, child] = path else { return None };

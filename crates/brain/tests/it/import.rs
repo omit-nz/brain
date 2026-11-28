@@ -778,6 +778,72 @@ fn a_quoted_memory_name_imports_as_written() {
     );
 }
 
+#[test]
+fn a_description_over_several_lines_is_copied_as_one() {
+    let i = Import::new();
+    let shapes = [
+        ("block", "|\n  vents open\n\n  at noon"),
+        ("folded", ">-\n  vents open\n  at noon"),
+        ("plain", "vents open\n  at noon"),
+        ("below", "\n  vents open\n  at noon"),
+        ("quoted", "\"vents open\n  at noon\""),
+    ];
+    for (name, value) in shapes {
+        fs::write(
+            i.mem.path().join(format!("omit/memory/{name}.md")),
+            format!("---\nname: {name}\ndescription: {value}\ntype: project\n---\nown words\n"),
+        )
+        .unwrap();
+    }
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    for (name, _) in shapes {
+        let copy = i.copy(&format!("working-memory/omit/{name}.md"));
+        assert!(
+            copy.ends_with("---\nvents open at noon\n\nown words\n"),
+            "{copy}"
+        );
+    }
+}
+
+/// A copy's date is read from its first two lines, as a line about the memory and then the
+/// memory's own first. One with no description must not offer its second line as its first.
+#[test]
+fn a_copy_with_no_description_is_headed_by_its_name() {
+    let i = Import::new();
+    let own = "Heading\n\nsince 2024-03-01\n";
+    let shapes = [
+        (
+            "bare",
+            format!("---\nname: the bare one\n---\n{own}"),
+            "the bare one",
+        ),
+        (
+            "empty",
+            format!("---\nname: no words\ndescription:\n---\n{own}"),
+            "no words",
+        ),
+        ("plain", own.to_string(), "plain"),
+        (
+            "unclosed",
+            "---\ncreated 2025-05-05\n".to_string(),
+            "unclosed",
+        ),
+    ];
+    for (name, raw, _) in &shapes {
+        fs::write(i.mem.path().join(format!("omit/memory/{name}.md")), raw).unwrap();
+    }
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    for (name, _, head) in &shapes {
+        let path = format!("working-memory/omit/{name}.md");
+        let copy = i.copy(&path);
+        let note = brain_note::Note::parse(Path::new(&path), &copy, brain_note::Place::Kept);
+        assert_eq!(note.body.lines().next(), Some(*head), "{copy}");
+        assert!(note.dates.is_empty(), "{:?} {copy}", note.dates);
+    }
+}
+
 /// An import of a few notes into a large vault once listed the whole vault's gaps, which reads
 /// like data loss.
 #[test]
