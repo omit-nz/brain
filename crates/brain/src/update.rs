@@ -238,7 +238,8 @@ fn configure(
         .verifying_keys(trust.keys.clone())
         .no_confirm(true)
         .show_output(false)
-        .show_download_progress(false)
+        // Drawn on a terminal's stderr only, so a daemon's log holds none of it.
+        .show_download_progress(true)
         .build()?)
 }
 
@@ -256,12 +257,14 @@ pub trait Source: ReleaseSource + 'static {
 }
 
 /// brain's releases on GitHub.
+#[derive(Clone)]
 pub struct GitHub;
 
 impl Source for GitHub {}
 
 /// A folder of release archives, named as a release names them, for tests and for installing
 /// without the network. Its archives pass the same signature check as GitHub's.
+#[derive(Clone)]
 pub struct LocalDir(pub PathBuf);
 
 const LOCAL: &str = "local:";

@@ -812,3 +812,45 @@ fn a_brain_with_another_identifier_is_refused() {
     );
     assert_eq!(err, "");
 }
+
+/// A download can take minutes on a slow line, and a blank screen reads as a hang.
+#[test]
+fn brain_update_says_what_it_is_waiting_for() {
+    let h = super::Home::new();
+    h.init();
+    let current = PathBuf::from(h.run(&["install-dir"]).trim_end());
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    fs::write(
+        current.join("lib").join(update::runtime_name()),
+        "runtime old",
+    )
+    .unwrap();
+    let releases = tempfile::tempdir().unwrap();
+    let hex: String = public(&key(7)).iter().map(|b| format!("{b:02x}")).collect();
+    let update = || {
+        let out = h
+            .brain()
+            .env("BRAIN_TEST_RELEASE_KEY", &hex)
+            // The real one would restart the daemon of whoever runs the tests.
+            .env("BRAIN_LAUNCHCTL", "no-launchctl")
+            .args(["update", "--from-dir"])
+            .arg(releases.path())
+            .output()
+            .unwrap();
+        let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        assert!(out.status.success(), "{}", said(&out.stderr));
+        (said(&out.stdout), said(&out.stderr))
+    };
+    let (out, err) = update();
+    assert!(err.starts_with("Looking for a newer release...\n"), "{err}");
+    assert!(!err.contains("Downloading"), "{err}");
+    assert!(out.ends_with("is the newest release.\n"), "{out}");
+    archive(releases.path(), "99.0.0", &[key(7)]);
+    let (out, err) = update();
+    assert!(
+        err.contains("Looking for a newer release...\nDownloading brain 99.0.0 and checking it..."),
+        "{err}"
+    );
+    assert!(out.starts_with("brain 99.0.0 installed over "), "{out}");
+}
