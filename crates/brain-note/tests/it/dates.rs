@@ -68,3 +68,23 @@ fn corrects_and_supersedes_are_kept_as_written() {
     assert_eq!(n.supersedes.as_deref(), Some("one\ntwo"));
     assert_eq!(parse("x\n").supersedes, None);
 }
+
+/// The copier puts a memory's description first, so the memory's own first line is the second.
+#[test]
+fn a_memory_copy_is_dated_by_its_own_first_line_too() {
+    let raw = "---\nid: x\n---\nwhat it is about\n\nRuled 27 Nov 2026: vents open\n";
+    let copy = "working-memory/-proj/ruling.md";
+    assert_eq!(dates(copy, raw), ["2026-11-27"]);
+    assert_eq!(dates("Working-Memory/-proj/ruling.md", raw), ["2026-11-27"]);
+    // The description's own date still goes first.
+    assert_eq!(
+        dates(copy, "2026-11-28 vents\n\nruled 2026-11-01\n"),
+        ["2026-11-28", "2026-11-01"]
+    );
+    // No further than that, and nowhere else.
+    assert_eq!(
+        dates(copy, "about\n\nno date\n\nseen 2026-11-27\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(dates("notes/ruling.md", raw), Vec::<String>::new());
+}
