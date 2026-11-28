@@ -301,8 +301,8 @@ enum Answer {
 struct Endpoint {
     url: String,
     got: Arc<Mutex<Vec<Received>>>,
-    /// How long a sender left unanswered waited before it hung up.
-    waited: mpsc::Receiver<Duration>,
+    /// How long a sender left unanswered waited before it hung up, and when it did.
+    waited: mpsc::Receiver<(Duration, Instant)>,
 }
 
 impl Endpoint {
@@ -337,7 +337,7 @@ impl Endpoint {
                         // another request would still be taken and counted.
                         std::thread::spawn(move || {
                             let _ = stream.read_to_end(&mut Vec::new());
-                            let _ = hung_up.send(arrived.elapsed());
+                            let _ = hung_up.send((arrived.elapsed(), Instant::now()));
                         });
                     }
                     Answer::Redirect(to) => {
@@ -617,8 +617,11 @@ fn a_silent_endpoint_times_out() {
     send(&h);
     // Timed from the request's arrival to the hang up, so a slow machine's own start and writes
     // are not counted. The sender allows ten seconds; the HTTP client's own default is thirty.
-    let waited = e.waited.recv_timeout(Duration::from_secs(60)).unwrap();
+    let (waited, hung_up) = e.waited.recv_timeout(Duration::from_secs(60)).unwrap();
     assert!(waited < Duration::from_secs(15), "{waited:?}");
+    // Having given up, the command ends too.
+    let after = hung_up.elapsed();
+    assert!(after < Duration::from_secs(15), "{after:?}");
     let rows = ledger(&h);
     assert_eq!(rows.len(), 1, "later days are not tried");
     assert_eq!(rows[0].0, "2026-11-23");
