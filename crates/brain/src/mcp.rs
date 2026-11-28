@@ -79,10 +79,10 @@ const PAGE_CHARS: usize = 40_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
 const DUE_SHOWN: usize = 20;
-/// A tool result an AI's client takes whole; a review queue can hold thousands of notes.
-const DUE_CHARS: usize = 9_500;
+/// In bytes: a tool result an AI's client takes whole, since a review queue can hold thousands.
+const DUE_BYTES: usize = 9_500;
 
-/// How many are due and of what kind, then the longest overdue, as many as fit.
+/// How many are due and of what kind, then the longest overdue that fit.
 fn due_reply(due: &[Due], today: Date, within: i64) -> String {
     let now = due.iter().filter(|d| d.review <= today).count();
     let kinds: Vec<String> = [Kind::Knowledge, Kind::Rule, Kind::History]
@@ -92,9 +92,13 @@ fn due_reply(due: &[Due], today: Date, within: i64) -> String {
             (n > 0).then(|| format!("{n} {}", k.as_str()))
         })
         .collect();
+    let coming = match within {
+        0 => String::new(),
+        1 => format!(", {} more within 1 day", due.len() - now),
+        _ => format!(", {} more within {within} days", due.len() - now),
+    };
     let mut out = format!(
-        "Due for review: {now} now, {} more within {within} days.\nBy kind: {}.\nOldest first:",
-        due.len() - now,
+        "Due for review: {now} now{coming}.\nBy kind: {}.\nOldest first:",
         kinds.join(", ")
     );
     let mut listed = 0;
@@ -105,14 +109,18 @@ fn due_reply(due: &[Due], today: Date, within: i64) -> String {
             d.review,
             fence_ref(d.note_uuid, &d.path, &title, None)
         );
-        if out.len() + line.len() > DUE_CHARS {
-            break;
+        // A path too long to fit leaves its own note out, never the ones after it.
+        if out.len() + line.len() > DUE_BYTES {
+            continue;
         }
         out.push_str(&line);
         listed += 1;
     }
     if listed < due.len() {
-        out.push_str(&format!("\n{} more not listed.", due.len() - listed));
+        out.push_str(&format!(
+            "\n{} more not listed: `brain due` prints them all.",
+            due.len() - listed
+        ));
     }
     out
 }
@@ -601,4 +609,29 @@ pub fn run(
             service.waiting().await?;
             anyhow::Ok(())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a path can outgrow the cap, and macOS cannot make one that long, so this is built here.
+    #[test]
+    fn a_note_too_long_to_list_does_not_hide_the_rest() {
+        let today: Date = "2026-01-02".parse().expect("a date");
+        let note = |path: String| Due {
+            note_uuid: None,
+            path,
+            title: "t".into(),
+            review: today,
+            kind: Kind::Knowledge,
+        };
+        let reply = due_reply(
+            &[note("&".repeat(3_000)), note("next.md".into())],
+            today,
+            14,
+        );
+        assert!(reply.contains("path=\"next.md\""), "{reply}");
+        assert!(reply.contains("\n1 more not listed"), "{reply}");
+    }
 }

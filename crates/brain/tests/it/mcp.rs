@@ -312,8 +312,81 @@ fn a_long_review_queue_is_counted_and_cut() {
     let first = text.lines().find(|l| l.contains("<note ")).unwrap();
     assert!(first.contains("path=\"oldest.md\""), "{first}");
     assert!(
-        text.ends_with(&format!("{} more not listed.", 350 - listed)),
+        text.ends_with(&format!(
+            "{} more not listed: `brain due` prints them all.",
+            350 - listed
+        )),
         "{text}"
+    );
+}
+
+/// The `due` reply for knowledge notes of robin's with these titles and review dates.
+fn due_over(notes: &[(String, String)], args: serde_json::Value) -> String {
+    let notes: Vec<(String, String)> = notes
+        .iter()
+        .enumerate()
+        .map(|(n, (title, review))| {
+            (
+                format!("n{n}.md"),
+                format!("---\ntitle: {title}\nowner: robin\nreview: {review}\n---\nx\n"),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = notes
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let h = indexed(&refs);
+    let (text, err) = Mcp::start(&h).text("due", args);
+    assert!(!err, "{text}");
+    text
+}
+
+fn old(title: &str) -> (String, String) {
+    (title.into(), "2020-01-01".into())
+}
+
+#[test]
+fn due_lists_at_most_twenty() {
+    let text = due_over(&vec![old("Old"); 21], json!({}));
+    assert_eq!(text.matches("<note ").count(), 20, "{text}");
+    assert!(
+        text.ends_with("\n1 more not listed: `brain due` prints them all."),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_long_title_is_cut_in_the_due_list() {
+    let text = due_over(&[old(&"t".repeat(900))], json!({}));
+    let cut = format!("title=\"{}\"", "t".repeat(200));
+    assert!(text.contains(&cut), "{text}");
+}
+
+#[test]
+fn a_short_queue_is_listed_whole() {
+    let today = brain_platform::clock::Clock::today(&brain_platform::clock::SystemClock);
+    let mut notes = vec![old("Old"); 19];
+    notes.push(("Today".into(), today.to_string()));
+    let text = due_over(&notes, json!({}));
+    assert!(
+        text.starts_with(
+            "Due for review: 20 now, 0 more within 14 days.\nBy kind: 20 knowledge.\nOldest first:"
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches("<note ").count(), 20, "{text}");
+    assert!(!text.contains("not listed"), "{text}");
+}
+
+#[test]
+fn due_says_its_window_in_plain_words() {
+    let none = due_over(&[old("Old")], json!({"within_days": 0}));
+    assert!(none.starts_with("Due for review: 1 now.\n"), "{none}");
+    let one = due_over(&[old("Old")], json!({"within_days": 1}));
+    assert!(
+        one.starts_with("Due for review: 1 now, 0 more within 1 day.\n"),
+        "{one}"
     );
 }
 
