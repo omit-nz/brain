@@ -5,65 +5,74 @@
 use std::path::Path;
 
 use brain_index::{Index, Written};
-use brain_note::{Split, Vault};
+use brain_note::{Split, Vault, prose};
 use jiff::ToSpan;
 use jiff::civil::Date;
 
 /// How far back a note is looked at.
 const DAYS: i64 = 14;
 pub const SHOWN: usize = 5;
-pub const HEADING: &str = "Written in the last 14 days with something left open. brain cannot tell \
-                           whether it has been settled since:";
+
+pub fn heading() -> String {
+    format!(
+        "Written in the last {DAYS} days with something left open. brain cannot tell whether it \
+         has been settled since:"
+    )
+}
+
+/// The recent notes with something left open, and how many recent ones could not be read to tell.
+pub struct Open {
+    pub notes: Vec<Written>,
+    pub unread: usize,
+}
+
+impl Open {
+    /// What to say of the notes that could not be read.
+    pub fn unread_line(&self) -> Option<String> {
+        match self.unread {
+            0 => None,
+            1 => Some("1 recent note could not be read.".into()),
+            n => Some(format!("{n} recent notes could not be read.")),
+        }
+    }
+}
 
 /// `owner`'s kept notes of the last two weeks with a section headed open or waiting that nothing
 /// overtakes, newest first. Copies of an AI tool's memory are never read.
-pub fn notes(
-    index: &Index,
-    vault: &Vault,
-    owner: &str,
-    today: Date,
-) -> anyhow::Result<Vec<Written>> {
+pub fn notes(index: &Index, vault: &Vault, owner: &str, today: Date) -> anyhow::Result<Open> {
     let since = today.checked_sub(DAYS.days())?;
     let mut notes = index.written_since(owner, since, today)?;
+    let mut unread = 0;
     notes.retain(|n| {
         let path = Path::new(&n.path);
-        !vault.layout.is_memory(path)
-            && vault
-                .read(path)
-                .is_ok_and(|text| left_open(Split::parse(&text).body))
+        if vault.layout.is_memory(path) {
+            return false;
+        }
+        match vault.read(path) {
+            Ok(text) => left_open(Split::parse(&text).body),
+            Err(_) => {
+                // One gone since the index was made holds nothing any more.
+                let gone = matches!(vault.root.join(path).try_exists(), Ok(false));
+                unread += usize::from(!gone);
+                false
+            }
+        }
     });
-    Ok(notes)
+    Ok(Open { notes, unread })
 }
 
 /// Whether a heading outside code holds the word `open` or `waiting`.
 fn left_open(body: &str) -> bool {
-    let mut code = None;
-    body.lines().any(|line| {
-        match (code, fence(line)) {
-            (None, Some(run)) => code = Some(run),
-            // Only a run of the same mark, at least as long and alone on its line, closes a block.
-            (Some(open), Some(run)) if run.starts_with(open) && line.trim() == run => code = None,
-            (Some(_), _) => {}
-            (None, None) => {
-                return line.starts_with('#')
-                    && line.trim_start_matches('#').starts_with(' ')
-                    && line.split(|c: char| !c.is_alphanumeric()).any(|word| {
-                        ["open", "waiting"]
-                            .iter()
-                            .any(|w| word.eq_ignore_ascii_case(w))
-                    });
-            }
-        }
-        false
+    prose(body).any(|line| {
+        let head = line.trim_start_matches(' ');
+        line.len() - head.len() <= 3
+            && head
+                .strip_prefix('#')
+                .is_some_and(|rest| rest.trim_start_matches('#').starts_with([' ', '\t']))
+            && head.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                ["open", "waiting"]
+                    .iter()
+                    .any(|w| word.eq_ignore_ascii_case(w))
+            })
     })
-}
-
-/// The run of backticks or tildes with which `line` opens or closes a code block.
-fn fence(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let after = line.trim_start_matches(mark);
-    let run = &line[..line.len() - after.len()];
-    // Three backticks with another later on the line are code inside a sentence.
-    (run.len() >= 3 && !(mark == '`' && after.contains('`'))).then_some(run)
 }

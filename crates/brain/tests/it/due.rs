@@ -48,6 +48,10 @@ fn recent_open_notes_are_listed_with_their_day() {
         ("other-words.md", note(1, "## Reopened and opening hours\n")),
         ("code.md", note(1, "```sh\n# open the file\n```")),
         ("hash.md", note(1, "#open is a tag, not a heading")),
+        (
+            "indented-text.md",
+            note(1, "x\n open the door\n\topen it\n# \n"),
+        ),
     ]);
     let text = due(&h);
     assert!(
@@ -82,6 +86,58 @@ fn a_heading_inside_a_code_block_is_not_one() {
         text.contains("inline.md") && text.contains("after.md"),
         "{text}"
     );
+}
+
+#[test]
+fn a_heading_is_read_as_markdown_reads_one() {
+    let h = built(&[
+        ("indented.md", note(1, "x\n\n  ## Open")),
+        ("tab.md", note(1, "##\tOpen")),
+        // Four spaces make code of the marks, which then holds nothing after it.
+        ("after-code.md", note(1, "x:\n\n    ```\n\ntext\n\n## Open")),
+        ("after-list.md", note(1, "- ```sh\n  ls\n  ```\n\n## Open")),
+        ("in-list.md", note(1, "- ```sh\n  ## Open\n  ```")),
+        (
+            "in-nested.md",
+            note(1, "10. ```\n    x\n    ```\n    ## Open"),
+        ),
+        // Marks four columns further in than the block's own close nothing.
+        ("in-block.md", note(1, "```\n    ```\n## Open\n```")),
+    ]);
+    let text = due(&h);
+    assert_eq!(text.matches("<note ").count(), 4, "{text}");
+    assert!(!text.contains("in-"), "{text}");
+}
+
+#[test]
+fn the_newest_written_is_listed_first() {
+    let h = built(&[("a.md", note(9, OPEN)), ("z.md", note(1, OPEN))]);
+    let text = due(&h);
+    let first = text.lines().find(|l| l.contains("<note ")).unwrap();
+    assert!(first.contains("z.md"), "{text}");
+}
+
+#[test]
+fn a_note_gone_since_the_index_is_not_listed() {
+    let h = built(&[("open.md", note(1, OPEN))]);
+    std::fs::remove_file(h.vault.path().join("open.md")).unwrap();
+    assert_eq!(due(&h), "Nothing of theirs is due.");
+}
+
+/// Silence would say nothing is open.
+#[test]
+fn a_recent_note_that_cannot_be_read_is_counted() {
+    let h = built(&[("open.md", note(1, OPEN))]);
+    std::fs::write(h.vault.path().join("open.md"), [0xff, 0xfe]).unwrap();
+    assert_eq!(
+        due(&h),
+        "Nothing of theirs is due.\n1 recent note could not be read."
+    );
+    assert_eq!(
+        h.run(&["due"]),
+        "nothing of yours is due\n1 recent note could not be read.\n"
+    );
+    assert_eq!(h.json(&["due", "--json"])["open_unread"], 1);
 }
 
 #[test]
@@ -187,6 +243,28 @@ fn a_full_review_queue_leaves_room_for_the_open_ones_inside_the_budget() {
     assert!(text.contains(HEADING), "{text}");
     assert!(text.contains("o1.md"), "{text}");
     assert!(text.contains("d0.md"), "{text}");
+}
+
+#[test]
+fn five_long_paths_take_at_most_half_the_reply() {
+    // Escaped, each `&` is five characters.
+    let folder = "&".repeat(200);
+    let mut notes: Vec<(String, String)> = (0..40)
+        .map(|n| {
+            let text = "---\nowner: robin\nreview: 2020-01-01\n---\nx\n".into();
+            (format!("d{n}.md"), text)
+        })
+        .collect();
+    notes.extend((1..=5).map(|n| (format!("{folder}/o{n}.md"), note(n, OPEN))));
+    let refs: Vec<(&str, &str)> = notes
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let text = due(&indexed(&refs));
+    let open = &text[text.find("\nWritten in").unwrap()..];
+    assert!(text.len() <= 9_500, "{}", text.len());
+    assert!(open.len() <= 4_750, "{}", open.len());
+    assert!(open.ends_with(" more not listed."), "{open}");
 }
 
 #[test]

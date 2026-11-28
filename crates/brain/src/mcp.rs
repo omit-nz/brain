@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use brain::fence::{TITLE_CHARS, attrs, escape, fence_ref};
 use brain::update;
-use brain_index::{Due, Hit, Index, Query, Scope, Written, embed, is_gap};
+use brain_index::{Due, Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
 use brain_platform::clock::Clock;
 use brain_platform::dirs::Dirs;
@@ -32,7 +32,7 @@ use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::daemon::writer_lock;
 use crate::import::{self, Ledger};
-use crate::open;
+use crate::open::{self, Open};
 use crate::out::terminal;
 use crate::room::{self, Post};
 use crate::usage;
@@ -87,33 +87,37 @@ const DUE_SHOWN: usize = 20;
 const DUE_BYTES: usize = 9_500;
 
 /// The notes left open, newest first, as many as are shown and fit in half the reply.
-fn open_part(open: &[Written]) -> String {
-    if open.is_empty() {
-        return String::new();
-    }
-    let mut out = format!("\n{}", open::HEADING);
-    let mut listed = 0;
-    for w in open.iter().take(open::SHOWN) {
-        let line = format!(
-            "\n{}  {}",
-            w.said,
-            fence_ref(w.note_uuid, &w.path, &w.title, None)
-        );
-        if out.len() + line.len() > DUE_BYTES / 2 {
-            continue;
+fn open_part(open: &Open) -> String {
+    let mut out = String::new();
+    if !open.notes.is_empty() {
+        out = format!("\n{}", open::heading());
+        let mut listed = 0;
+        for w in open.notes.iter().take(open::SHOWN) {
+            let line = format!(
+                "\n{}  {}",
+                w.said,
+                fence_ref(w.note_uuid, &w.path, &w.title, None)
+            );
+            if out.len() + line.len() > DUE_BYTES / 2 - MORE_BYTES {
+                continue;
+            }
+            out.push_str(&line);
+            listed += 1;
         }
-        out.push_str(&line);
-        listed += 1;
+        if listed < open.notes.len() {
+            out.push_str(&format!("\n{} more not listed.", open.notes.len() - listed));
+        }
     }
-    if listed < open.len() {
-        out.push_str(&format!("\n{} more not listed.", open.len() - listed));
+    if let Some(line) = open.unread_line() {
+        out.push('\n');
+        out.push_str(&line);
     }
     out
 }
 
 /// How many are due and of what kind, then the longest overdue that fit, then the notes left open,
 /// whose room is taken first.
-fn due_reply(due: &[Due], today: Date, within: i64, open: &[Written]) -> String {
+fn due_reply(due: &[Due], today: Date, within: i64, open: &Open) -> String {
     let left = open_part(open);
     if due.is_empty() {
         return format!("Nothing of theirs is due.{left}");
@@ -703,6 +707,8 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    use brain_index::Written;
+
     use super::*;
 
     /// Only a path can outgrow the cap, and macOS cannot make one that long, so this is built here.
@@ -720,9 +726,52 @@ mod tests {
             &[note("&".repeat(3_000)), note("next.md".into())],
             today,
             14,
-            &[],
+            &left(Vec::new(), 0),
         );
         assert!(reply.contains("path=\"next.md\""), "{reply}");
         assert!(reply.contains("\n1 more not listed"), "{reply}");
+    }
+
+    fn left(notes: Vec<Written>, unread: usize) -> Open {
+        Open { notes, unread }
+    }
+
+    fn written(path: String) -> Written {
+        Written {
+            note_uuid: None,
+            path,
+            title: "t".into(),
+            said: "2026-01-02".parse().expect("a date"),
+        }
+    }
+
+    #[test]
+    fn a_path_too_long_for_the_open_part_leaves_only_itself_out() {
+        let notes = vec![written("&".repeat(1_000)), written("next.md".into())];
+        let open = open_part(&left(notes, 0));
+        assert!(open.contains("path=\"next.md\""), "{open}");
+        assert!(open.ends_with("\n1 more not listed."), "{open}");
+    }
+
+    /// Every path length is tried, so some case lands just under each limit.
+    #[test]
+    fn the_closing_lines_are_inside_each_budget() {
+        let today: Date = "2026-01-02".parse().expect("a date");
+        for len in 0..600 {
+            let path = |n| format!("{}{n}.md", "a".repeat(400 + len));
+            let due: Vec<Due> = (0..30)
+                .map(|n| Due {
+                    note_uuid: None,
+                    path: path(n),
+                    title: "t".into(),
+                    review: today,
+                    kind: Kind::Knowledge,
+                })
+                .collect();
+            let reply = due_reply(&due, today, 14, &left(Vec::new(), 0));
+            assert!(reply.len() <= DUE_BYTES, "{len}: {}", reply.len());
+            let part = open_part(&left((0..30).map(|n| written(path(n))).collect(), 3));
+            assert!(part.len() <= DUE_BYTES / 2, "{len}: {}", part.len());
+        }
     }
 }

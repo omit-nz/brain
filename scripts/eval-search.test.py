@@ -227,4 +227,8 @@ except subprocess.TimeoutExpired as error:
 check("a search that never ends prints no question", "search did not finish" in said and
       QUESTION not in said, said)
 
+rust = SCRIPT.parent.parent.joinpath("crates/brain/src/mcp.rs").read_text()
+check("the gate reads as many due rows as the tool lists",
+      f"const DUE_SHOWN: usize = {gate.DUE_SHOWN};" in rust)
+
 sys.exit(1 if Check.failed else 0)

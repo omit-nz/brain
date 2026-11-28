@@ -843,8 +843,8 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
     let index = reader(dirs, &config)?;
     let due = index.due(&config.me, by)?;
     let open = open::notes(&index, &Vault::open(&config.vault)?, &config.me, today)?;
-    let shown = open.iter().take(open::SHOWN);
-    let more = open.len().saturating_sub(open::SHOWN);
+    let shown = open.notes.iter().take(open::SHOWN);
+    let more = open.notes.len().saturating_sub(open::SHOWN);
     if as_json {
         let rows: Vec<_> = due
             .iter()
@@ -867,7 +867,12 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
                 })
             })
             .collect();
-        let all = json!({ "due": rows, "open": left, "open_more": more });
+        let all = json!({
+            "due": rows,
+            "open": left,
+            "open_more": more,
+            "open_unread": open.unread,
+        });
         println!("{}", serde_json::to_string_pretty(&all)?);
         return Ok(());
     }
@@ -880,8 +885,8 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
             terminal(&format!("{}  {}  {}", d.review, d.path, d.title))
         );
     }
-    if !open.is_empty() {
-        println!("{}", open::HEADING);
+    if !open.notes.is_empty() {
+        println!("{}", open::heading());
     }
     for w in shown {
         println!(
@@ -891,6 +896,9 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
     }
     if more > 0 {
         println!("{more} more not listed.");
+    }
+    if let Some(line) = open.unread_line() {
+        println!("{line}");
     }
     Ok(())
 }
