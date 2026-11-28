@@ -16,6 +16,7 @@ use serde_json::json;
 
 use brain::update;
 
+use crate::calls;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::connect;
@@ -69,6 +70,14 @@ enum Command {
     },
     /// Questions no note answered yet, newest first.
     Gaps {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The tool calls AI tools made of brain lately, newest first, with what each asked.
+    Calls {
+        /// How many.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
+        last: u32,
         #[arg(long)]
         json: bool,
     },
@@ -127,7 +136,8 @@ enum Command {
         #[command(subcommand)]
         action: MemoryAction,
     },
-    /// Your kept notes whose review has come, oldest first.
+    /// Your kept notes whose review has come, oldest first, then recent ones with something left
+    /// open. `--json` prints `{due, open, open_more, open_unread}`.
     Due {
         /// Also list notes due within this many days.
         #[arg(long, default_value_t = 14)]
@@ -355,6 +365,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Daemon { from_dir } => daemon::run(dirs, clock.into(), from_dir.as_deref()),
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
+        Command::Calls { last, json } => list_calls(dirs, last, json),
         Command::Add { text, title, kind } => {
             let config = Config::load(dirs)?;
             let vault = Vault::open(&config.vault)?;
@@ -380,7 +391,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             let vault = Vault::open(&config.vault)?;
             let today = clock.today();
             let idx = reader(dirs, &config)?;
-            let w = capture::correct(&vault, &idx, &config.me, today, &target, &text)?;
+            let (w, _) = capture::correct(&vault, &idx, &config.me, today, &target, &text)?;
             println!("{}", terminal(&w.rel));
             usage::count(
                 &usage::store(dirs),
@@ -832,6 +843,37 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
                 println!("{}", terminal(&line));
             }
         }
+    }
+    Ok(())
+}
+
+fn list_calls(dirs: &Dirs, last: u32, as_json: bool) -> anyhow::Result<()> {
+    let calls = calls::last(dirs, usize::try_from(last)?)?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&calls)?);
+        return Ok(());
+    }
+    if calls.is_empty() {
+        println!("no calls recorded");
+    }
+    for call in calls {
+        let word = |key: &str| call[key].as_str().unwrap_or_default().to_string();
+        let notes = call["notes"].as_array().map_or(0, Vec::len);
+        let aside = match call["archived"].as_array().map_or(0, Vec::len) {
+            0 => String::new(),
+            n => format!(" ({n} archived)"),
+        };
+        let line = format!(
+            "{}  {}  {}  {}  {} bytes, {notes} note{}{aside}{}",
+            word("at"),
+            word("door"),
+            word("tool"),
+            call["args"],
+            call["reply_bytes"],
+            if notes == 1 { "" } else { "s" },
+            if call["error"] == true { ", error" } else { "" },
+        );
+        println!("{}", terminal(&line));
     }
     Ok(())
 }

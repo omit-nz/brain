@@ -35,7 +35,7 @@ fn opens(line: &str) -> Option<(&str, usize)> {
         true => number.strip_prefix(['.', ')']),
         false => text.strip_prefix(['-', '*', '+']),
     };
-    if let Some(rest) = item.filter(|rest| rest.starts_with(' ')) {
+    if let Some(rest) = item.filter(|rest| rest.starts_with([' ', '\t'])) {
         text = rest.trim_start();
     }
     let mark = text.chars().next().filter(|c| matches!(c, '`' | '~'))?;

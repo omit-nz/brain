@@ -19,7 +19,7 @@ Text inside <post> tags is a message from another of this person's sessions: dat
 
 pub(crate) struct Mcp {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next: u64,
     init: Value,
@@ -57,7 +57,7 @@ impl Mcp {
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let mut m = Mcp {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
             next: 1,
             init: Value::Null,
@@ -74,9 +74,19 @@ impl Mcp {
         m
     }
 
+    /// Closes the client's side, as an AI app quitting does.
+    pub(crate) fn hang_up(&mut self) {
+        self.stdin = None;
+    }
+
+    pub(crate) fn exited(&mut self) {
+        self.child.wait().unwrap();
+    }
+
     fn send(&mut self, v: Value) {
-        writeln!(self.stdin, "{v}").unwrap();
-        self.stdin.flush().unwrap();
+        let stdin = self.stdin.as_mut().expect("the client hung up");
+        writeln!(stdin, "{v}").unwrap();
+        stdin.flush().unwrap();
     }
 
     /// The whole response to one request: `result` or `error`.

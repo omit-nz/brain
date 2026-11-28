@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::Context;
-use brain_index::Index;
+use brain_index::{Index, Noted};
 use brain_note::{Frontmatter, Kind, MAX_NOTE_BYTES, Split, Vault, rel_key};
 use brain_platform::fs::{Privacy, create_new};
 use jiff::ToSpan;
@@ -115,7 +115,7 @@ pub fn correct(
     today: Date,
     target: &str,
     text: &str,
-) -> anyhow::Result<Written> {
+) -> anyhow::Result<(Written, Noted)> {
     let noted = index
         .lookup(target)?
         .with_context(|| format!("no note is {target}"))?;
@@ -127,7 +127,7 @@ pub fn correct(
         .note_uuid
         .map_or_else(|| noted.path.clone(), |u| u.to_string());
     let title = format!("Correction: {}", noted.title);
-    write(
+    let written = write(
         vault,
         me,
         today,
@@ -137,5 +137,6 @@ pub fn correct(
             kind: Some(Kind::Rule),
             corrects: Some(&corrects),
         },
-    )
+    )?;
+    Ok((written, noted))
 }

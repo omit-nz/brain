@@ -7,6 +7,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use brain::fence::{TITLE_CHARS, attrs, escape, fence_ref};
@@ -26,8 +27,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
+use crate::calls;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::daemon::writer_lock;
@@ -249,6 +252,8 @@ struct State {
     activity: PathBuf,
     door: Door,
     clock: Box<dyn Clock>,
+    /// Records still being written when their reply went.
+    late: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl State {
@@ -360,7 +365,7 @@ impl State {
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct SearchArgs {
     /// The question, in the person's words.
     query: String,
@@ -368,7 +373,7 @@ struct SearchArgs {
     limit: Option<u32>,
 }
 
-#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 enum KindArg {
     Knowledge,
@@ -376,45 +381,51 @@ enum KindArg {
     History,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct CaptureArgs {
     /// What to keep, in the person's words.
+    #[serde(serialize_with = "calls::counted")]
     text: String,
     /// A short title.
+    #[serde(serialize_with = "calls::counted_if_given")]
     title: Option<String>,
     /// knowledge (a fact or how a job is done), rule (a standing rule or preference) or history
     /// (what happened).
     kind: Option<KindArg>,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct CorrectArgs {
     /// The wrong note's id or its path in the vault.
+    #[serde(serialize_with = "calls::counted")]
     target: String,
     /// What is true instead.
+    #[serde(serialize_with = "calls::counted")]
     correction: String,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct DueArgs {
     /// Also list notes due within this many days: 14 unless given, at most 365.
     within_days: Option<u32>,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct RoomPostArgs {
     /// The room: squads unless given.
     room: Option<String>,
     /// The message.
+    #[serde(serialize_with = "calls::counted")]
     text: String,
     /// One line; the text's first line unless given.
+    #[serde(serialize_with = "calls::counted_if_given")]
     title: Option<String>,
     /// Who is posting, when this session posts under a name of its own.
     #[serde(rename = "as")]
     author: Option<String>,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct RoomNewArgs {
     /// The room: squads unless given.
     room: Option<String>,
@@ -423,7 +434,7 @@ struct RoomNewArgs {
     reader: Option<String>,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct RoomListArgs {}
 
 #[derive(Clone)]
@@ -433,19 +444,38 @@ struct Server {
 }
 
 impl Server {
-    /// Runs `f` on the blocking pool, since every tool reads SQLite or the disk; a failure is the
-    /// tool's error, shown to the AI, never a protocol error.
-    async fn blocking(
+    /// Runs `tool` on the blocking pool, since every tool reads SQLite or the disk, and records the
+    /// call; a failure is the tool's error, shown to the AI, never a protocol error.
+    async fn blocking<A: Serialize + Send + 'static>(
         &self,
-        f: impl FnOnce(&State) -> anyhow::Result<String> + Send + 'static,
+        tool: &'static str,
+        asked: A,
+        f: impl FnOnce(&State, A) -> anyhow::Result<String> + Send + 'static,
     ) -> Result<String, String> {
         let state = self.state.clone();
-        match tokio::task::spawn_blocking(move || f(&state)).await {
-            Ok(Ok(text)) => Ok(text),
+        tokio::task::spawn_blocking(move || {
+            let args = json!(&asked);
             // An error can repeat what was asked, however long that was.
-            Ok(Err(e)) => Err(cut(&format!("{e:#}"), ERROR_BYTES)),
-            Err(e) => Err(format!("brain failed: {e}")),
-        }
+            let out = f(&state, asked).map_err(|e| cut(&format!("{e:#}"), ERROR_BYTES));
+            let (reply, failed) = match &out {
+                Ok(text) => (text, false),
+                Err(text) => (text, true),
+            };
+            let late = calls::record(
+                &state.dirs.data,
+                state.door.as_str(),
+                tool,
+                args,
+                reply,
+                failed,
+            );
+            let mut kept = state.late.lock().unwrap_or_else(PoisonError::into_inner);
+            kept.retain(|writer| !writer.is_finished());
+            kept.extend(late);
+            out
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("brain failed: {e}")))
     }
 }
 
@@ -458,8 +488,10 @@ impl Server {
         &self,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<String, String> {
-        self.blocking(move |s| s.search(&a.query, a.limit, Scope::Mine))
-            .await
+        self.blocking("search_my_brain", a, |s, a| {
+            s.search(&a.query, a.limit, Scope::Mine)
+        })
+        .await
     }
 
     #[tool(description = "Search only this person's notes that are not private.")]
@@ -467,15 +499,17 @@ impl Server {
         &self,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<String, String> {
-        self.blocking(move |s| s.search(&a.query, a.limit, Scope::SharedOnly))
-            .await
+        self.blocking("search_company", a, |s, a| {
+            s.search(&a.query, a.limit, Scope::SharedOnly)
+        })
+        .await
     }
 
     #[tool(
         description = "Save something the conversation settled into the person's inbox. Only when they agree."
     )]
     async fn capture(&self, Parameters(a): Parameters<CaptureArgs>) -> Result<String, String> {
-        self.blocking(move |s| {
+        self.blocking("capture", a, |s, a| {
             let kind = a.kind.map(|k| match k {
                 KindArg::Knowledge => Kind::Knowledge,
                 KindArg::Rule => Kind::Rule,
@@ -507,9 +541,9 @@ impl Server {
         description = "Record that a note is wrong, as a correction that names it. The note itself is left as it is."
     )]
     async fn correct(&self, Parameters(a): Parameters<CorrectArgs>) -> Result<String, String> {
-        self.blocking(move |s| {
+        self.blocking("correct", a, |s, a| {
             let (vault, me) = s.current()?;
-            let w = capture::correct(
+            let (w, wrong) = capture::correct(
                 &vault,
                 &*s.index_of(&vault)?,
                 &me,
@@ -524,8 +558,9 @@ impl Server {
                 Some(s.door),
             );
             Ok(format!(
-                "Saved the correction to the inbox: {}",
-                fence_ref(Some(w.id), &w.rel, &w.title, Some(Kind::Rule))
+                "Saved the correction to the inbox: {}, correcting {}",
+                fence_ref(Some(w.id), &w.rel, &w.title, Some(Kind::Rule)),
+                fence_ref(wrong.note_uuid, &wrong.path, &wrong.title, None)
             ))
         })
         .await
@@ -535,7 +570,7 @@ impl Server {
         description = "Count this person's notes whose review has come or is coming, list the oldest, and list recent notes with something left open."
     )]
     async fn due(&self, Parameters(a): Parameters<DueArgs>) -> Result<String, String> {
-        self.blocking(move |s| {
+        self.blocking("due", a, |s, a| {
             let within = i64::from(a.within_days.unwrap_or(14).min(365));
             let today = s.clock.today();
             let by = today.checked_add(within.days())?;
@@ -552,7 +587,7 @@ impl Server {
         description = "Post a message to a room (squads unless named) for this person's other sessions to read."
     )]
     async fn room_post(&self, Parameters(a): Parameters<RoomPostArgs>) -> Result<String, String> {
-        self.blocking(move |s| {
+        self.blocking("room_post", a, |s, a| {
             let (vault, me) = s.current()?;
             let name = a.room.as_deref().unwrap_or(room::DEFAULT_ROOM);
             let author = a
@@ -577,7 +612,7 @@ impl Server {
 
     #[tool(description = "The room's posts this session has not been shown yet, oldest first.")]
     async fn room_new(&self, Parameters(a): Parameters<RoomNewArgs>) -> Result<String, String> {
-        self.blocking(move |s| {
+        self.blocking("room_new", a, |s, a| {
             let (vault, me) = s.current()?;
             let name = a.room.as_deref().unwrap_or(room::DEFAULT_ROOM);
             let reader = a
@@ -609,8 +644,8 @@ impl Server {
     }
 
     #[tool(description = "The rooms, with how many posts each holds and when the newest came.")]
-    async fn room_list(&self, Parameters(_): Parameters<RoomListArgs>) -> Result<String, String> {
-        self.blocking(move |s| {
+    async fn room_list(&self, Parameters(a): Parameters<RoomListArgs>) -> Result<String, String> {
+        self.blocking("room_list", a, |s, _| {
             let (vault, _) = s.current()?;
             let rooms = room::list(&vault)?;
             if rooms.is_empty() {
@@ -688,11 +723,13 @@ pub fn run(
         activity: dirs.data.join("activity.db"),
         door,
         clock,
+        late: Mutex::new(Vec::new()),
     };
     let server = Server {
         state: Arc::new(state),
         tool_router: Server::tool_router(),
     };
+    let state = server.state.clone();
     let warm = server.state.clone();
     std::thread::spawn(move || warm.provider().is_some());
     tokio::runtime::Builder::new_current_thread()
@@ -702,7 +739,13 @@ pub fn run(
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
             anyhow::Ok(())
-        })
+        })?;
+    // The client may quit as soon as it has its reply; its record is still brain's to write.
+    let late = std::mem::take(&mut *state.late.lock().unwrap_or_else(PoisonError::into_inner));
+    for writer in late {
+        let _ = writer.join();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
