@@ -42,7 +42,6 @@ toml.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-toml.workspace = true
 assert_cmd.workspace = true
 flate2.workspace = true
 omit-agent-trace.workspace = true
