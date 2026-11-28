@@ -574,3 +574,25 @@ fn notes_of_one_day_keep_score_order() {
     let found = ask(&f, "latest note on quince jam");
     assert_eq!(paths(&found), ["note.md", "plain.md"]);
 }
+
+/// A long note about many things: the framed question is under the floor against it, and short
+/// notes that name the topic outrank it when the topic is asked alone, past what is judged.
+#[test]
+fn the_topic_is_also_judged_against_what_the_whole_question_found() {
+    let f = Fixture::new();
+    let filler = "The product keeps notes on the computer they were written on and searches them there. Each session starts by reading what is due and what the room holds. Rules are checked before a tool runs and every verdict is kept beside the call it judged. ".repeat(3);
+    f.put(
+        "direction.md",
+        &format!(
+            "---\ndate: 2026-11-24\n---\n{filler} Omit pricing: setup fee plus care. {filler} Most recent of all: a decision about the van.\n"
+        ),
+    );
+    for n in 0..35 {
+        f.put(
+            &format!("page{n:02}.md"),
+            "---\ndate: 2026-10-01\n---\nomit pricing page: the font is too small on a phone\n",
+        );
+    }
+    let framed = ask(&f, "most recent decision about omit pricing");
+    assert_eq!(paths(&framed)[0], "direction.md", "{:?}", paths(&framed));
+}

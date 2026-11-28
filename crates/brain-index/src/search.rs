@@ -157,14 +157,16 @@ impl Index {
                 reranked: false,
             });
         }
-        let mut found = self.judged(&text, q, provider)?;
+        let (mut found, judged) = self.judged(&text, q, provider, &[])?;
         // Asking for the latest: the topic is also asked on its own, since a question's framing
         // can leave every note under the floor, and the answer is ordered by date.
         if found.reranked
             && let Some(topic) = recent::latest(&text)
         {
             if let Some(topic) = topic {
-                let about = self.judged(&topic, q, provider)?;
+                // The whole question may have found a note the topic alone ranks too low to
+                // judge, as in a long note about many things, so those are judged on it too.
+                let (about, _) = self.judged(&topic, q, provider, &judged)?;
                 if about.reranked {
                     for hit in about.hits {
                         if !found.hits.iter().any(|h| h.path == hit.path) {
@@ -181,13 +183,15 @@ impl Index {
         Ok(found)
     }
 
-    /// Every hit for `text`, ranked, and judged by the cross-encoder when the query asks.
+    /// Every hit for `text`, ranked, and judged by the cross-encoder when the query asks, with the
+    /// paths it judged: the top of the ranking and each of `also`.
     fn judged(
         &self,
         text: &str,
         q: &Query<'_>,
         provider: Option<&dyn EmbeddingProvider>,
-    ) -> anyhow::Result<Found> {
+        also: &[String],
+    ) -> anyhow::Result<(Found, Vec<String>)> {
         let mut found = Found {
             hits: Vec::new(),
             words: false,
@@ -252,17 +256,24 @@ impl Index {
             hits.extend(self.hit(items, path, score, q)?);
         }
 
+        let mut judged = Vec::new();
         if q.rerank {
-            let top = hits.len().min(RERANK_TOP);
-            let docs: Vec<(String, String)> = hits[..top]
+            let mut pool = hits[..hits.len().min(RERANK_TOP)].to_vec();
+            for path in also {
+                if !pool.iter().any(|h| h.path == *path) {
+                    pool.extend(self.hit(items, path.clone(), 0.0, q)?);
+                }
+            }
+            let docs: Vec<(String, String)> = pool
                 .iter()
                 .map(|h| (h.path.clone(), format!("{}\n{}", h.title, h.body)))
                 .collect();
-            let order = rerank(text, &docs, top);
+            let order = rerank(text, &docs, docs.len());
             // A cross-encoder that scored nothing (its model would not load) leaves the fused
             // order, judged by words as an unreranked search is.
-            if top == 0 || !order.is_empty() {
-                let mut head: Vec<Option<Hit>> = hits.drain(..top).map(Some).collect();
+            if pool.is_empty() || !order.is_empty() {
+                judged = pool.iter().map(|h| h.path.clone()).collect();
+                let mut head: Vec<Option<Hit>> = pool.into_iter().map(Some).collect();
                 hits = order
                     .iter()
                     .filter(|r| r.score >= RERANK_FLOOR)
@@ -278,7 +289,7 @@ impl Index {
         }
 
         found.hits = hits;
-        Ok(found)
+        Ok((found, judged))
     }
 
     /// The note at `path` as a hit, when the scope's view holds it and the query takes its kind.
