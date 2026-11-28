@@ -63,6 +63,16 @@ impl Daemon {
             .count()
     }
 
+    /// The passes once start-up is over. A file made just before the watch may be reported after
+    /// the first pass, which makes one more and no others.
+    fn settled(&self) -> usize {
+        self.wait_for_passes(1);
+        std::thread::sleep(Duration::from_secs(3));
+        let passes = self.passes();
+        assert!(passes <= 2, "{}", self.stderr());
+        passes
+    }
+
     fn wait_for_passes(&self, n: usize) {
         until(
             &format!("pass {n}"),
@@ -206,7 +216,7 @@ fn hidden_folders_do_not_wake_it() {
     h.init();
     h.put("a.md", &note_with_id(1, "seeded"));
     let d = Daemon::start(&h);
-    d.wait_for_passes(1);
+    let settled = d.settled();
     for n in 0..50 {
         h.put(&format!(".obsidian/w{n}.md"), "workspace");
         fs::rename(
@@ -216,9 +226,9 @@ fn hidden_folders_do_not_wake_it() {
         .unwrap();
     }
     std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(d.passes(), 1, "{}", d.stderr());
+    assert_eq!(d.passes(), settled, "{}", d.stderr());
     h.put("b.md", &note_with_id(2, "a visible note"));
-    d.wait_for_passes(2);
+    d.wait_for_passes(settled + 1);
 }
 
 #[test]
@@ -239,11 +249,13 @@ fn the_watcher_does_not_walk_a_linked_folder() {
         started.elapsed()
     );
     assert_eq!(notes(&h), 0);
+    // macOS reports nothing from behind a link either way; the Linux run is what holds this.
+    let settled = d.settled();
     fs::write(elsewhere.path().join("new.md"), "written through the link").unwrap();
     std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(d.passes(), 1, "{}", d.stderr());
+    assert_eq!(d.passes(), settled, "{}", d.stderr());
     h.put("a.md", &note_with_id(1, "a note in the vault"));
-    d.wait_for_passes(2);
+    d.wait_for_passes(settled + 1);
 }
 
 #[test]
