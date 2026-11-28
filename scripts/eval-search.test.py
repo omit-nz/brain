@@ -13,8 +13,8 @@ import tempfile
 
 SCRIPT = pathlib.Path(__file__).with_name("eval-search.py")
 
-# A stand-in brain: `search` answers from the table written beside it, and `index` writes to its
-# vault and index as a real one would.
+# A stand-in brain: `search` and `due` answer from the table written beside it, and `index` writes
+# to its vault and index as a real one would.
 STUB = """#!/usr/bin/env python3
 import json, os, pathlib, sqlite3, sys
 table = json.loads(pathlib.Path(__file__ + ".json").read_text())
@@ -37,6 +37,12 @@ elif sys.argv[1] == "search":
     if table["answers"] is None:
         sys.exit("secret-note.md could not answer " + sys.argv[-1])
     print(json.dumps({"gap": False, "hits": table["answers"].get(sys.argv[-1], [])}))
+elif sys.argv[1] == "due" and sys.argv[2::2] == ["--within", "--json"]:
+    if table["due"] is None:
+        sys.exit("secret-note.md is due and could not be read")
+    print(json.dumps(table["due"][sys.argv[3]]))
+else:
+    sys.exit("the stand-in was asked something else")
 """
 
 INDEXED = "0 added, 1 changed\n1 embedded, 0 failed, 0 pending"
@@ -52,7 +58,17 @@ def case(n, expect, must_not=(), **extra):
             "must_not_present_as_current": list(must_not), **extra}
 
 
-def run(cases, last, candidate, index=INDEXED, runtime=True, args=None):
+def due_case(n, expect, must_not=(), within=7, **extra):
+    call = {"tool": "due"} if within is None else {"tool": "due", "within_days": within}
+    return case(n, expect, must_not, real_path={"brain_calls": [call]}, **extra)
+
+
+def listed(due=(), left_open=()):
+    """What a candidate's `due --json` prints; the last release printed the due rows alone."""
+    return {"due": [hit(p) for p in due], "open": [hit(p) for p in left_open], "open_more": 0}
+
+
+def run(cases, last, candidate, index=INDEXED, runtime=True, args=None, due=({}, {})):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         (root / "vault").mkdir()
@@ -70,12 +86,13 @@ def run(cases, last, candidate, index=INDEXED, runtime=True, args=None):
         installed = (data / "index.db").read_bytes()
         (root / "cases.jsonl").write_text("".join(json.dumps(c) + "\n" for c in cases))
         bins = []
-        for name, version, answers in (("last", "0.2.5", last), ("candidate", "0.2.6", candidate)):
+        for name, version, answers, dues in (("last", "0.2.5", last, due[0]),
+                                             ("candidate", "0.2.6", candidate, due[1])):
             path = root / name
             path.write_text(STUB)
             path.chmod(0o755)
             pathlib.Path(f"{path}.json").write_text(
-                json.dumps({"version": version, "answers": answers, "index": index}))
+                json.dumps({"version": version, "answers": answers, "index": index, "due": dues}))
             bins.append(str(path))
         given = ["--last", bins[0]] if args is None else args
         done = subprocess.run(
@@ -128,6 +145,36 @@ check("an expected note sixth fails", code == 1 and "case 1: FAIL" in said, said
 code, said, _ = run(one + [case(2, [], ["old.md"], status="open_in_0.2.6")], good, good)
 check("a case with nothing expected is not measured", code == 0 and
       "case 2: not measured (open_in_0.2.6)" in said, said)
+
+stale = [due_case(1, [], ["old.md"], required_for="0.2.6")]
+nothing = {"7": []}
+code, said, _ = run(stale, good, good, due=(nothing, {"7": listed(left_open=["old.md"])}))
+check("a due case fails on a note listed as left open",
+      code == 1 and "case 1: FAIL, blocks (last release: pass" in said, said)
+code, said, _ = run(stale, good, good, due=(nothing, {"7": listed(["new.md"], ["new.md"])}))
+check("it passes when the note is not listed", code == 0 and "case 1: pass" in said, said)
+others = [f"n{i}.md" for i in range(20)]
+code, said, _ = run(stale, good, good, due=(nothing, {"7": listed(others[:19] + ["old.md"])}))
+check("a note twentieth in the review list is seen", code == 1 and "case 1: FAIL" in said, said)
+code, said, _ = run(stale, good, good, due=(nothing, {"7": listed(others + ["old.md"])}))
+check("a note after the twentieth is not", code == 0, said)
+code, said, _ = run(stale, good, good, due=({"7": [hit("old.md")]}, {"7": listed()}))
+check("the last release's array is read too", "(last release: fail" in said, said)
+wanted = [due_case(1, ["new.md"])]
+for where, rows in (("left open", listed(left_open=["new.md"])), ("due", listed(["new.md"]))):
+    code, said, _ = run(wanted, good, good, due=(nothing, {"7": rows}))
+    check(f"an expected note listed as {where} passes", "case 1: pass" in said, said)
+code, said, _ = run(wanted, good, good, due=(nothing, {"7": listed()}))
+check("an expected note due does not list fails", "case 1: fail" in said, said)
+code, said, _ = run([due_case(1, [], ["old.md"], within=None)], good, good,
+                    due=({"14": []}, {"14": listed()}))
+check("a call that named no window gets the tool's 14 days", code == 0 and "case 1: pass" in said,
+      said)
+code, said, _ = run(one + [due_case(2, [])], good, good)
+check("a due case naming no note is not measured", "case 2: not measured" in said, said)
+code, said, _ = run(stale, good, good, due=(nothing, None))
+check("a failing due prints no note path", code != 0 and "due failed (1)" in said and
+      "secret-note" not in said, said)
 
 for name, cases, why in (
         ("no cases", [], "no case can be measured"),
