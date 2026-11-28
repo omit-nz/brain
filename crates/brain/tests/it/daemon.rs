@@ -239,11 +239,14 @@ fn the_watcher_does_not_walk_a_linked_folder() {
         started.elapsed()
     );
     assert_eq!(notes(&h), 0);
+    // The link was made just before the watch, and a system may report that after the first pass.
+    std::thread::sleep(Duration::from_secs(3));
+    let settled = d.passes();
     fs::write(elsewhere.path().join("new.md"), "written through the link").unwrap();
     std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(d.passes(), 1, "{}", d.stderr());
+    assert_eq!(d.passes(), settled, "{}", d.stderr());
     h.put("a.md", &note_with_id(1, "a note in the vault"));
-    d.wait_for_passes(2);
+    d.wait_for_passes(settled + 1);
 }
 
 #[test]
