@@ -1035,7 +1035,8 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source + Clone) -> anyh
         service::HOW_TO_INSTALL
     );
     looking();
-    let newer = update::newer(|| source.clone(), &current, version)?;
+    let trust = update::release_trust();
+    let newer = update::newer(|| source.clone(), &trust, &current, version)?;
     let installed = newer.unwrap_or_else(|| version.to_string());
     if installed == version {
         println!("brain {version} is the newest release.");
