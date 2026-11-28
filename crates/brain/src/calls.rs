@@ -2,6 +2,7 @@
 //! came back. No reply is kept, nor the words of a note being written. The notes a reply named are
 //! the call's sources, so a note that is removed takes the calls that named it with it.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -16,7 +17,6 @@ use serde::Serializer;
 use serde_json::{Value, json};
 
 use crate::import::Archive;
-use crate::room;
 
 /// The name a tool call's run goes under, among the hooks' and the memory passes'.
 const RUN: &str = "mcp";
@@ -44,26 +44,6 @@ pub fn counted_if_given<S: Serializer>(text: &Option<String>, s: S) -> Result<S:
     }
 }
 
-/// A name is kept as given; what `check` says is none may be anything, a note's words among them.
-fn name_if<S: Serializer>(
-    name: &Option<String>,
-    check: fn(&str) -> anyhow::Result<()>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    match name {
-        Some(text) if check(text).is_ok() => s.serialize_some(text),
-        other => counted_if_given(other, s),
-    }
-}
-
-pub fn room_name<S: Serializer>(name: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
-    name_if(name, room::check_room, s)
-}
-
-pub fn person_name<S: Serializer>(name: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
-    name_if(name, room::check_name, s)
-}
-
 /// Records one call and the reply it got, returning the writer when it is still at work. What
 /// cannot be written is said and never changes the reply.
 pub fn record(
@@ -74,13 +54,11 @@ pub fn record(
     reply: &str,
     failed: bool,
 ) -> Option<JoinHandle<()>> {
-    for value in args
-        .as_object_mut()
-        .into_iter()
-        .flat_map(|a| a.values_mut())
-    {
+    for (key, value) in args.as_object_mut().into_iter().flatten() {
+        // A refused room or name may be anything, a note's words among them.
+        let refused = failed && matches!(key.as_str(), "room" | "as");
         if let Value::String(text) = value
-            && text.chars().count() > LONGEST
+            && (refused || text.chars().count() > LONGEST)
         {
             *value = count(text).into();
         }
@@ -115,12 +93,13 @@ pub fn record(
 /// The notes and posts a reply named, as a purge knows them. A note's own text is escaped, so only
 /// brain's own elements read like this.
 fn named(reply: &str) -> Vec<String> {
-    ["<note id=\"", "<post id=\""]
+    // A set: one reply can name one note twice, as due and as left open.
+    let ids: BTreeSet<uuid::Uuid> = ["<note id=\"", "<post id=\""]
         .into_iter()
         .flat_map(|tag| reply.split(tag).skip(1))
-        .filter_map(|rest| rest.get(..36)?.parse::<uuid::Uuid>().ok())
-        .map(|id| format!("note:{id}"))
-        .collect()
+        .filter_map(|rest| rest.get(..36)?.parse().ok())
+        .collect();
+    ids.iter().map(|id| format!("note:{id}")).collect()
 }
 
 /// The last `n` tool calls recorded, newest first, each saying which of its notes are archived.

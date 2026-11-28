@@ -10,15 +10,15 @@ step can be read and replayed later on the same machine.
 - The same file holds a run for each call of a tool an AI tool makes through `brain mcp`: the
   tool, the door it came by, when it was answered, what it asked, how long the reply was, whether
   it failed, and the ids of the notes the reply named. No reply is kept. A capture, a correction,
-  a room post, their titles, the note a correction names and a room or session name that brain
-  would refuse as one are kept as their length, and so is anything over 2,000 characters. A question is kept as asked, so it holds whatever words were put
+  a room post, their titles, the note a correction names and the room and session names of a call
+  that failed are kept as their length, and so is anything over 2,000 characters. A question is kept as asked, so it holds whatever words were put
   in it. A call refused before it reaches its tool is not recorded, nor is one brain fails inside,
   and one can be missed when the store stays busy or brain is ended. `brain calls` reads them
   back, and they age out and are purged as the other runs are.
 - The same file holds a run for each pass of `brain memory follow` that changed something, with the
   full text of each memory it copied or updated.
-- When a note is removed, or stops being shared, the runs and verdicts holding its text are purged
-  at the next index pass, labelled verdicts too. That is tried once: what a pass that was cut short
+- When a note is removed, or stops being shared, the runs and verdicts holding its text, and the
+  tool calls that named it, are purged at the next index pass, labelled verdicts too. That is tried once: what a pass that was cut short
   or a busy store misses ages out with the rest.
 - A followed memory that `brain memory follow` archived is set aside, not removed: archiving purges
   nothing. brain tracks the file it would bring back, the latest one it archived for that project

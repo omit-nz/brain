@@ -361,15 +361,23 @@ fn a_name_that_is_none_is_kept_as_its_length() {
     }
     let (said, err) = m.text("room_new", json!({"room": "Marmot words", "as": "me"}));
     assert!(err, "{said}");
+    // Words that would pass as a name, in a call refused for something else.
+    let refused = json!({"room": "Not A Room", "as": "the stoat cannot pay", "text": "t"});
+    let (said, err) = m.text("room_post", refused);
+    assert!(err, "{said}");
     drop(m);
     let held = calls(&h);
     assert_eq!(
         held[0]["args"],
-        json!({"room": "12 characters", "as": "me"})
+        json!({"room": "10 characters", "as": "20 characters", "text": "1 characters", "title": null})
     );
-    assert_eq!(held[2]["args"]["room"], "24 characters");
+    assert_eq!(
+        held[1]["args"],
+        json!({"room": "12 characters", "as": "2 characters"})
+    );
+    assert_eq!(held[3]["args"]["room"], "24 characters");
     let kept = kept(&h);
-    for words in ["Ferret", "gibbon", "Marmot"] {
+    for words in ["Ferret", "gibbon", "Marmot", "stoat"] {
         assert!(!kept.contains(words), "{words} was kept");
     }
 }
@@ -398,4 +406,16 @@ fn a_note_listed_as_left_open_takes_its_calls_with_it() {
     fs::remove_file(h.vault.path().join("open.md")).unwrap();
     h.run(&["index"]);
     assert_eq!(calls(&h), Vec::<Value>::new());
+}
+
+#[test]
+fn a_note_named_twice_in_one_reply_is_one_note() {
+    let today = SystemClock.today();
+    let h = indexed(&[(
+        "open.md",
+        &format!("---\nid: {ID}\nowner: robin\ndate: {today}\nreview: {today}\n---\n## Open\n"),
+    )]);
+    let (said, _) = Mcp::start(&h).text("due", json!({}));
+    assert_eq!(said.matches(ID).count(), 2, "{said}");
+    assert_eq!(calls(&h)[0]["notes"], json!([ID]));
 }

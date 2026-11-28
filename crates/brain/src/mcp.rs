@@ -413,7 +413,6 @@ struct DueArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct RoomPostArgs {
     /// The room: squads unless given.
-    #[serde(serialize_with = "calls::room_name")]
     room: Option<String>,
     /// The message.
     #[serde(serialize_with = "calls::counted")]
@@ -422,17 +421,16 @@ struct RoomPostArgs {
     #[serde(serialize_with = "calls::counted_if_given")]
     title: Option<String>,
     /// Who is posting, when this session posts under a name of its own.
-    #[serde(rename = "as", serialize_with = "calls::person_name")]
+    #[serde(rename = "as")]
     author: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct RoomNewArgs {
     /// The room: squads unless given.
-    #[serde(serialize_with = "calls::room_name")]
     room: Option<String>,
     /// Who is reading, when this session reads under a name of its own.
-    #[serde(rename = "as", serialize_with = "calls::person_name")]
+    #[serde(rename = "as")]
     reader: Option<String>,
 }
 

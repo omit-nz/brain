@@ -136,7 +136,8 @@ enum Command {
         #[command(subcommand)]
         action: MemoryAction,
     },
-    /// Your kept notes whose review has come, oldest first.
+    /// Your kept notes whose review has come, oldest first, then recent ones with something left
+    /// open. `--json` prints `{due, open, open_more, open_unread}`.
     Due {
         /// Also list notes due within this many days.
         #[arg(long, default_value_t = 14)]
