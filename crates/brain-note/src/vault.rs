@@ -72,6 +72,11 @@ impl Layout {
             Place::Kept
         }
     }
+
+    /// Whether `rel` is a copy of an AI tool's own memory: kept, but not the person's writing.
+    pub fn is_memory(&self, rel: &Path) -> bool {
+        under(rel, &self.memory)
+    }
 }
 
 /// Whether `rel` is `folder` or inside it, comparing each component without case.

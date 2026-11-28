@@ -41,7 +41,7 @@ fn built(notes: &[(&str, String)]) -> Home {
 fn recent_open_notes_are_listed_with_their_day() {
     let h = built(&[
         ("open.md", note(1, OPEN)),
-        ("waiting.md", note(13, "### Still waiting on the bank\n\nx")),
+        ("waiting.md", note(14, "### Still waiting on the bank\n\nx")),
         ("old.md", note(15, OPEN)),
         ("undated.md", "---\nowner: robin\n---\n## Open\n".into()),
         ("closed.md", note(1, "## Done\n\nopen the door, then wait")),
@@ -61,7 +61,25 @@ fn recent_open_notes_are_listed_with_their_day() {
         "{text}"
     );
     assert!(
-        listed[1].starts_with(&days_ago(13)) && listed[1].contains("waiting.md"),
+        listed[1].starts_with(&days_ago(14)) && listed[1].contains("waiting.md"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_heading_inside_a_code_block_is_not_one() {
+    let h = built(&[
+        ("tildes.md", note(1, "~~~\n## Open\n~~~")),
+        ("mixed.md", note(1, "```\n~~~\n## Open\n```")),
+        ("longer.md", note(1, "````\n```\n## Open\n````")),
+        ("info.md", note(1, "```\n```sh\n## Open\n```")),
+        ("inline.md", note(1, "```x``` is the command\n\n## Open")),
+        ("after.md", note(1, "~~~sh\nls\n~~~~\n## Open")),
+    ]);
+    let text = due(&h);
+    assert_eq!(text.matches("<note ").count(), 2, "{text}");
+    assert!(
+        text.contains("inline.md") && text.contains("after.md"),
         "{text}"
     );
 }
@@ -112,8 +130,18 @@ fn only_the_persons_own_kept_notes_are_listed() {
         ("theirs.md", note(1, OPEN).replace("robin", "sam")),
         ("private/mine.md", note(1, OPEN)),
         ("0-inbox/said.md", note(1, OPEN)),
+        ("Working-Memory/-proj/copy.md", note(1, OPEN)),
     ]);
     assert_eq!(due(&h), "Nothing of theirs is due.");
+}
+
+/// A vault import marks nearly every note private to the company, and they are still the
+/// person's own to hear about.
+#[test]
+fn a_note_the_company_may_not_see_is_still_the_persons_own() {
+    let text = note(1, OPEN).replace("owner: robin\n", "owner: robin\nvisibility: private\n");
+    let h = built(&[("kept.md", text)]);
+    assert!(due(&h).contains("kept.md"));
 }
 
 #[test]
@@ -159,6 +187,24 @@ fn a_full_review_queue_leaves_room_for_the_open_ones_inside_the_budget() {
     assert!(text.contains(HEADING), "{text}");
     assert!(text.contains("o1.md"), "{text}");
     assert!(text.contains("d0.md"), "{text}");
+}
+
+#[test]
+fn the_command_counts_the_open_notes_it_leaves_out() {
+    let notes: Vec<(String, String)> = (1..=7)
+        .map(|n| (format!("n{n}.md"), note(n, OPEN)))
+        .collect();
+    let refs: Vec<(&str, &str)> = notes
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let h = indexed(&refs);
+    let said = h.run(&["due"]);
+    assert!(said.contains("n5.md") && !said.contains("n6.md"), "{said}");
+    assert!(said.ends_with("\n2 more not listed.\n"), "{said}");
+    let out = h.json(&["due", "--json"]);
+    assert_eq!(out["open"].as_array().unwrap().len(), 5, "{out}");
+    assert_eq!(out["open_more"], 2, "{out}");
 }
 
 #[test]
