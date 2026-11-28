@@ -8,7 +8,10 @@ use brain_platform::fs::{create_dir_private, ensure_private_file};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 /// The index's migrations in order; a database's schema version is how many have run.
-pub const INDEX_MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_notes.sql")];
+pub const INDEX_MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_notes.sql"),
+    include_str!("../migrations/0002_dates.sql"),
+];
 
 /// Opens the database at `path`, making it owner-only whether it is new or not, and brings its
 /// schema up to date with `migrations`. SQLite creates the WAL and shared-memory files with the

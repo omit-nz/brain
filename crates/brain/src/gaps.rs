@@ -44,6 +44,7 @@ pub fn recheck(
             kinds: None,
             scope: Scope::Mine,
             rerank: embed::runtime().is_ok(),
+            today: clock.today(),
         };
         if !is_gap(&index.search(&q, provider)?) {
             activity.fill_gap(gap.id, clock.now())?;

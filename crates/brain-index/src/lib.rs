@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod db;
 pub mod embed;
+mod recent;
 mod reindex;
 mod search;
 

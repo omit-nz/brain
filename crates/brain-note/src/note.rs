@@ -5,6 +5,7 @@ use brain_platform::fs::{Privacy, replace_unchanged};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::dates::candidates;
 use crate::disclosure::{Disclosure, Place, disclosure};
 use crate::frontmatter::{FmError, Frontmatter, Split, Value, text_of};
 use crate::links::wikilinks;
@@ -53,6 +54,12 @@ pub struct Note {
     pub disclosure: Disclosure,
     pub body: String,
     pub links: Vec<String>,
+    /// When the note says it was written, the candidates in the order they are tried.
+    pub dates: Vec<jiff::civil::Date>,
+    /// The note this one says it corrects, as written.
+    pub corrects: Option<String>,
+    /// What this one says it supersedes, as written, one name to a line.
+    pub supersedes: Option<String>,
     pub hash: [u8; 32],
 }
 
@@ -88,9 +95,21 @@ impl Note {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
+        let dates = candidates(
+            get("date").or_else(|| get("created")).as_deref(),
+            &stem,
+            split.body,
+        );
+        let supersedes = match fm.and_then(|f| f.get("supersedes")) {
+            Some(Value::List(v)) => Some(v.join("\n")),
+            other => text_of(other),
+        };
         Note {
             id: get("id").and_then(|s| Uuid::parse_str(&s).ok()),
             key: rel_key(rel),
+            dates,
+            corrects: get("corrects"),
+            supersedes,
             title: get("title").or(heading).unwrap_or(stem),
             tags,
             kind: Kind::from_value(get("kind")),

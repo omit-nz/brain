@@ -684,6 +684,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
             Scope::Mine
         },
         rerank: embed::runtime().is_ok(),
+        today: clock.today(),
     };
     let started = std::time::Instant::now();
     let found = idx.search(&q, provider.as_deref())?;
@@ -711,7 +712,9 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                     "disclosure": h.disclosure.as_str(),
                     "score": h.score,
                     "snippet": h.snippet,
-                    "modified": h.modified.map(|d| d.to_string()),
+                    "said": h.said.map(|d| d.to_string()),
+                    "file_changed": h.modified.map(|d| d.to_string()),
+                    "overtaken_by": h.overtaken_by,
                     "source_newer": newer.is_some(),
                 })
             })
@@ -737,14 +740,20 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                 )
             })
             .unwrap_or_default();
+        let said = h.said.map(|d| format!(", said {d}")).unwrap_or_default();
         let changed = h
             .modified
             .map(|d| format!(", changed {d}"))
             .unwrap_or_default();
+        let overtaken = h
+            .overtaken_by
+            .as_ref()
+            .map(|by| format!("\n    overtaken by {by}"))
+            .unwrap_or_default();
         println!(
             "{}",
             terminal(&format!(
-                "{}  ({}{changed})\n    {}{stale}",
+                "{}  ({}{said}{changed})\n    {}{overtaken}{stale}",
                 h.title, h.path, h.snippet
             ))
         );

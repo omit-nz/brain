@@ -92,7 +92,7 @@ fn racing_openers_share_one_migrated_index() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "1");
+    assert_eq!(v, "2");
 }
 
 #[test]

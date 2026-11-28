@@ -70,7 +70,11 @@ pub fn searched(store: &Path, clock: &dyn Clock, door: Door, query: &str, found:
             let area = gaps::area(&found.hits);
             a.log_gap(clock.now(), door, query, area.as_deref())?;
             a.count(today, Event::GapLogged, Some(door))
-        } else if found.hits.iter().any(|h| h.place == Place::Kept) {
+        } else if found
+            .hits
+            .iter()
+            .any(|h| h.place == Place::Kept && !h.added)
+        {
             a.count(today, Event::AnswerKept, Some(door))
         } else {
             Ok(())

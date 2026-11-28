@@ -1,6 +1,7 @@
 mod activity;
 mod edges;
 mod embed;
+mod latest;
 mod search;
 
 use std::fs;
@@ -521,7 +522,7 @@ fn a_newer_schema_is_refused() {
         .unwrap();
     let err = format!("{:#}", Index::open(&f.db()).err().unwrap());
     assert!(
-        err.contains("schema version 99") && err.contains("brain's 1"),
+        err.contains("schema version 99") && err.contains("brain's 2"),
         "{err}"
     );
 }
@@ -579,6 +580,7 @@ fn a_note_waiting_for_its_id_has_no_change_date() {
         kinds: None,
         scope: brain_index::Scope::Mine,
         rerank: false,
+        today: jiff::civil::date(2026, 11, 28),
     };
     idx.reindex_settled(&f.vault(), now - hour, now + hour)
         .unwrap();
