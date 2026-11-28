@@ -164,6 +164,8 @@ mod tests {
             "most recent change to the plan",
             "the latest watering decisions",
             "any latest updates?",
+            // The third word after is the furthest that counts.
+            "latest watering rota change",
         ] {
             assert!(latest(yes).is_some(), "{yes}");
         }
@@ -172,6 +174,8 @@ mod tests {
             "how does the current vent setup work",
             "current decision on watering",
             "most recent version of the plan",
+            "latest watering and planting decision",
+            "a recent decision on watering",
             "latest watering and planting direction decision",
             "decision on the latest model",
         ] {
