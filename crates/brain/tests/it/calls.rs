@@ -384,3 +384,18 @@ fn the_calls_are_refused_without_an_index() {
     h.brain().args(["calls"]).assert().failure();
     assert!(!index.exists());
 }
+
+/// A note `due` names only as left open is a source of that call too.
+#[test]
+fn a_note_listed_as_left_open_takes_its_calls_with_it() {
+    let today = SystemClock.today();
+    let h = indexed(&[(
+        "open.md",
+        &format!("---\nid: {ID}\nowner: robin\ndate: {today}\n---\n## Open\n"),
+    )]);
+    Mcp::start(&h).text("due", json!({}));
+    assert_eq!(calls(&h)[0]["notes"], json!([ID]));
+    fs::remove_file(h.vault.path().join("open.md")).unwrap();
+    h.run(&["index"]);
+    assert_eq!(calls(&h), Vec::<Value>::new());
+}
