@@ -7,7 +7,7 @@ pub fn prose(body: &str) -> impl Iterator<Item = &str> {
     let mut block: Option<(&str, usize)> = None;
     body.lines().filter(move |line| {
         let text = line.trim_start();
-        let indent = line.len() - text.len();
+        let indent = column_of(line, text);
         if let Some((marks, column)) = block {
             // Four or more columns in, the marks are in a list item or are themselves indented
             // code: either way the block is over where a line falls back left of them.
@@ -43,5 +43,15 @@ fn opens(line: &str) -> Option<(&str, usize)> {
     let marks = &text[..text.len() - after.len()];
     // Three backticks with another later on the line are code inside a sentence.
     (marks.len() >= 3 && !(mark == '`' && after.contains('`')))
-        .then_some((marks, line.len() - text.len()))
+        .then_some((marks, column_of(line, text)))
+}
+
+/// The column `text`, the end of `line`, starts at: a tab runs to the next fourth one.
+fn column_of(line: &str, text: &str) -> usize {
+    line[..line.len() - text.len()]
+        .chars()
+        .fold(0, |column, c| match c {
+            '\t' => (column / 4 + 1) * 4,
+            _ => column + 1,
+        })
 }

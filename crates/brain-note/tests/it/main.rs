@@ -1,5 +1,6 @@
 mod dates;
 mod gate;
+mod prose;
 mod vault;
 
 use std::fs;
