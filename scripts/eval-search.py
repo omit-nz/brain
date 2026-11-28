@@ -12,6 +12,10 @@ either release could not search with embeddings.
 A case is one JSON object a line: id, question, expect (paths, all of which must be in the top 5),
 must_not_present_as_current (paths each absent, below every expected one, or marked overtaken),
 and optionally required_for (a version it must pass in) and status.
+
+A case whose real_path.brain_calls holds a call of `due` is asked as that call, not as a search: the
+expected notes must each be among the oldest 20 due or the notes listed as left open, and no
+must_not_present_as_current note may be there.
 """
 
 import argparse
@@ -30,6 +34,8 @@ import urllib.request
 
 TOP = 5
 ASKED = 10
+# As many review rows as the `due` tool's reply lists; `due --json` prints them all.
+DUE_SHOWN = 20
 HOME = pathlib.Path.home()
 
 
@@ -97,6 +103,16 @@ def me(data):
     return next((l.split('"')[1] for l in lines if l.startswith("me ")), "me")
 
 
+def due_call(case):
+    """The recorded `due` call a case is asked as, if it has one."""
+    calls = case.get("real_path", {}).get("brain_calls", [])
+    return next((c for c in calls if c.get("tool") == "due"), None)
+
+
+def measured(case):
+    return bool(case["expect"] or due_call(case) and case["must_not_present_as_current"])
+
+
 def check(cases, vault):
     """Exits on cases that would let the gate pass having measured nothing or the wrong thing."""
     ids = [case["id"] for case in cases]
@@ -104,11 +120,11 @@ def check(cases, vault):
         n, named = case["id"], case["expect"] + case["must_not_present_as_current"]
         if ids.count(n) > 1:
             sys.exit(f"case {n}: id used twice")
-        if case.get("required_for") and not case["expect"]:
+        if case.get("required_for") and not measured(case):
             sys.exit(f"case {n}: required, and expects no note")
         if not all((vault / path).is_file() for path in named):
             sys.exit(f"case {n}: names a note that is not in the vault")
-    if not any(case["expect"] for case in cases):
+    if not any(measured(case) for case in cases):
         sys.exit("no case can be measured")
 
 
@@ -122,10 +138,21 @@ def passes(case, hits):
         for path in case["must_not_present_as_current"])
 
 
+def due_passes(case, said):
+    # A release before the open list printed the review rows alone.
+    rows = {"due": said, "open": []} if isinstance(said, list) else said
+    paths = {row["path"] for row in rows["due"][:DUE_SHOWN] + rows["open"]}
+    return paths.issuperset(case["expect"]) and paths.isdisjoint(case["must_not_present_as_current"])
+
+
 def answers(binary, env, cases):
     out = {}
-    for case in cases:
-        if case["expect"]:
+    for case in filter(measured, cases):
+        if call := due_call(case):
+            within = str(call.get("within_days", 14))
+            said = run(binary, env, "due", "--within", within, "--json")
+            out[case["id"]] = due_passes(case, json.loads(said))
+        else:
             said = run(binary, env, "search", "--json", "--limit", str(ASKED), case["question"])
             out[case["id"]] = passes(case, json.loads(said[said.index("{"):])["hits"])
     return out
@@ -174,9 +201,9 @@ def main():
         word = "pass" if passed else "FAIL, blocks" if blocks else "fail"
         print(f"case {n}: {word} (last release: {'pass' if results['last'][n] else 'fail'}"
               f"{', required' if required else ''})")
-    measured = results["candidate"]
+    tried = results["candidate"]
     print(f"{version} against {versions['last']}: "
-          f"{sum(measured.values())} of {len(measured)} measured cases pass; "
+          f"{sum(tried.values())} of {len(tried)} measured cases pass; "
           f"{'BLOCKED by ' + str(blocked) if blocked else 'not blocked'}")
     sys.exit(1 if blocked else 0)
 

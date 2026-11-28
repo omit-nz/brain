@@ -40,6 +40,12 @@ fn a_marker_inside_a_fence_does_not_count() {
 }
 
 #[test]
+fn marks_that_open_no_block_hide_nothing() {
+    let raw = "```x``` is code [unresolved]\n\n    ```\n\nthen [unverified]\n";
+    assert_eq!(facts_of(raw).markers, vec!["[unresolved]", "[unverified]"]);
+}
+
+#[test]
 fn unjudged_never_routes_to_permanent() {
     assert_eq!(route(&clean(12), None, true), Route::Inbox);
     assert_eq!(route(&clean(0), None, false), Route::Inbox);

@@ -10,6 +10,7 @@ mod hook;
 mod import;
 mod inbox;
 mod mcp;
+mod open;
 mod plugin;
 mod room;
 mod runtime;
