@@ -78,19 +78,25 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
         let id = text_of(fm.get("id"))
             .and_then(|id| Uuid::parse_str(&id).ok())
             .map(|id| id.to_string());
-        // A capture is dated the same way every time, and no import's record knows it.
-        let known = id
+        // The sources it was imported from: a note moved since was dated by its path then.
+        let keys: Vec<&str> = id
             .as_deref()
-            .is_some_and(|id| ledger.copied(&vault.root, id) || archive.names(id));
+            .map(|id| ledger.keys_of(&vault.root, id).collect())
+            .unwrap_or_default();
+        // A capture is dated the same way every time, and no import's record knows it.
+        let known = !keys.is_empty() || id.as_deref().is_some_and(|id| archive.names(id));
         let captured = date("date").and_then(|d| d.checked_add(REVIEW_DAYS.days()).ok());
         if !known && captured == Some(review) {
             out.captured += 1;
             continue;
         }
-        let would: BTreeSet<Date> = [id, Some(format!("vault/{}", rel_key(&rel)))]
+        let here = format!("vault/{}", rel_key(&rel));
+        let would: BTreeSet<Date> = id
+            .as_deref()
             .into_iter()
-            .flatten()
-            .filter_map(|seed| review.checked_sub(offset(&seed).days()).ok())
+            .chain(keys)
+            .chain([here.as_str()])
+            .filter_map(|seed| review.checked_sub(offset(seed).days()).ok())
             .collect();
         if !days.iter().any(|d| would.contains(d)) {
             out.other += 1;

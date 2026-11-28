@@ -120,11 +120,12 @@ impl Ledger {
         })
     }
 
-    /// Whether an import wrote the note `id` into `vault`.
-    fn copied(&self, vault: &Path, id: &str) -> bool {
+    /// The keys of the sources an import wrote the note `id` into `vault` from.
+    fn keys_of<'a>(&'a self, vault: &'a Path, id: &'a str) -> impl Iterator<Item = &'a str> {
         self.0
-            .values()
-            .any(|e| e.of(vault) && e.id.as_deref() == Some(id))
+            .iter()
+            .filter(move |(_, e)| e.of(vault) && e.id.as_deref() == Some(id))
+            .map(|(key, _)| key.as_str())
     }
 
     /// Records brain's own rewrite of a copy in `vault`, from bytes it had recorded.

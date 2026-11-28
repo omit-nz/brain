@@ -411,6 +411,18 @@ fn the_days_that_would_have_written_what_is_left_are_named() {
     assert!(said.contains("2026-11-25 (2 notes)"), "{said}");
 }
 
+/// The source had no id, so the date was chosen by its path then; the ledger still says which.
+#[test]
+fn a_stamped_note_moved_since_is_still_cleared() {
+    let i = stamped();
+    let from = i.h.vault.path().join("3-permanent/noid.md");
+    fs::create_dir_all(i.h.vault.path().join("private")).unwrap();
+    fs::rename(from, i.h.vault.path().join("private/moved.md")).unwrap();
+    let said = i.clear(&["--apply"]);
+    assert!(said.contains("2 review dates cleared"), "{said}");
+    assert_eq!(line(&i.copy("private/moved.md"), "review"), None);
+}
+
 #[test]
 fn a_cleared_note_leaves_the_review_queue() {
     let i = stamped();
