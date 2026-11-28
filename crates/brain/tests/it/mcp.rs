@@ -995,45 +995,61 @@ const REPLY_BUDGET: usize = 32_000;
 fn flood() -> Home {
     let h = Home::new();
     h.init();
+    // Every file comes with its id. Writing 1,444 of them back is what a slow disk once spent
+    // two minutes on, and no reply depends on who wrote them.
+    let mut ids = 0;
+    let mut put = |rel: String, fields: String, body: &str| {
+        ids += 1;
+        h.put(
+            &rel,
+            &format!("---\nid: 01950000-0000-7000-8000-{ids:012}\n{fields}---\n{body}"),
+        );
+    };
     let body = "quokka é&<> ".repeat(1_500);
     let title = "&".repeat(900);
     for n in 0..40 {
-        h.put(
-            &format!("long/n{n:02}.md"),
-            &format!("---\ntitle: {title}\ndate: 2026-01-01\n---\n{body}\n"),
+        put(
+            format!("long/n{n:02}.md"),
+            format!("title: {title}\ndate: 2026-01-01\n"),
+            &format!("{body}\n"),
         );
     }
     for n in 0..400 {
-        h.put(
-            &format!("due/d{n:03}.md"),
-            &format!("---\ntitle: {title}\nowner: robin\nreview: 2020-01-01\n---\nx\n"),
+        put(
+            format!("due/d{n:03}.md"),
+            format!("title: {title}\nowner: robin\nreview: 2020-01-01\n"),
+            "x\n",
         );
     }
     for n in 0..900 {
-        h.put(
-            &format!("rooms/room-with-a-long-name-for-listing-{n:03}/20260101T000000Z-a.md"),
+        put(
+            format!("rooms/room-with-a-long-name-for-listing-{n:03}/20260101T000000Z-a.md"),
+            String::new(),
             "hello\n",
         );
     }
     for n in 0..60 {
-        h.put(
-            &format!("rooms/squads/20260101T0000{n:02}Z-a.md"),
-            &format!("---\ntitle: {title}\nauthor: {title}\nposted: {title}\n---\n{body}\n"),
+        put(
+            format!("rooms/squads/20260101T0000{n:02}Z-a.md"),
+            format!("title: {title}\nauthor: {title}\nposted: {title}\n"),
+            &format!("{body}\n"),
         );
     }
     // Enough of these to fill a search, each path alone over a hit's share.
     let deep = "&".repeat(200);
     for n in 0..24 {
-        h.put(&format!("{deep}/{deep}/n{n}.md"), "numbat\n");
+        put(format!("{deep}/{deep}/n{n}.md"), String::new(), "numbat\n");
     }
     // Two bytes to the character, so a page counted in characters is twice the size.
     for n in 0..20 {
-        h.put(
-            &format!("rooms/accented/20260101T0000{n:02}Z-a.md"),
+        put(
+            format!("rooms/accented/20260101T0000{n:02}Z-a.md"),
+            String::new(),
             &"é".repeat(4_000),
         );
     }
-    h.run(&["index"]);
+    let indexed = h.run(&["index"]);
+    assert!(indexed.contains(" 0 ids written"), "{indexed}");
     h
 }
 
