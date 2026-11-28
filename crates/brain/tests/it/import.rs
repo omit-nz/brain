@@ -806,6 +806,54 @@ fn a_description_over_several_lines_is_copied_as_one() {
     }
 }
 
+/// What YAML does not read as the description's words is not copied as them: a comment, which
+/// could date the memory, or a list or mapping.
+#[test]
+fn only_a_descriptions_own_words_head_the_copy() {
+    let i = Import::new();
+    let shapes = [
+        ("comment-only", "\n  # reviewed 2020-01-01", "comment-only"),
+        ("comment-inline", " # reviewed 2020-01-01", "comment-inline"),
+        (
+            "comment-below",
+            " vents open\n  # checked 3 Mar 2019",
+            "vents open",
+        ),
+        ("comment-block", " | # keep\n  vents open", "vents open"),
+        (
+            "hash-in-block",
+            " |\n  # a heading\n  vents",
+            "# a heading vents",
+        ),
+        (
+            "hash-in-quotes",
+            " \"vents\n  # at noon\"",
+            "vents # at noon",
+        ),
+        ("mapping", "\n  short: vents\n  long: noon", "mapping"),
+        ("list", "\n  - vents\n  - noon", "list"),
+        ("flow-list", " [vents, noon]", "flow-list"),
+        ("flow-map", " {a: b}", "flow-map"),
+        ("bracketed", " [draft] vents", "[draft] vents"),
+    ];
+    for (name, value, _) in shapes {
+        fs::write(
+            i.mem.path().join(format!("omit/memory/{name}.md")),
+            format!("---\nname: {name}\ndescription:{value}\ntype: project\n---\nown words\n"),
+        )
+        .unwrap();
+    }
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    for (name, _, head) in shapes {
+        let copy = i.copy(&format!("working-memory/omit/{name}.md"));
+        assert!(
+            copy.ends_with(&format!("---\n{head}\n\nown words\n")),
+            "{name}: {copy}"
+        );
+    }
+}
+
 /// A copy's date is read from its first two lines, as a line about the memory and then the
 /// memory's own first. One with no description must not offer its second line as its first.
 #[test]
