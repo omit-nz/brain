@@ -27,6 +27,25 @@ impl Index {
         })
     }
 
+    /// Refuses to answer for `vault` from another vault's notes. An index that names no vault yet,
+    /// as one from an older release does, answers until its next reindex.
+    pub fn check(&self, vault: &Path) -> anyhow::Result<()> {
+        let held: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'vault'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let vault = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+        match held {
+            Some(held) if Path::new(&held) != vault => anyhow::bail!(
+                "brain's index still holds {held}; it is being rebuilt for {} (or run `brain index`)",
+                vault.display()
+            ),
+            _ => Ok(()),
+        }
+    }
+
     pub fn note_count(&self) -> anyhow::Result<usize> {
         let n: i64 = self
             .conn

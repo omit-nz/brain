@@ -7,7 +7,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::SystemTime;
 
+use brain::fence::{attrs, escape, fence_ref};
 use brain::update;
 use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
@@ -28,6 +30,7 @@ use serde::Deserialize;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::daemon::writer_lock;
+use crate::import::{self, Ledger};
 use crate::out::terminal;
 use crate::room::{self, Post};
 use crate::usage;
@@ -75,38 +78,6 @@ const PAGE_CHARS: usize = 40_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
 
-/// Bidi embeddings, overrides and isolates, which reorder what a reader sees, and the tag block,
-/// which spells hidden ASCII. Joiners stay: emoji and several scripts need them.
-fn hidden(c: char) -> bool {
-    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{E0000}'..='\u{E007F}')
-}
-
-/// `&`, `<`, `>` and `"` as entities, after control and hidden characters are stripped.
-fn escape(text: &str) -> String {
-    terminal(text)
-        .replace(hidden, "")
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn attrs(id: Option<uuid::Uuid>, path: &str, title: &str, kind: Option<Kind>) -> String {
-    let mut a = String::new();
-    if let Some(id) = id {
-        a.push_str(&format!(" id=\"{id}\""));
-    }
-    a.push_str(&format!(
-        " path=\"{}\" title=\"{}\"",
-        escape(path),
-        escape(title)
-    ));
-    if let Some(k) = kind {
-        a.push_str(&format!(" kind=\"{}\"", k.as_str()));
-    }
-    a
-}
-
 /// `body` cut at 4,000 characters.
 fn cut(body: &str) -> String {
     let body = body.trim_end();
@@ -117,12 +88,15 @@ fn cut(body: &str) -> String {
 }
 
 /// A hit with its body, cut at 4,000 characters, as data the AI cannot mistake for instructions.
-pub fn fence(hit: &Hit) -> String {
-    format!(
-        "<note{}>{}</note>",
-        attrs(hit.note_uuid, &hit.path, &hit.title, Some(hit.kind)),
-        escape(&cut(&hit.body))
-    )
+pub fn fence(hit: &Hit, source_newer: bool) -> String {
+    let mut attrs = attrs(hit.note_uuid, &hit.path, &hit.title, Some(hit.kind));
+    if let Some(day) = hit.modified {
+        attrs.push_str(&format!(" modified=\"{day}\""));
+    }
+    if source_newer {
+        attrs.push_str(" source_newer=\"true\"");
+    }
+    format!("<note{attrs}>{}</note>", escape(&cut(&hit.body)))
 }
 
 /// A room post, fenced and escaped as a note is; one that cannot be read is named with why.
@@ -145,18 +119,18 @@ pub fn fence_post(p: &Post) -> String {
     }
 }
 
-/// A note named without its body.
-pub fn fence_ref(id: Option<uuid::Uuid>, path: &str, title: &str, kind: Option<Kind>) -> String {
-    format!("<note{} />", attrs(id, path, title, kind))
-}
+/// The import ledger as last read, with the file's time and size then. A server searches again and
+/// again, and the ledger holds a record for every copy.
+type Read = (SystemTime, u64, Arc<Ledger>);
 
 struct State {
+    ledger: Mutex<Option<Read>>,
     index: Mutex<Index>,
     provider: OnceLock<Option<Box<dyn EmbeddingProvider>>>,
-    vault: Vault,
-    me: String,
-    /// Who posts and reads rooms when a call names no one: `--as`, else `me`.
-    reader: String,
+    /// The config as it is now is read for each call: an AI app stays open across a `brain init`.
+    dirs: Dirs,
+    /// Who posts and reads rooms when a call names no one, over the config's name.
+    name: Option<String>,
     data: PathBuf,
     lock: PathBuf,
     activity: PathBuf,
@@ -165,6 +139,35 @@ struct State {
 }
 
 impl State {
+    /// The vault and the owner's name, as configured now.
+    fn current(&self) -> anyhow::Result<(Vault, String)> {
+        let config = Config::load(&self.dirs)?;
+        Ok((Vault::open(&config.vault)?, config.me))
+    }
+
+    /// The ledger, read again only when its file has changed. `None` while it cannot be read,
+    /// which flags nothing.
+    fn ledger(&self) -> Option<Arc<Ledger>> {
+        let file = std::fs::metadata(self.dirs.data.join(import::LEDGER)).ok()?;
+        let (at, size) = (file.modified().ok()?, file.len());
+        let mut held = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((was_at, was_size, ledger)) = &*held
+            && (*was_at, *was_size) == (at, size)
+        {
+            return Some(ledger.clone());
+        }
+        let ledger = Arc::new(Ledger::load(&self.dirs).ok()?);
+        *held = Some((at, size, ledger.clone()));
+        Some(ledger)
+    }
+
+    /// The index to answer from: refused while it holds another vault's notes.
+    fn index_of(&self, vault: &Vault) -> anyhow::Result<MutexGuard<'_, Index>> {
+        let index = self.index();
+        index.check(&vault.root)?;
+        Ok(index)
+    }
+
     /// The index, even after a tool panicked holding it: SQLite keeps no half-done state in the
     /// connection, so one bad call must not end every later one.
     fn index(&self) -> MutexGuard<'_, Index> {
@@ -202,7 +205,8 @@ impl State {
             rerank: embed::runtime().is_ok(),
         };
         let started = std::time::Instant::now();
-        let found = self.index().search(&q, provider.as_deref())?;
+        let (vault, _) = self.current()?;
+        let found = self.index_of(&vault)?.search(&q, provider.as_deref())?;
         let ms = started.elapsed().as_millis();
         usage::searched(&self.activity, &*self.clock, self.door, query, &found, ms);
         let mut out = Vec::new();
@@ -220,7 +224,11 @@ impl State {
                 Scope::SharedOnly => "Notes that are not private:".into(),
             });
         }
-        out.extend(found.hits.iter().map(fence));
+        let ledger = self.ledger();
+        out.extend(found.hits.iter().map(|hit| {
+            let newer = ledger.as_ref().and_then(|l| l.moved_on(&vault, &hit.path));
+            fence(hit, newer.is_some())
+        }));
         Ok(out.join("\n"))
     }
 }
@@ -351,7 +359,8 @@ impl Server {
                 kind,
                 corrects: None,
             };
-            let w = capture::write(&s.vault, &s.me, s.clock.today(), &c)?;
+            let (vault, me) = s.current()?;
+            let w = capture::write(&vault, &me, s.clock.today(), &c)?;
             usage::count(
                 &s.activity,
                 s.clock.today(),
@@ -371,10 +380,11 @@ impl Server {
     )]
     async fn correct(&self, Parameters(a): Parameters<CorrectArgs>) -> Result<String, String> {
         self.blocking(move |s| {
+            let (vault, me) = s.current()?;
             let w = capture::correct(
-                &s.vault,
-                &s.index(),
-                &s.me,
+                &vault,
+                &*s.index_of(&vault)?,
+                &me,
                 s.clock.today(),
                 &a.target,
                 &a.correction,
@@ -398,7 +408,8 @@ impl Server {
         self.blocking(move |s| {
             let within = i64::from(a.within_days.unwrap_or(14).min(365));
             let by = s.clock.today().checked_add(within.days())?;
-            let due = s.index().due(&s.me, by)?;
+            let (vault, me) = s.current()?;
+            let due = s.index_of(&vault)?.due(&me, by)?;
             if due.is_empty() {
                 return Ok("Nothing of theirs is due.".into());
             }
@@ -420,10 +431,14 @@ impl Server {
     )]
     async fn room_post(&self, Parameters(a): Parameters<RoomPostArgs>) -> Result<String, String> {
         self.blocking(move |s| {
+            let (vault, me) = s.current()?;
             let name = a.room.as_deref().unwrap_or(room::DEFAULT_ROOM);
-            let author = a.author.as_deref().unwrap_or(&s.reader);
+            let author = a
+                .author
+                .as_deref()
+                .unwrap_or_else(|| s.name.as_deref().unwrap_or(&me));
             let p = room::post(
-                &s.vault,
+                &vault,
                 name,
                 author,
                 s.clock.now(),
@@ -441,9 +456,13 @@ impl Server {
     #[tool(description = "The room's posts this session has not been shown yet, oldest first.")]
     async fn room_new(&self, Parameters(a): Parameters<RoomNewArgs>) -> Result<String, String> {
         self.blocking(move |s| {
+            let (vault, me) = s.current()?;
             let name = a.room.as_deref().unwrap_or(room::DEFAULT_ROOM);
-            let reader = a.reader.as_deref().unwrap_or(&s.reader);
-            room::read_new(&s.vault, &s.data, name, reader, |page| {
+            let reader = a
+                .reader
+                .as_deref()
+                .unwrap_or_else(|| s.name.as_deref().unwrap_or(&me));
+            room::read_new(&vault, &s.data, name, reader, |page| {
                 if page.posts.is_empty() {
                     return (format!("Nothing new in {}.", escape(name)), 0);
                 }
@@ -471,7 +490,8 @@ impl Server {
     #[tool(description = "The rooms, with how many posts each holds and when the newest came.")]
     async fn room_list(&self, Parameters(_): Parameters<RoomListArgs>) -> Result<String, String> {
         self.blocking(move |s| {
-            let rooms = room::list(&s.vault)?;
+            let (vault, _) = s.current()?;
+            let rooms = room::list(&vault)?;
             if rooms.is_empty() {
                 return Ok("No rooms yet; room_post makes one.".into());
             }
@@ -514,13 +534,19 @@ pub fn run(
     if let Some(n) = &name {
         room::check_name(n)?;
     }
-    let config = Config::load(dirs)?;
+    // Refused at the start, not at the first call, when there is no vault to serve.
+    Vault::open(&Config::load(dirs)?.vault)?;
     let state = State {
+        ledger: Mutex::new(None),
         index: Mutex::new(Index::open(&dirs.data.join("index.db"))?),
         provider: OnceLock::new(),
-        vault: Vault::open(&config.vault)?,
-        reader: name.unwrap_or_else(|| config.me.clone()),
-        me: config.me,
+        dirs: Dirs {
+            config: dirs.config.clone(),
+            data: dirs.data.clone(),
+            models: dirs.models.clone(),
+            bin: dirs.bin.clone(),
+        },
+        name,
         data: dirs.data.clone(),
         lock: writer_lock(dirs),
         activity: dirs.data.join("activity.db"),

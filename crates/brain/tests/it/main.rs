@@ -1,15 +1,19 @@
+mod brief;
 mod capture;
 // The doors run on macOS; their stubs are shell scripts.
 #[cfg(unix)]
 mod connect;
 mod daemon;
+mod follow;
 mod gaps;
+mod hook;
 mod import;
 mod mcp;
 mod room;
 mod service;
 mod update;
 mod usage;
+mod vault;
 
 use std::fs;
 use std::path::Path;
@@ -33,6 +37,8 @@ impl Home {
     fn brain(&self) -> Command {
         let mut c = Command::cargo_bin("brain").unwrap();
         c.env("BRAIN_HOME", self.home.path())
+            // A loaded CI runner must not turn a hook test into a timing test.
+            .env("BRAIN_TEST_HOOK_BUDGET_MS", "30000")
             .env_remove("ORT_DYLIB_PATH")
             .env_remove("LL_MODELS_DIR")
             .current_dir(self.vault.path());
@@ -436,4 +442,22 @@ fn skip_archives_never_deletes() {
     );
     let out = h.brain().args(["inbox", "skip", &id]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "a note no longer in the inbox");
+}
+
+/// Stamps `path` as last changed at `at`, and returns the date that is on this machine.
+fn set_changed(path: &std::path::Path, at: &str) -> String {
+    let at: jiff::Timestamp = at.parse().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at.into())
+        .unwrap();
+    at.to_zoned(jiff::tz::TimeZone::system()).date().to_string()
+}
+
+/// When `path` was last changed, to the second.
+fn changed_at(path: &std::path::Path) -> i64 {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    jiff::Timestamp::try_from(modified).unwrap().as_second()
 }

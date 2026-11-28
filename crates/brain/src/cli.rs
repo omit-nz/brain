@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::connect;
 use crate::daemon::{self, writer_lock};
 use crate::gaps;
-use crate::import::{self, Blocklist, Ledger, Written};
+use crate::import::{self, Archive, Blocklist, Ledger, Written};
 use crate::inbox::{self, Dest};
 use crate::mcp;
 use crate::out::terminal;
@@ -115,6 +115,15 @@ enum Command {
         /// The name this tool's sessions post and read rooms under.
         #[arg(long = "as")]
         name: Option<String>,
+        /// A memory folder whose MEMORY.md every session starts with (repeatable); the ones
+        /// named before are replaced, and kept when none is named.
+        #[arg(long = "index")]
+        indexes: Vec<PathBuf>,
+    },
+    /// Keep brain's copies of Claude Code's auto-memory in step with their sources.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
     },
     /// Your kept notes whose review has come, oldest first.
     Due {
@@ -155,6 +164,10 @@ enum Command {
     /// Stop the daemon, and keep it from starting at login.
     Stop,
     /// Check a release archive's signature against this build's release key.
+    /// What Claude Code's hooks call. `main` takes it before this parser, so that nothing here
+    /// can make a hook exit non-zero; it is listed so the parser knows every command.
+    #[command(hide = true)]
+    Hook { point: Option<String> },
     #[command(hide = true)]
     ReleaseVerify { archive: PathBuf },
     /// Print the folder an install lives in, for scripts/install.sh.
@@ -245,6 +258,16 @@ enum RoomAction {
 }
 
 #[derive(Subcommand)]
+enum MemoryAction {
+    /// Follow the auto-memory under Claude Code's projects folder, from now on.
+    Follow { projects: PathBuf },
+    /// Stop following; the copies stay.
+    Unfollow,
+    /// One pass now; the daemon makes one every minute.
+    Run,
+}
+
+#[derive(Subcommand)]
 enum UsageAction {
     /// Send the day's counts to omit (the default).
     On,
@@ -299,6 +322,13 @@ fn index(dirs: &Dirs) -> anyhow::Result<Index> {
     Index::open(&dirs.data.join("index.db"))
 }
 
+/// The index, to answer from: refused while it holds another vault's notes.
+fn reader(dirs: &Dirs, config: &Config) -> anyhow::Result<Index> {
+    let idx = index(dirs)?;
+    idx.check(&config.vault)?;
+    Ok(idx)
+}
+
 pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     let clock: Box<dyn Clock> = match cli.now {
         Some(t) => Box::new(FixedClock(t)),
@@ -307,6 +337,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     match cli.command {
         Command::Init { me, vault } => init(dirs, me, vault),
         Command::Index => reindex(dirs, &*clock),
+        Command::Hook { .. } => anyhow::bail!("`brain hook` takes no option before it"),
         Command::Daemon { from_dir } => daemon::run(dirs, clock.into(), from_dir.as_deref()),
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
@@ -334,7 +365,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             let config = Config::load(dirs)?;
             let vault = Vault::open(&config.vault)?;
             let today = clock.today();
-            let w = capture::correct(&vault, &index(dirs)?, &config.me, today, &target, &text)?;
+            let idx = reader(dirs, &config)?;
+            let w = capture::correct(&vault, &idx, &config.me, today, &target, &text)?;
             println!("{}", terminal(&w.rel));
             usage::count(
                 &usage::store(dirs),
@@ -354,6 +386,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Command::Memory { action } => memory_cmd(dirs, &*clock, action),
         Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Mcp {
             door,
@@ -369,7 +402,8 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Connect {
             tool: ConnectTool::ClaudeCode,
             name,
-        } => connect::claude_code(dirs, name.as_deref()),
+            indexes,
+        } => connect::claude_code(dirs, name.as_deref(), &indexes),
         Command::Show { target } => show(dirs, &target),
         Command::Status { json } => status(dirs, json),
         Command::Update { check, from_dir } => match from_dir {
@@ -413,6 +447,52 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::Result<()> {
+    let mut config = Config::load(dirs)?;
+    match action {
+        MemoryAction::Unfollow => {
+            config.memory.follow = None;
+            config.save(dirs)?;
+            println!("brain no longer follows your auto-memory; its copies stay");
+            return Ok(());
+        }
+        MemoryAction::Follow { projects } => {
+            // A link is stored as what it points at: the pass follows no link.
+            let found = projects.canonicalize().ok().filter(|p| p.is_dir());
+            let found = found.with_context(|| format!("{}: no such folder", projects.display()))?;
+            config.memory.follow = Some(found);
+            config.save(dirs)?;
+        }
+        MemoryAction::Run => {}
+    }
+    let Some(followed) = &config.memory.follow else {
+        anyhow::bail!("brain follows no auto-memory; run `brain memory follow <projects folder>`");
+    };
+    // A missing vault is never made again here.
+    let vault = Vault::open(&config.vault)?;
+    let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
+    let writer = Lock::try_acquire(&writer_lock(dirs))?;
+    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let done = import::sync(dirs, &vault, followed, &w, |vault| {
+        if writer.is_some() {
+            let r = index(dirs)?.reindex(vault)?;
+            daemon::forget(dirs, &r);
+        }
+        Ok(())
+    })?;
+    let mut lines = vec![done.summary()];
+    lines.extend(done.archived.iter().map(|p| format!("archived: {p}")));
+    lines.extend(done.restored.iter().map(|p| format!("restored: {p}")));
+    lines.extend(done.kept.iter().map(|p| format!("kept as it is: {p}")));
+    lines.extend(
+        done.skipped
+            .iter()
+            .map(|(k, why)| format!("skipped: {k}: {why}")),
+    );
+    println!("{}", terminal(&lines.join("\n")));
+    Ok(())
 }
 
 fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
@@ -460,17 +540,21 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             create_dir_private(&path)?;
         }
     }
-    // A second init keeps the person's usage choice; an unreadable config fails rather than
-    // quietly switching sending back on.
-    let usage = if dirs.config.join(crate::config::FILE).exists() {
-        Config::load(dirs)?.usage
+    // A second init keeps everything else the person set; an unreadable config fails rather than
+    // quietly switching usage sending back on.
+    let before = if dirs.config.join(crate::config::FILE).exists() {
+        Some(Config::load(dirs)?)
     } else {
-        Default::default()
+        None
     };
+    let (usage, session, memory) =
+        before.map_or_else(Default::default, |c| (c.usage, c.session, c.memory));
     Config {
         vault: vault.root.clone(),
         me: me.clone(),
         usage,
+        session,
+        memory,
     }
     .save(dirs)?;
     println!(
@@ -508,6 +592,7 @@ fn reindex(dirs: &Dirs, clock: &dyn Clock) -> anyhow::Result<()> {
     };
     let mut idx = index(dirs)?;
     let r = idx.reindex(&vault)?;
+    daemon::forget(dirs, &r);
     println!("{}", daemon::summary(&r));
     let provider = match embed::load() {
         Ok(provider) => {
@@ -586,8 +671,8 @@ fn list_gaps(dirs: &Dirs, clock: &dyn Clock, as_json: bool) -> anyhow::Result<()
 }
 
 fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::Result<()> {
-    Config::load(dirs)?;
-    let idx = index(dirs)?;
+    let config = Config::load(dirs)?;
+    let idx = reader(dirs, &config)?;
     let provider = embed::load().ok();
     let q = Query {
         text,
@@ -606,10 +691,18 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     usage::searched(&usage::store(dirs), clock, Door::Cli, text, &found, ms);
     let gap = is_gap(&found);
     let hits = found.hits;
+    // An unreadable ledger flags nothing: the notes are still worth showing.
+    let vault = Vault::open(&config.vault).ok();
+    let ledger = Ledger::load(dirs).ok();
+    let newer: Vec<_> = hits
+        .iter()
+        .map(|h| ledger.as_ref()?.moved_on(vault.as_ref()?, &h.path))
+        .collect();
     if s.json {
         let rows: Vec<_> = hits
             .iter()
-            .map(|h| {
+            .zip(&newer)
+            .map(|(h, newer)| {
                 json!({
                     "id": h.note_uuid.map(|u| u.to_string()),
                     "path": h.path,
@@ -618,6 +711,8 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                     "disclosure": h.disclosure.as_str(),
                     "score": h.score,
                     "snippet": h.snippet,
+                    "modified": h.modified.map(|d| d.to_string()),
+                    "source_newer": newer.is_some(),
                 })
             })
             .collect();
@@ -633,10 +728,25 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
     } else if hits.is_empty() {
         println!("nothing found");
     }
-    for h in &hits {
+    for (h, newer) in hits.iter().zip(newer) {
+        let stale = newer
+            .map(|source| {
+                format!(
+                    "\n    its source has changed since it was copied: {}",
+                    source.display()
+                )
+            })
+            .unwrap_or_default();
+        let changed = h
+            .modified
+            .map(|d| format!(", changed {d}"))
+            .unwrap_or_default();
         println!(
             "{}",
-            terminal(&format!("{}  ({})\n    {}", h.title, h.path, h.snippet))
+            terminal(&format!(
+                "{}  ({}{changed})\n    {}{stale}",
+                h.title, h.path, h.snippet
+            ))
         );
     }
     Ok(())
@@ -703,7 +813,7 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
 fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let by = clock.today().checked_add(within.days())?;
-    let due = index(dirs)?.due(&config.me, by)?;
+    let due = reader(dirs, &config)?.due(&config.me, by)?;
     if as_json {
         let rows: Vec<_> = due
             .iter()
@@ -735,7 +845,7 @@ fn show(dirs: &Dirs, target: &str) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let vault = Vault::open(&config.vault)?;
     let path = match uuid::Uuid::parse_str(target) {
-        Ok(id) => index(dirs)?
+        Ok(id) => reader(dirs, &config)?
             .path_of(&id)?
             .with_context(|| format!("no indexed note has id {id}; run `brain index`"))?,
         Err(_) => target.to_string(),
@@ -817,10 +927,49 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Resu
 
 fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
-    let s = index(dirs)?.stats()?;
+    let idx = index(dirs)?;
+    // Another vault's counts are not this one's.
+    let other = idx.check(&config.vault).err().map(|e| e.to_string());
+    let s = idx.stats()?;
     let version = env!("CARGO_PKG_VERSION");
     let runtime = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let daemon = Lock::is_held(&writer_lock(dirs));
+    // `None` for the count archived when its records cannot say.
+    let (mut behind, mut archived, mut unread) = (0, Some(0), Vec::new());
+    if let Ok(vault) = Vault::open(&config.vault) {
+        match Ledger::load(dirs) {
+            Ok(ledger) => behind = ledger.behind(&vault),
+            Err(e) => unread.push(format!("the import ledger cannot be read: {e:#}")),
+        }
+        match Archive::load(dirs) {
+            Ok(archive) => archived = Some(archive.waiting(&vault)),
+            Err(e) => {
+                archived = None;
+                unread.push(format!("the archive records cannot be read: {e:#}"));
+            }
+        }
+    }
+    if let Some(why) = other {
+        if as_json {
+            let v = json!({
+                "daemon": daemon,
+                "index": why,
+                "vault": config.vault,
+                "version": version,
+            });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else {
+            println!(
+                "{}",
+                terminal(&format!(
+                    "brain {version}, vault {}\n{why}\ndaemon: {}",
+                    config.vault.display(),
+                    if daemon { "running" } else { "not running" }
+                ))
+            );
+        }
+        return Ok(());
+    }
     if as_json {
         let v = json!({
             "daemon": daemon,
@@ -831,6 +980,8 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             "pending": s.pending,
             "skipped": s.skipped,
             "unidentified": s.unidentified,
+            "behind_source": behind,
+            "memories_archived": archived,
             "vault": config.vault,
             "version": version,
         });
@@ -852,6 +1003,13 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     for (reason, n) in &s.skipped {
         lines.push(format!("skipped, {reason}: {n}"));
     }
+    match behind {
+        0 => {}
+        1 => lines.push("1 copy is behind its source".into()),
+        n => lines.push(format!("{n} copies are behind their source")),
+    }
+    lines.extend(archived.filter(|n| *n > 0).map(import::archived_line));
+    lines.extend(unread);
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());
     }
@@ -878,7 +1036,6 @@ fn import_learning_loop(
     import::check_apart(&src, &dst)?;
     let share = import::share_folders(&src, &a.share)?;
     let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
-    let mut ledger = Ledger::load(dirs)?;
     let w = Written {
         me: &config.me,
         today,
@@ -886,6 +1043,13 @@ fn import_learning_loop(
         blocklist: blocklist.as_ref(),
         layout: &dst.layout,
     };
+    // Held from the ledger's read to its last save, so a memory pass never writes it too.
+    let _held = if a.dry_run {
+        None
+    } else {
+        Some(Lock::acquire(&dirs.data.join(import::LOCK))?)
+    };
+    let mut ledger = Ledger::load(dirs)?;
     // Held through the copy too, so a daemon started mid-import waits for it.
     let lock = if a.dry_run {
         None
@@ -938,7 +1102,10 @@ fn import_learning_loop(
         return Ok(());
     }
     let reindexed = match lock {
-        Some(_) => index(dirs).and_then(|mut ix| ix.reindex(&dst)).map(Some),
+        Some(_) => index(dirs)
+            .and_then(|mut ix| ix.reindex(&dst))
+            .inspect(|r| daemon::forget(dirs, r))
+            .map(Some),
         None => Ok(None),
     };
     import::settle(&mut ledger, &dst, &written)?;
@@ -948,6 +1115,80 @@ fn import_learning_loop(
             "brain's daemon will index them; with no daemon running, run `brain index` once the other brain command finishes\n"
         );
     }
-    println!("{}", terminal(&import::report(&dst, today).to_string()));
+    println!(
+        "{}",
+        terminal(&import::report(&dst, today, &plan.scope).to_string())
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    const README: &str = include_str!("../../../README.md");
+
+    /// Every `` `brain ...` `` in `text`, without the backticks.
+    fn spans(text: &str) -> impl Iterator<Item = &str> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| s.starts_with("brain "))
+    }
+
+    /// The command `span` names, as its path; `None` when a word where a command goes is none.
+    /// What follows a command that takes no further command is its arguments.
+    fn named(cli: &clap::Command, span: &str) -> Option<String> {
+        let mut at = cli;
+        let mut path = Vec::new();
+        for word in span.split_whitespace().skip(1) {
+            let plain = word.chars().all(|c| c.is_ascii_lowercase() || c == '-');
+            if !at.has_subcommands() || !plain || word.starts_with('-') {
+                break;
+            }
+            at = at.find_subcommand(word)?;
+            path.push(word);
+        }
+        (!path.is_empty()).then(|| path.join(" "))
+    }
+
+    /// Every command a person can run: each not hidden that takes no further command, and each
+    /// that also runs alone.
+    fn runnable(at: &clap::Command, path: &str, out: &mut Vec<String>) {
+        for sub in at.get_subcommands().filter(|s| !s.is_hide_set()) {
+            let path = format!("{path} {}", sub.get_name()).trim().to_string();
+            if !sub.has_subcommands() || !sub.is_subcommand_required_set() {
+                out.push(path.clone());
+            }
+            runnable(sub, &path, out);
+        }
+    }
+
+    #[test]
+    fn a_span_names_a_command_only_when_every_command_word_is_one() {
+        let cli = Cli::command();
+        assert_eq!(
+            named(&cli, "brain memory follow ~/x").unwrap(),
+            "memory follow"
+        );
+        assert_eq!(named(&cli, "brain init --me <you>").unwrap(), "init");
+        assert_eq!(named(&cli, "brain memory mend"), None);
+        assert_eq!(named(&cli, "brain mend"), None);
+    }
+
+    #[test]
+    fn the_readme_names_the_commands_the_cli_has() {
+        let cli = Cli::command();
+        let unknown: Vec<&str> = spans(README).filter(|s| named(&cli, s).is_none()).collect();
+        assert_eq!(unknown, Vec::<&str>::new(), "named, and not a command");
+        let (_, rest) = README.split_once("\n## Commands\n").expect("## Commands");
+        let list = rest.split_once("\n## ").map_or(rest, |(list, _)| list);
+        let listed: Vec<String> = spans(list).filter_map(|s| named(&cli, s)).collect();
+        let mut commands = Vec::new();
+        runnable(&cli, "", &mut commands);
+        commands.retain(|c| !listed.contains(c));
+        assert_eq!(commands, Vec::<String>::new(), "a command, and not listed");
+    }
 }

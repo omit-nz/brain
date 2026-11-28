@@ -757,3 +757,176 @@ fn a_quoted_memory_name_imports_as_written() {
         "{copy}"
     );
 }
+
+/// An import of a few notes into a large vault once listed the whole vault's gaps, which reads
+/// like data loss.
+#[test]
+fn an_import_reports_only_on_its_own_notes() {
+    let h = Home::new();
+    h.init();
+    h.put("elsewhere.md", "no source here, and [[nowhere-at-all]]\n");
+    h.put("target.md", "---\nsource: me\n---\nsomething\n");
+    let from = tempfile::tempdir().unwrap();
+    fs::write(
+        from.path().join("brought.md"),
+        "---\nsource: me\n---\nsee [[target]] and [[no-such-note]]\n",
+    )
+    .unwrap();
+    let out = h.run(&[
+        "import",
+        "learning-loop",
+        "--from",
+        from.path().to_str().unwrap(),
+    ]);
+    assert!(!out.contains("elsewhere.md"), "{out}");
+    assert!(!out.contains("nowhere-at-all"), "{out}");
+    assert!(!out.contains("[[target]]"), "{out}");
+    assert!(out.contains("brought.md -> [[no-such-note]]"), "{out}");
+    assert!(
+        out.contains("visibility: 0 shared, 0 listed, 1 private"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_copy_keeps_its_sources_date() {
+    let i = Import::new();
+    let note = "3-permanent/kept-idea.md";
+    let memory = i.mem.path().join("omit/memory/project_launch.md");
+    super::set_changed(&i.src.path().join(note), "2026-03-05T12:00:00Z");
+    super::set_changed(&memory, "2026-04-06T12:00:00Z");
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    let vault = i.h.vault.path();
+    assert_eq!(
+        super::changed_at(&vault.join(note)),
+        super::changed_at(&i.src.path().join(note))
+    );
+    assert_eq!(
+        super::changed_at(&vault.join("working-memory/omit/project_launch.md")),
+        super::changed_at(&memory)
+    );
+}
+
+/// A vault note and a memory imported, each about a bird of its own.
+fn imported_birds() -> (Import, std::path::PathBuf, std::path::PathBuf) {
+    let i = Import::new();
+    let note = i.src.path().join("3-permanent/heron.md");
+    let memory = i.mem.path().join("omit/memory/egret.md");
+    fs::write(&note, "the heron plan\n").unwrap();
+    fs::write(&memory, "the egret plan\n").unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    i.h.run(&["index"]);
+    (i, note, memory)
+}
+
+/// Whether the one hit for `query` is flagged, by every door.
+fn flagged(h: &Home, query: &str) -> bool {
+    let json = h.json(&["search", "--json", query]);
+    assert_eq!(json["hits"].as_array().unwrap().len(), 1, "{json}");
+    let by_json = json["hits"][0]["source_newer"] == true;
+    let said = h.run(&["search", query]);
+    assert_eq!(said.contains("source has changed"), by_json, "{said}");
+    let mut m = crate::mcp::Mcp::start(h);
+    let (text, _) = m.text("search_my_brain", serde_json::json!({ "query": query }));
+    assert_eq!(text.contains("source_newer=\"true\""), by_json, "{text}");
+    by_json
+}
+
+#[test]
+fn a_hit_whose_source_changed_says_so() {
+    let (i, note, memory) = imported_birds();
+    assert!(!flagged(&i.h, "heron"));
+    assert!(!flagged(&i.h, "egret"));
+    fs::write(&note, "the heron plan, revised\n").unwrap();
+    fs::write(&memory, "the egret plan, revised\n").unwrap();
+    assert!(flagged(&i.h, "heron"));
+    assert!(flagged(&i.h, "egret"));
+    let said = i.h.run(&["search", "egret"]);
+    let source = memory.canonicalize().unwrap();
+    assert!(said.contains(source.to_str().unwrap()), "{said}");
+}
+
+#[test]
+fn an_unchanged_or_unreadable_source_flags_nothing() {
+    let (i, note, memory) = imported_birds();
+    fs::write(&memory, [0xff, 0xfe]).unwrap();
+    fs::remove_file(&note).unwrap();
+    fs::create_dir(&note).unwrap();
+    assert!(!flagged(&i.h, "heron"), "a folder where the note was");
+}
+
+/// The old vault is deleted once its notes live in brain: a source that is gone is not news.
+#[test]
+fn a_deleted_source_flags_nothing_and_says_nothing() {
+    let (i, _, _) = imported_birds();
+    fs::remove_dir_all(i.src.path()).unwrap();
+    fs::remove_dir_all(i.mem.path()).unwrap();
+    assert!(!flagged(&i.h, "heron"));
+    assert!(!flagged(&i.h, "egret"));
+    let status = i.h.json(&["status", "--json"]);
+    assert_eq!(status["behind_source"], 0);
+    let out = i.h.brain().args(["search", "heron"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("source"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn status_counts_copies_behind_their_source() {
+    let (i, note, memory) = imported_birds();
+    assert_eq!(i.h.json(&["status", "--json"])["behind_source"], 0);
+    assert!(!i.h.run(&["status"]).contains("behind their source"));
+    fs::write(&note, "the heron plan, revised\n").unwrap();
+    fs::write(&memory, "the egret plan, revised\n").unwrap();
+    assert_eq!(i.h.json(&["status", "--json"])["behind_source"], 2);
+    let said = i.h.run(&["status"]);
+    assert!(said.contains("2 copies are behind their source"), "{said}");
+    // A copy that is no longer there is behind nothing.
+    fs::remove_file(i.h.vault.path().join("3-permanent/heron.md")).unwrap();
+    assert_eq!(i.h.json(&["status", "--json"])["behind_source"], 1);
+}
+
+/// A copy made before the ledger kept the source folder learns it when its source is read again.
+#[test]
+fn a_reimport_records_where_an_older_copy_came_from() {
+    let (i, note, memory) = imported_birds();
+    let path = i.h.home.path().join("data/import-ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for entry in ledger.as_object_mut().unwrap().values_mut() {
+        let entry = entry.as_object_mut().unwrap();
+        entry.remove("from");
+        entry.remove("vault");
+    }
+    fs::write(&path, ledger.to_string()).unwrap();
+    // The person's own words in one copy; the other is as brain wrote it.
+    let copy = i.h.vault.path().join("3-permanent/heron.md");
+    let edited = format!("{}mine too\n", fs::read_to_string(&copy).unwrap());
+    fs::write(&copy, edited).unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    i.h.run(&["index"]);
+    fs::write(&note, "the heron plan, revised\n").unwrap();
+    fs::write(&memory, "the egret plan, revised\n").unwrap();
+    assert!(flagged(&i.h, "heron"));
+    assert!(flagged(&i.h, "egret"));
+}
+
+#[test]
+fn a_long_open_search_sees_the_ledger_as_it_is_now() {
+    let (i, note, _) = imported_birds();
+    fs::write(&note, "the heron plan, revised\n").unwrap();
+    let mut m = crate::mcp::Mcp::start(&i.h);
+    let mut search = || {
+        m.text("search_my_brain", serde_json::json!({ "query": "heron" }))
+            .0
+    };
+    assert!(search().contains("source_newer"));
+    i.import(&[]);
+    assert!(!search().contains("source_newer"), "the copy was updated");
+}

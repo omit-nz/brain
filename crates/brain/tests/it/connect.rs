@@ -72,13 +72,122 @@ fn connect_registers_the_installed_brain_for_claude_code() {
             format!(
                 "mcp add --scope user brain -- {} mcp --door claude-code",
                 exe.display()
-            )
+            ),
+            "plugin marketplace remove brain".to_string(),
+            format!("plugin marketplace add {}", plugin(&h).display()),
+            "plugin install brain@brain".to_string(),
         ]
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "Claude Code can now search your brain; start a new session."
     );
+}
+
+fn plugin(h: &Home) -> PathBuf {
+    h.home.path().join("data/claude-plugin")
+}
+
+fn json(path: PathBuf) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+fn command(h: &Home, event: &str) -> String {
+    json(plugin(h).join("brain/hooks/hooks.json"))["hooks"][event][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn connect_installs_the_plugin_beside_the_mcp_server() {
+    let h = Home::new();
+    let exe = install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    // A second connect rewrites the same folder.
+    assert!(connect(&h, stub.path(), home.path()).status.success());
+    assert!(connect(&h, stub.path(), home.path()).status.success());
+    let version = env!("CARGO_PKG_VERSION");
+    let market = json(plugin(&h).join(".claude-plugin/marketplace.json"));
+    assert_eq!(market["name"], "brain");
+    assert_eq!(market["plugins"][0]["name"], "brain");
+    assert_eq!(market["plugins"][0]["source"], "./brain");
+    let manifest = json(plugin(&h).join("brain/.claude-plugin/plugin.json"));
+    assert_eq!(manifest["name"], "brain");
+    assert_eq!(manifest["version"], version);
+    for (event, point) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session-end"),
+    ] {
+        let expected = format!("'{}' hook {point} || true", exe.display());
+        assert_eq!(command(&h, event), expected);
+    }
+    let skill = fs::read_to_string(plugin(&h).join("brain/skills/brain/SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\nname: brain\n"), "{skill}");
+}
+
+#[test]
+fn a_failed_plugin_install_says_the_hooks_are_not_connected() {
+    let h = Home::new();
+    install(&h);
+    let stub = tempfile::tempdir().unwrap();
+    script(
+        &stub.path().join("claude"),
+        "case \"$1 $2\" in 'plugin install') exit 3;; esac",
+    );
+    let home = tempfile::tempdir().unwrap();
+    let out = connect(&h, stub.path(), home.path());
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("can search your brain, but the hooks are not connected"),
+        "{said}"
+    );
+}
+
+/// The macOS data folder is under `Application Support`.
+#[test]
+fn the_hook_command_runs_from_a_path_with_a_space() {
+    let h = Home {
+        home: tempfile::Builder::new()
+            .prefix("brain home ")
+            .tempdir()
+            .unwrap(),
+        vault: tempfile::tempdir().unwrap(),
+    };
+    let exe = install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    assert!(connect(&h, stub.path(), home.path()).status.success());
+    let ran = std::process::Command::new("/bin/sh")
+        .args(["-c", &command(&h, "UserPromptSubmit")])
+        .status()
+        .unwrap();
+    assert!(ran.success());
+    let argv = fs::read_to_string(h.home.path().join("argv")).unwrap();
+    assert_eq!(argv.trim(), "hook prompt");
+    assert!(exe.exists());
+}
+
+#[test]
+fn connect_refuses_a_path_the_shell_would_break_on() {
+    let h = Home {
+        home: tempfile::Builder::new()
+            .prefix("o'brien ")
+            .tempdir()
+            .unwrap(),
+        vault: tempfile::tempdir().unwrap(),
+    };
+    install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    let out = connect(&h, stub.path(), home.path());
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("single quote"));
+    assert!(!plugin(&h).exists());
 }
 
 #[test]
@@ -271,7 +380,11 @@ fn connect_as_registers_the_name() {
         String::from_utf8_lossy(&out.stderr)
     );
     let calls = fs::read_to_string(stub.path().join("calls")).unwrap();
-    let add: Vec<&str> = calls.lines().skip_while(|l| *l != "add").collect();
+    let add: Vec<&str> = calls
+        .lines()
+        .skip_while(|l| *l != "add")
+        .take_while(|l| *l != "plugin")
+        .collect();
     assert_eq!(
         add,
         [
@@ -355,5 +468,80 @@ fn connect_as_a_name_starting_with_a_dash_registers_one_word() {
         String::from_utf8_lossy(&out.stderr)
     );
     let calls = fs::read_to_string(stub.path().join("calls")).unwrap();
-    assert_eq!(calls.lines().last(), Some("--as=-chief"));
+    let before_the_plugin = calls.lines().take_while(|l| *l != "plugin").last();
+    assert_eq!(before_the_plugin, Some("--as=-chief"));
+}
+
+/// An installed brain from before `hook` exits 2 on it, which Claude Code reads as "block".
+#[test]
+fn connect_refuses_to_plug_in_a_brain_that_knows_no_hook() {
+    let h = Home::new();
+    let exe = install(&h);
+    script(&exe, "[ \"$1\" = hook ] && exit 2");
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    let out = connect(&h, stub.path(), home.path());
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("hooks are not connected"), "{said}");
+    assert!(said.contains("brain update"), "{said}");
+    assert!(!plugin(&h).exists());
+}
+
+/// The binary behind a written plugin can still be replaced by an older one.
+#[test]
+fn the_hook_command_exits_0_with_a_binary_that_knows_no_hook() {
+    let h = Home::new();
+    let exe = install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    assert!(connect(&h, stub.path(), home.path()).status.success());
+    script(&exe, "exit 2");
+    let ran = std::process::Command::new("/bin/sh")
+        .args(["-c", &command(&h, "UserPromptSubmit")])
+        .status()
+        .unwrap();
+    assert!(ran.success());
+}
+
+#[test]
+fn connect_saves_the_indexes_a_session_starts_with() {
+    let h = Home::new();
+    h.init();
+    install(&h);
+    let stub = stub_claude();
+    let home = tempfile::tempdir().unwrap();
+    let memory = tempfile::tempdir().unwrap();
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--index"])
+        .arg(memory.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let config = || fs::read_to_string(h.home.path().join("config/config.toml")).unwrap();
+    let saved = memory.path().canonicalize().unwrap();
+    assert!(
+        config().contains(&saved.display().to_string()),
+        "{}",
+        config()
+    );
+    // Connecting again without the flag keeps what was named.
+    assert!(connect(&h, stub.path(), home.path()).status.success());
+    assert!(
+        config().contains(&saved.display().to_string()),
+        "{}",
+        config()
+    );
+    let out = h
+        .brain()
+        .env("PATH", stub.path())
+        .env("HOME", home.path())
+        .args(["connect", "claude-code", "--index", "/no/such/folder"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/no/such/folder"));
 }

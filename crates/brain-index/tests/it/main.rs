@@ -564,3 +564,25 @@ fn the_index_file_is_private() {
         }
     }
 }
+
+/// An id-less note still being typed is stored with no time of its own.
+#[test]
+fn a_note_waiting_for_its_id_has_no_change_date() {
+    let f = Fixture::new();
+    f.put("fresh.md", "heron\n");
+    let mut idx = f.index();
+    let now = brain_platform::clock::Clock::now(&brain_platform::clock::SystemClock);
+    let hour = jiff::SignedDuration::from_hours(1);
+    let q = brain_index::Query {
+        text: "heron",
+        limit: 5,
+        kinds: None,
+        scope: brain_index::Scope::Mine,
+        rerank: false,
+    };
+    idx.reindex_settled(&f.vault(), now - hour, now + hour)
+        .unwrap();
+    assert_eq!(idx.search(&q, None).unwrap().hits[0].modified, None);
+    idx.reindex(&f.vault()).unwrap();
+    assert!(idx.search(&q, None).unwrap().hits[0].modified.is_some());
+}

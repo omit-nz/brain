@@ -1,4 +1,4 @@
-//! What an imported brain needs looked at: notes with no source, an inbox left to age, links to
+//! What the notes an import brought need looked at: notes with no source, an inbox left to age, links to
 //! notes that are not there, the same note in two places, and how much is shared.
 
 use std::collections::{HashMap, HashSet};
@@ -26,9 +26,10 @@ pub struct Report {
     pub private: usize,
 }
 
-/// Read from the vault itself, so it is never staler than the files. Working memory is not
-/// expected to cite a source.
-pub fn report(dst: &Vault, today: Date) -> Report {
+/// Read from the vault itself, so it is never staler than the files. Only the notes at the paths
+/// in `scope` are reported on: a gap elsewhere in the vault is not the import's, and a link to any
+/// note in the vault is not broken. Working memory is not expected to cite a source.
+pub fn report(dst: &Vault, today: Date, scope: &HashSet<String>) -> Report {
     let mut r = Report::default();
     let cutoff = today.checked_sub(INBOX_DAYS.days()).unwrap_or(today);
     let mut stems = HashSet::new();
@@ -52,6 +53,9 @@ pub fn report(dst: &Vault, today: Date) -> Report {
                 .entry(name.to_string_lossy().to_string())
                 .or_default()
                 .push(key.clone());
+        }
+        if !scope.contains(&key) {
+            continue;
         }
         match note.disclosure {
             Disclosure::Shared => r.shared += 1,
@@ -86,7 +90,8 @@ pub fn report(dst: &Vault, today: Date) -> Report {
     let mut ghosts: Vec<String> = names
         .into_values()
         .filter(|paths| {
-            paths.iter().any(|p| p.starts_with(&format!("{inbox}/")))
+            paths.iter().any(|p| scope.contains(p))
+                && paths.iter().any(|p| p.starts_with(&format!("{inbox}/")))
                 && paths
                     .iter()
                     .any(|p| p.starts_with(&format!("{}/", Dest::Permanent.folder())))

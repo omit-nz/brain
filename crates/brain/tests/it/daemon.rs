@@ -753,3 +753,234 @@ fn a_gap_a_recheck_fills_is_counted_on_the_local_day() {
         .sum();
     assert_eq!(filled, 1, "{zone} {local}");
 }
+
+#[test]
+fn the_daemon_prunes_traces_and_verdicts() {
+    let h = Home::new();
+    h.init();
+    h.brain()
+        .args(["hook", "prompt"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    let data = h.home.path().join("data");
+    let verdicts = data.join(brain_reflex::VERDICTS);
+    brain_reflex::Verdicts::open(&verdicts).unwrap();
+    let old = |db: &std::path::Path, sql: &str| {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap()
+    };
+    old(
+        &data.join(brain_reflex::TRACES),
+        "UPDATE runs SET started_ns = 0",
+    );
+    old(
+        &verdicts,
+        "INSERT INTO verdicts(reflex, version, backend, point, at, input_text, fired, confidence, reason, acted, latency_ms)
+         VALUES ('r', 1, 'rule', 'prompt', 0, '', 0, 0, '', 0, 0)",
+    );
+    let count = |db: &std::path::Path, sql: &str| -> i64 {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    let d = Daemon::start(&h);
+    until(
+        "pruned traces and verdicts",
+        || {
+            count(
+                &data.join(brain_reflex::TRACES),
+                "SELECT count(*) FROM runs",
+            ) == 0
+                && count(&verdicts, "SELECT count(*) FROM verdicts") == 0
+        },
+        || d.stderr(),
+    );
+}
+
+#[test]
+fn a_daemon_start_rewrites_the_installed_plugin() {
+    let h = Home::new();
+    h.init();
+    let manifest = h
+        .home
+        .path()
+        .join("data/claude-plugin/brain/.claude-plugin/plugin.json");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(&manifest, r#"{"name":"brain","version":"0.0.0"}"#).unwrap();
+    let installed = h
+        .home
+        .path()
+        .join("data/bin/brain-current")
+        .join(brain::update::exe_name());
+    fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    fs::write(&installed, "").unwrap();
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    let text = fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+}
+
+#[test]
+fn a_daemon_start_writes_no_plugin_where_none_was() {
+    let h = Home::new();
+    h.init();
+    let d = Daemon::start(&h);
+    d.wait_for_passes(1);
+    assert!(!h.home.path().join("data/claude-plugin").exists());
+}
+
+#[test]
+fn a_removed_note_leaves_the_traces_while_the_daemon_runs() {
+    let h = Home::new();
+    h.init();
+    h.put(
+        "due.md",
+        "---\nid: 0195f2e0-0000-7000-8000-000000000001\nowner: robin\nreview: 2020-01-01\n---\nbody\n",
+    );
+    let d = Daemon::start(&h);
+    wait_for_notes(&h, &d, 1);
+    h.brain()
+        .args(["hook", "session-start"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    let db = h.home.path().join("data").join(brain_reflex::TRACES);
+    let held = || -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM span_sources WHERE source LIKE 'note:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(held(), 1);
+    fs::remove_file(h.vault.path().join("due.md")).unwrap();
+    until("the note purged", || held() == 0, || d.stderr());
+}
+
+#[test]
+fn the_daemon_picks_up_a_changed_and_a_deleted_memory() {
+    let h = Home::new();
+    h.init();
+    let projects = tempfile::tempdir().unwrap();
+    let memory = projects.path().join("-proj/memory");
+    fs::create_dir_all(&memory).unwrap();
+    let write = |name: &str, text: &str| {
+        fs::write(
+            memory.join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: {text}\n---\n"),
+        )
+        .unwrap();
+    };
+    write("plan", "the heron plan is unpublished");
+    write("other", "something else");
+    h.run(&["memory", "follow", projects.path().to_str().unwrap()]);
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "300")]);
+    let plan = "working-memory/-proj/plan.md".to_string();
+    until(
+        "the first copy",
+        || found(&h, "heron") == [plan.clone()],
+        || d.stderr(),
+    );
+    write("plan", "the egret plan is published");
+    until(
+        "the change",
+        || found(&h, "egret") == [plan.clone()],
+        || d.stderr(),
+    );
+    fs::remove_file(memory.join("plan.md")).unwrap();
+    until(
+        "the deletion",
+        || found(&h, "egret").is_empty(),
+        || d.stderr(),
+    );
+}
+
+#[test]
+fn a_running_daemon_follows_a_new_vault() {
+    let h = Home::new();
+    h.init();
+    h.put("old.md", &note_with_id(1, "a note about herons"));
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "300")]);
+    wait_for_notes(&h, &d, 1);
+    let next = tempfile::tempdir().unwrap();
+    h.run(&[
+        "init",
+        "--me",
+        "robin",
+        "--vault",
+        next.path().to_str().unwrap(),
+    ]);
+    fs::write(
+        next.path().join("new.md"),
+        note_with_id(2, "a note about egrets"),
+    )
+    .unwrap();
+    until(
+        "the new vault indexed",
+        || {
+            let out = h
+                .brain()
+                .args(["search", "--json", "egrets"])
+                .output()
+                .unwrap();
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("new.md")
+        },
+        || d.stderr(),
+    );
+    assert_eq!(found(&h, "herons"), Vec::<String>::new());
+}
+
+/// A project's memory folder under a followed folder, followed.
+fn followed_memory(h: &Home, names: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let projects = tempfile::tempdir().unwrap();
+    let memory = projects.path().join("-proj/memory");
+    fs::create_dir_all(&memory).unwrap();
+    for name in names {
+        fs::write(memory.join(format!("{name}.md")), format!("{name} first\n")).unwrap();
+    }
+    h.run(&["memory", "follow", projects.path().to_str().unwrap()]);
+    (projects, memory)
+}
+
+#[test]
+fn a_memory_pass_writes_no_id_into_a_note_saved_moments_ago() {
+    let h = Home::new();
+    h.init();
+    let (_projects, memory) = followed_memory(&h, &["plan"]);
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "100")]);
+    d.wait_for_passes(1);
+    let typed = "a note still being typed\n";
+    h.put("typing.md", typed);
+    fs::write(memory.join("plan.md"), "the egret plan\n").unwrap();
+    until(
+        "the changed memory",
+        || !found(&h, "egret").is_empty(),
+        || d.stderr(),
+    );
+    assert_eq!(
+        fs::read_to_string(h.vault.path().join("typing.md")).unwrap(),
+        typed
+    );
+}
+
+#[test]
+fn the_daemon_names_a_copy_it_kept_when_its_source_went() {
+    let h = Home::new();
+    h.init();
+    let (_projects, memory) = followed_memory(&h, &["plan", "other"]);
+    h.put("working-memory/-proj/plan.md", "my own words\n");
+    fs::remove_file(memory.join("plan.md")).unwrap();
+    let d = Daemon::start_with(&h, &[("BRAIN_TEST_FOLLOW_EVERY_MS", "100")]);
+    until(
+        "the kept copy named",
+        || d.stderr().contains("working-memory/-proj/plan.md"),
+        || d.stderr(),
+    );
+}

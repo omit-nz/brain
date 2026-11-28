@@ -24,8 +24,9 @@ use notify::{EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, NoCache};
 
 use crate::config::Config;
+use crate::import::{self, Archive, Followed, Written};
 use crate::out::terminal;
-use crate::{gaps, usage};
+use crate::{gaps, plugin, usage};
 
 pub const WRITER_LOCK: &str = "writer.lock";
 /// A full pass this long after the last, for whatever the watcher missed.
@@ -37,6 +38,7 @@ const RETRY: Duration = Duration::from_secs(6);
 const EMBED_BATCH: usize = 32;
 const RECHECK_EVERY: Duration = Duration::from_secs(3600);
 const SEND_EVERY: Duration = Duration::from_secs(3600);
+const FOLLOW_EVERY: Duration = Duration::from_secs(60);
 const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 pub fn writer_lock(dirs: &Dirs) -> PathBuf {
@@ -61,6 +63,72 @@ pub fn summary(r: &Reindexed) -> String {
         ));
     }
     line
+}
+
+/// How often a followed memory folder is looked at; a debug build lets a test hurry it.
+fn follow_every() -> Duration {
+    let hurried = cfg!(debug_assertions)
+        .then(|| std::env::var("BRAIN_TEST_FOLLOW_EVERY_MS").ok())
+        .flatten();
+    hurried
+        .and_then(|ms| ms.parse().ok())
+        .map_or(FOLLOW_EVERY, Duration::from_millis)
+}
+
+/// One pass over the followed auto-memory, when one is followed and no other command holds the
+/// import ledger. The config is read each time, so following starts without a restart.
+fn follow_memory(
+    dirs: &Dirs,
+    idx: &mut Index,
+    clock: &dyn Clock,
+) -> anyhow::Result<Option<Followed>> {
+    let config = Config::load(dirs)?;
+    let Some(followed) = &config.memory.follow else {
+        return Ok(None);
+    };
+    let Some(_held) = Lock::try_acquire(&dirs.data.join(import::LOCK))? else {
+        return Ok(None);
+    };
+    let vault = Vault::open(&config.vault)?;
+    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let done = import::sync(dirs, &vault, followed, &w, |vault| {
+        // The whole vault is read, so a note someone is typing gets no id here either.
+        let now = clock.now();
+        let r = idx.reindex_settled(vault, now.checked_sub(SETTLE)?, now)?;
+        forget(dirs, &r);
+        Ok(())
+    })?;
+    Ok(Some(done))
+}
+
+/// Drops what traces and verdicts kept of the notes a pass saw go, but not of a followed memory
+/// brain archived: that one is set aside, and comes back with its source. With the archive
+/// records unreadable nothing is dropped.
+pub fn forget(dirs: &Dirs, r: &Reindexed) {
+    let archive = match Archive::load(dirs) {
+        Ok(archive) => archive,
+        Err(e) => {
+            let said = format!("no trace was purged: {e:#}");
+            eprintln!("{}", terminal(&said));
+            return;
+        }
+    };
+    let gone = r.gone.iter().map(ToString::to_string);
+    purge(dirs, gone.filter(|id| !archive.names(id)));
+}
+
+/// Purges the notes `ids` from traces and verdicts. A failure is said and no more: both stores
+/// also prune by age.
+pub fn purge(dirs: &Dirs, ids: impl Iterator<Item = String>) {
+    let sources: Vec<String> = ids.map(|id| format!("note:{id}")).collect();
+    if let Err(e) = brain_reflex::purge(&dirs.data, &sources) {
+        eprintln!(
+            "{}",
+            terminal(&format!(
+                "purging removed notes from the traces failed: {e:#}"
+            ))
+        );
+    }
 }
 
 /// Installs a newer signed release over the install this daemon runs from, through the same
@@ -107,7 +175,19 @@ fn newer<S: update::Source>(
 /// Runs the daemon until it installs a newer release, then runs that release in its place with
 /// the same arguments: the same process under launchd, and the same terminal elsewhere.
 pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<()> {
-    let v = serve(dirs, &clock, from_dir)?;
+    // An update restarts the daemon, which is when an installed plugin learns the new release.
+    if let Err(e) = plugin::refresh(dirs) {
+        eprintln!(
+            "{}",
+            terminal(&format!("the Claude Code plugin was not updated: {e:#}"))
+        );
+    }
+    // A `brain init` over another folder ends one service and starts the next on that vault.
+    let v = loop {
+        if let Some(v) = serve(dirs, &clock, from_dir)? {
+            break v;
+        }
+    };
     eprintln!("installed brain {v}; starting it");
     let exe = update::install_dir(&dirs.bin).join(update::exe_name());
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -116,8 +196,12 @@ pub fn run(dirs: &Dirs, clock: Arc<dyn Clock>, from_dir: Option<&Path>) -> anyho
 }
 
 /// The daemon's work, holding the writer lock and the vault watcher, which it lets go of when it
-/// returns the version it installed.
-fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow::Result<String> {
+/// returns: with the version it installed, or with nothing when the config names another vault.
+fn serve(
+    dirs: &Dirs,
+    clock: &Arc<dyn Clock>,
+    from_dir: Option<&Path>,
+) -> anyhow::Result<Option<String>> {
     let path = writer_lock(dirs);
     let _lock = match Lock::try_acquire(&path)? {
         Some(lock) => lock,
@@ -179,8 +263,15 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
     let mut rechecking: Option<JoinHandle<()>> = None;
     let mut last_send: Option<Instant> = None;
     let mut last_update: Option<Instant> = None;
+    let mut last_follow: Option<Instant> = None;
+    let mut follow_said = None;
     let mut next = Instant::now();
     loop {
+        // An unreadable config is a passing state, not another vault.
+        if Config::load(dirs).is_ok_and(|c| c.vault != root) {
+            eprintln!("the vault has changed; starting over on it");
+            return Ok(None);
+        }
         if due {
             passes += 1;
             if rewatch && watcher.watch(&vault.root, RecursiveMode::Recursive).is_ok() {
@@ -193,6 +284,7 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
                 .and_then(|settled| idx.reindex_settled(&vault, settled, clock.now()))
             {
                 Ok(r) => {
+                    forget(dirs, &r);
                     eprintln!("{}", terminal(&format!("pass {passes}: {}", summary(&r))));
                     next = Instant::now() + if r.deferred > 0 { RETRY } else { BACKSTOP };
                     changed |= r.added + r.changed + r.removed > 0;
@@ -211,6 +303,9 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
             // At start and hourly; a pass comes at least every BACKSTOP, so the hour holds.
             if last_send.is_none_or(|t: Instant| t.elapsed() >= SEND_EVERY) {
                 last_send = Some(Instant::now());
+                if let Err(e) = brain_reflex::prune(&dirs.data, clock.now()) {
+                    eprintln!("{}", terminal(&format!("pruning traces failed: {e:#}")));
+                }
                 match usage::send_due(dirs, &idx, &**clock) {
                     Ok(s) => eprintln!("{}", s.line()),
                     Err(e) => eprintln!("{}", terminal(&format!("usage: sending failed: {e:#}"))),
@@ -223,9 +318,33 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
             {
                 last_update = Some(Instant::now());
                 if let Some(v) = update_self(dirs, &store, &**clock, from_dir) {
-                    return Ok(v);
+                    return Ok(Some(v));
                 }
             }
+        }
+        if last_follow.is_none_or(|t: Instant| t.elapsed() >= follow_every()) {
+            last_follow = Some(Instant::now());
+            let said = match follow_memory(dirs, &mut idx, &**clock) {
+                Ok(Some(done)) => {
+                    changed |= done.changed();
+                    embedding |= done.changed() && provider.is_some();
+                    let news = done.changed() || !done.kept.is_empty() || !done.skipped.is_empty();
+                    news.then(|| {
+                        let mut said = format!("memory: {}", done.summary());
+                        for path in &done.kept {
+                            said.push_str(&format!("\nmemory: kept as it is: {path}"));
+                        }
+                        said
+                    })
+                }
+                Ok(None) => None,
+                Err(e) => Some(format!("memory: {e:#}")),
+            };
+            // A folder that stays away is said once, not every minute.
+            if said.is_some() && said != follow_said {
+                eprintln!("{}", terminal(said.as_deref().unwrap_or_default()));
+            }
+            follow_said = said;
         }
         // One batch a turn, so a save made during a long first embed waits for one batch only.
         if embedding && let Some(p) = &provider {
@@ -258,7 +377,9 @@ fn serve(dirs: &Dirs, clock: &Arc<dyn Clock>, from_dir: Option<&Path>) -> anyhow
         let wait = if embedding {
             Duration::ZERO
         } else {
+            let followed = last_follow.map(|t| follow_every().saturating_sub(t.elapsed()));
             next.saturating_duration_since(Instant::now())
+                .min(followed.unwrap_or_default())
         };
         let mut events = Vec::new();
         match rx.recv_timeout(wait) {

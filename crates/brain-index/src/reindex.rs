@@ -30,6 +30,9 @@ pub struct Reindexed {
     /// Notes indexed with their id left for a later pass: they need one but were saved too
     /// recently to write it.
     pub deferred: usize,
+    /// Ids no note holds any more, and ids whose note stopped being shared: whatever was kept of
+    /// their text elsewhere should go.
+    pub gone: Vec<uuid::Uuid>,
 }
 
 struct Row {
@@ -112,7 +115,9 @@ impl Index {
             vault.root.display()
         );
         let abort_after = abort_after();
+        self.belong_to(&vault.root)?;
         let existing = self.rows()?;
+        let held = self.held()?;
         // Rows written under other reading rules are re-derived, changed or not.
         let rules: Option<String> = self
             .conn
@@ -313,7 +318,53 @@ impl Index {
             .conn
             .prepare("SELECT path FROM notes WHERE note_uuid IS NULL ORDER BY path")?;
         out.unidentified = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        drop(st);
+        let now = self.held()?;
+        out.gone = held
+            .into_iter()
+            .filter(|(id, was)| match now.get(id) {
+                None => true,
+                Some(is) => was == "shared" && is != "shared",
+            })
+            .filter_map(|(id, _)| id.parse().ok())
+            .collect();
         Ok(out)
+    }
+
+    /// Makes the index `vault`'s, dropping every row of another vault in the same transaction: a
+    /// file with the same path, size and time would otherwise never be read again.
+    fn belong_to(&mut self, vault: &Path) -> anyhow::Result<()> {
+        let vault = vault.to_string_lossy();
+        let held: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'vault'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if held.as_deref() == Some(&*vault) {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        if held.is_some() {
+            tx.execute("DELETE FROM notes", [])?;
+            tx.execute("DELETE FROM skipped", [])?;
+        }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('vault', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&*vault],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Each id in the index with its note's disclosure.
+    fn held(&self) -> anyhow::Result<HashMap<String, String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT note_uuid, disclosure FROM notes WHERE note_uuid IS NOT NULL")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     fn rows(&self) -> anyhow::Result<HashMap<String, Row>> {
