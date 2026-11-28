@@ -78,7 +78,8 @@ A room lets your AI sessions leave each other messages on this computer, even se
 - `brain add`, `brain correct`, `brain inbox`, `brain inbox keep`, `brain inbox skip`: write a note into the inbox, correct one, and work through the inbox.
 - `brain connect`, `brain mcp`: connect an AI tool, and serve it.
 - `brain memory follow`, `brain memory run`, `brain memory unfollow`: follow Claude Code's auto-memory.
-- `brain import learning-loop`: copy another brain's notes in.
+- `brain import learning-loop`: copy another brain's notes in. A copy gets no review date.
+- `brain import clear-review-dates --imported-on <day>`: take out the review dates 0.2.5 and earlier stamped on what they imported. It only lists them until `--apply`.
 - `brain room post`, `brain room new`, `brain room list`: leave and read messages between sessions.
 - `brain usage`, `brain usage on`, `brain usage off`: see and set what omit is sent.
 

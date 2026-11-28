@@ -482,10 +482,11 @@ fn an_unreadable_follow_archive_purges_nothing() {
 fn an_archived_memory_is_in_no_search_due_or_brief() {
     let (h, p) = two();
     let path = copy_path(h.vault.path(), "one");
-    // Due now, which brain's own copies are not for weeks.
+    // Due now: a copy has no review date until someone gives it one.
     let text = fs::read_to_string(&path).unwrap();
-    let review = text.lines().find(|l| l.starts_with("review:")).unwrap();
-    fs::write(&path, text.replace(review, "review: 2020-01-01")).unwrap();
+    let dated = text.replacen("owner: robin\n", "owner: robin\nreview: 2020-01-01\n", 1);
+    assert_ne!(text, dated);
+    fs::write(&path, dated).unwrap();
     h.run(&["index"]);
     let shown = || {
         let search = h.json(&["search", "--json", "first"]).to_string();

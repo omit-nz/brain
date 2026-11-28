@@ -90,7 +90,7 @@ fn follow_memory(
         return Ok(None);
     };
     let vault = Vault::open(&config.vault)?;
-    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let w = Written::for_memory(&config.me, &vault);
     let done = import::sync(dirs, &vault, followed, &w, |vault| {
         // The whole vault is read, so a note someone is typing gets no id here either.
         let now = clock.now();

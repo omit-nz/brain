@@ -181,16 +181,12 @@ fn ids_tags_links_and_intentions_come_across_as_they_are() {
     let i = Import::new();
     i.import(&[]);
     let copy = i.copy("3-permanent/kept-idea.md");
-    for key in ["visibility", "owner", "review"] {
+    for key in ["visibility", "owner"] {
         assert!(line(&copy, key).is_some(), "{key} missing:\n{copy}");
     }
     let stripped: Vec<&str> = copy
         .lines()
-        .filter(|l| {
-            !["visibility: ", "owner: ", "review: "]
-                .iter()
-                .any(|k| l.starts_with(k))
-        })
+        .filter(|l| !["visibility: ", "owner: "].iter().any(|k| l.starts_with(k)))
         .collect();
     assert_eq!(
         stripped,
@@ -203,32 +199,161 @@ fn ids_tags_links_and_intentions_come_across_as_they_are() {
     assert_eq!(line(&inbox, "review"), None);
 }
 
+/// A review date is a person's: set when they keep or confirm a note, never by copying it.
 #[test]
-fn imported_kept_notes_get_owner_and_review() {
+fn an_import_writes_no_review_date() {
     let i = Import::new();
-    for n in 0..1000 {
-        let id = format!("0195f2e0-0000-7000-8000-{n:012x}");
-        fs::write(
-            i.src.path().join(format!("3-permanent/n{n:04}.md")),
-            format!("---\nid: {id}\n---\nnote {n}\n"),
-        )
-        .unwrap();
-    }
-    i.import(&[]);
-    let today = jiff::civil::date(2026, 11, 25);
-    let mut days = std::collections::BTreeSet::new();
-    for n in 0..1000 {
-        let copy = i.copy(&format!("3-permanent/n{n:04}.md"));
-        assert_eq!(line(&copy, "owner"), Some("robin"));
-        let review: jiff::civil::Date = line(&copy, "review").unwrap().parse().unwrap();
-        let ahead = (review - today).get_days();
-        assert!(
-            (1..=90).contains(&ahead),
-            "review {review} is {ahead} days out"
+    fs::write(
+        i.src.path().join("3-permanent/theirs.md"),
+        "---\nreview: 2027-03-01\n---\nx\n",
+    )
+    .unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    let reviews: Vec<(String, String)> = snapshot(i.h.vault.path())
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            let text = String::from_utf8(bytes).ok()?;
+            Some((path, line(&text, "review")?.to_string()))
+        })
+        .collect();
+    assert_eq!(
+        reviews,
+        // Both came with their authors' own.
+        [
+            ("3-permanent/declared.md", "2027-01-10"),
+            ("3-permanent/theirs.md", "2027-03-01"),
+        ]
+        .map(|(p, d)| (p.to_string(), d.to_string()))
+    );
+    assert_eq!(
+        line(&i.copy("3-permanent/kept-idea.md"), "owner"),
+        Some("robin")
+    );
+    assert!(
+        snapshot(i.h.vault.path())
+            .keys()
+            .any(|p| p.starts_with("working-memory/")),
+        "a memory copy was among them"
+    );
+}
+
+/// What an import on `NOW`'s day stamped in 0.2.5: 1 to 90 days out by a hash of the note's id,
+/// or of its source's key when the source had none.
+const BY_ID: &str = "2027-01-14";
+const BY_KEY: &str = "2027-01-16";
+const STAMPED_ID: &str = "0195f2e0-0000-7000-8000-000000000001";
+
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl Import {
+    /// Leaves the copy at `rel` as 0.2.5 wrote it: with `review`, recorded in the ledger.
+    fn stamp(&self, rel: &str, review: &str) {
+        let before = self.copy(rel);
+        let after = before.replacen(
+            "owner: robin\n",
+            &format!("owner: robin\nreview: {review}\n"),
+            1,
         );
-        days.insert(review);
+        assert_ne!(before, after, "{rel} has no owner line");
+        fs::write(self.h.vault.path().join(rel), &after).unwrap();
+        let path = self.h.home.path().join("data/import-ledger.json");
+        let ledger = fs::read_to_string(&path).unwrap();
+        let (old, new) = (digest(before.as_bytes()), digest(after.as_bytes()));
+        assert!(ledger.contains(&old), "{rel} is not in the ledger");
+        fs::write(path, ledger.replace(&old, &new)).unwrap();
     }
-    assert!(days.len() >= 80, "only {} distinct review days", days.len());
+
+    fn clear(&self, extra: &[&str]) -> String {
+        let mut args = vec![
+            "import",
+            "clear-review-dates",
+            "--imported-on",
+            "2026-11-25",
+        ];
+        args.extend_from_slice(extra);
+        self.h.run(&args)
+    }
+}
+
+/// An import with two copies stamped as 0.2.5 stamped them, beside dates that are not its.
+fn stamped() -> Import {
+    let i = Import::new();
+    fs::write(
+        i.src.path().join("3-permanent/byid.md"),
+        // Its own date sits 90 days before the stamp, as a capture's would.
+        format!("---\nid: {STAMPED_ID}\ndate: 2026-10-16\n---\nby id\n"),
+    )
+    .unwrap();
+    fs::write(i.src.path().join("3-permanent/noid.md"), "no id\n").unwrap();
+    i.import(&[]);
+    i.stamp("3-permanent/byid.md", BY_ID);
+    i.stamp("3-permanent/noid.md", BY_KEY);
+    i.h.put(
+        "hand.md",
+        "---\nid: 0195f2e0-0000-7000-8000-000000000002\nowner: robin\nreview: 2027-06-01\n---\nmine\n",
+    );
+    // A capture's own date is 90 days on, which can fall where an import's would.
+    i.h.put(
+        "0-inbox/said.md",
+        &format!(
+            "---\nid: 0195f2e0-0000-7000-8000-000000000003\ndate: 2026-10-16\nreview: {BY_ID}\n---\nkept\n"
+        ),
+    );
+    i
+}
+
+#[test]
+fn clearing_review_dates_previews_without_writing() {
+    let i = stamped();
+    let before = (
+        snapshot(i.h.vault.path()),
+        snapshot(&i.h.home.path().join("data")),
+    );
+    let said = i.clear(&[]);
+    assert!(said.contains("2 review dates would be cleared"), "{said}");
+    assert!(said.contains("3-permanent/byid.md"), "{said}");
+    assert!(said.contains("1 written by capture"), "{said}");
+    assert!(said.contains("2 set some other way"), "{said}");
+    assert!(said.contains("--apply"), "{said}");
+    assert_eq!(snapshot(i.h.vault.path()), before.0);
+    let data = snapshot(&i.h.home.path().join("data"));
+    assert_eq!(
+        data.get("import-ledger.json"),
+        before.1.get("import-ledger.json")
+    );
+}
+
+#[test]
+fn clearing_review_dates_takes_the_line_and_nothing_else() {
+    let i = stamped();
+    let was = |rel: &str| {
+        let at = i.h.vault.path().join(rel);
+        (i.copy(rel), fs::metadata(at).unwrap().modified().unwrap())
+    };
+    let kept: Vec<_> = ["hand.md", "0-inbox/said.md"].map(was).into();
+    let (before, changed) = was("3-permanent/byid.md");
+    let said = i.clear(&["--apply"]);
+    assert!(said.contains("2 review dates cleared"), "{said}");
+    let (after, still) = was("3-permanent/byid.md");
+    assert_eq!(after, before.replace(&format!("review: {BY_ID}\n"), ""));
+    assert_eq!(still, changed, "the file's time stays the source's");
+    assert_eq!(line(&i.copy("3-permanent/noid.md"), "review"), None);
+    assert_eq!(["hand.md", "0-inbox/said.md"].map(was).to_vec(), kept);
+    assert!(i.clear(&["--apply"]).contains("0 review dates cleared"));
+    // The copy is still brain's: a changed source updates it rather than conflicting.
+    fs::write(i.src.path().join("3-permanent/noid.md"), "no id, changed\n").unwrap();
+    let again = i.import(&[]);
+    assert!(
+        again.contains("1 updated") && again.contains("0 conflicts"),
+        "{again}"
+    );
 }
 
 #[test]

@@ -190,6 +190,18 @@ struct SearchArgs {
 enum ImportFrom {
     /// A learning-loop vault and, optionally, Claude Code auto-memory.
     LearningLoop(LearningLoop),
+    /// Take out the review dates that brain 0.2.5 and earlier stamped on imported notes.
+    ClearReviewDates(ClearReviewDates),
+}
+
+#[derive(Args)]
+struct ClearReviewDates {
+    /// A day the notes were imported, as 2026-11-27; give each one.
+    #[arg(long, required = true)]
+    imported_on: Vec<jiff::civil::Date>,
+    /// Write the change. Without it, only say what would be cleared.
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Args)]
@@ -386,7 +398,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
                 Ok(())
             }
         },
-        Command::Memory { action } => memory_cmd(dirs, &*clock, action),
+        Command::Memory { action } => memory_cmd(dirs, action),
         Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Mcp {
             door,
@@ -431,6 +443,9 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Import {
             from: ImportFrom::LearningLoop(args),
         } => import_learning_loop(dirs, clock.today(), args),
+        Command::Import {
+            from: ImportFrom::ClearReviewDates(args),
+        } => clear_review_dates(dirs, args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
             let (result, event) = match action {
@@ -449,7 +464,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     }
 }
 
-fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::Result<()> {
+fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
     let mut config = Config::load(dirs)?;
     match action {
         MemoryAction::Unfollow => {
@@ -474,7 +489,7 @@ fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::R
     let vault = Vault::open(&config.vault)?;
     let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
     let writer = Lock::try_acquire(&writer_lock(dirs))?;
-    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let w = Written::for_memory(&config.me, &vault);
     let done = import::sync(dirs, &vault, followed, &w, |vault| {
         if writer.is_some() {
             let r = index(dirs)?.reindex(vault)?;
@@ -1047,7 +1062,6 @@ fn import_learning_loop(
     let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
     let w = Written {
         me: &config.me,
-        today,
         share: &share,
         blocklist: blocklist.as_ref(),
         layout: &dst.layout,
@@ -1128,6 +1142,47 @@ fn import_learning_loop(
         "{}",
         terminal(&import::report(&dst, today, &plan.scope).to_string())
     );
+    Ok(())
+}
+
+fn clear_review_dates(dirs: &Dirs, a: ClearReviewDates) -> anyhow::Result<()> {
+    let vault = Vault::open(&Config::load(dirs)?.vault)?;
+    // Held as an import holds them, so neither a memory pass nor the daemon writes meanwhile.
+    let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
+    let writer = Lock::try_acquire(&writer_lock(dirs))?;
+    let mut ledger = Ledger::load(dirs)?;
+    let c = import::clear_review_dates(&vault, &mut ledger, &a.imported_on, a.apply);
+    if a.apply {
+        ledger.save(dirs)?;
+        if writer.is_some() {
+            let r = index(dirs)?.reindex(&vault)?;
+            daemon::forget(dirs, &r);
+        }
+    }
+    let mut lines = vec![format!(
+        "{} review dates {}, {} written by capture and {} set some other way left as they are{}",
+        c.notes.len(),
+        if a.apply {
+            "cleared"
+        } else {
+            "would be cleared"
+        },
+        c.captured,
+        c.other,
+        if a.apply { "" } else { " (nothing written)" }
+    )];
+    lines.extend(c.notes.iter().take(10).map(|p| format!("  {p}")));
+    if !c.failed.is_empty() {
+        lines.push("could not be written, run it again:".into());
+        lines.extend(c.failed.iter().map(|p| format!("  {p}")));
+    }
+    if !a.apply {
+        lines.push(
+            "commit your vault first so they can be put back, then run it again with --apply"
+                .into(),
+        );
+    }
+    println!("{}", terminal(&lines.join("\n")));
     Ok(())
 }
 

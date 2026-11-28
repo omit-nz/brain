@@ -101,8 +101,8 @@ fn text(v: Option<Value>) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// The memory as a brain note: a new block with its id, title, kind, private visibility, owner
-/// and review date, and its description as the first body line.
+/// The memory as a brain note: a new block with its id, title, kind, private visibility and
+/// owner, and its description as the first body line.
 pub fn to_note(s: &Source, id: &str, w: &Written<'_>) -> anyhow::Result<String> {
     let split = Split::parse(&s.raw);
     let fm = split.fm.as_ref().ok().and_then(Option::as_ref);
@@ -128,7 +128,6 @@ pub fn to_note(s: &Source, id: &str, w: &Written<'_>) -> anyhow::Result<String> 
         ("kind", kind.as_str().to_string()),
         ("visibility", "private".to_string()),
         ("owner", w.me.to_string()),
-        ("review", w.review_date(id).to_string()),
     ];
     for (k, v) in fields {
         out.set(k, &v).map_err(|_| unsafe_value(k))?;
