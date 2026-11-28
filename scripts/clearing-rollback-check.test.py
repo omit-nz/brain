@@ -71,7 +71,7 @@ code, said, _ = run({"vault/a.md": MOVED_ON}, {"a.md": NEW})
 check("once written it passes", code == 0 and "safe" in said, said)
 code, said, _ = run({"memory/p/one.md": MOVED_ON}, {"working-memory/p/one.md": OLD})
 check("a memory copy is found where brain keeps it", code == 1 and "working-memory/p/one.md" in said, said)
-code, said, _ = run({"vault/a.md": MOVED_ON}, {})
+code, said, _ = run({"vault/a.md": MOVED_ON}, {"b.md": NEW})
 check("a file that is not there passes", code == 0, said)
 code, said, _ = run({"vault/a.md": {"dst_hash": digest(NEW)}}, {"a.md": OLD})
 check("a record with one hash is the person's affair", code == 0, said)
@@ -111,6 +111,21 @@ code, said, _ = run([], {})
 check("a ledger of another shape is refused", code != 0 and "safe" not in said and "Traceback" not in said, said)
 code, said, _ = run({"vault/a.md": {"dst_hash": digest(NEW), "was": digest(OLD), "vault": "/nowhere"}}, {})
 check("a record's own vault that is not there is refused", code != 0 and "safe" not in said, said)
+
+code, said, _ = run({"vault/a.md": MOVED_ON}, {})
+check("an empty folder where the vault was is refused",
+      code == 1 and "empty" in said and "safe" not in said, said)
+code, said, _ = run(
+    {"vault/b.md": {**MOVED_ON, "vault": "/nowhere"}, "vault/a.md": MOVED_ON}, {"a.md": OLD})
+check("a vault that is gone is named with the way out, and the rest is still looked at",
+      code == 1 and "/nowhere" in said.replace("\\", "/") and "gone for good" in said
+      and "a.md: still holds" in said, said)
+for name, ledger in [
+    ("a record that is no object", {"vault/a.md": 3}),
+    ("a key with no kind", {"a.md": MOVED_ON}),
+]:
+    code, said, _ = run(ledger, {"a.md": OLD})
+    check(f"{name} is refused", code != 0 and "safe" not in said and "Traceback" not in said, said)
 
 older = subprocess.run(
     [sys.executable, "-I", "-c",

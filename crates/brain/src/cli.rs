@@ -1194,21 +1194,23 @@ fn clear_review_dates(
     let mut ledger = Ledger::load(dirs)?;
     let mut archive = Archive::load(dirs)?;
     let plan = import::plan_clearing(&vault, &ledger, &archive, &a.imported_on, today);
-    let (mut left, mut indexed) = (Vec::new(), Ok(()));
+    // A preview counts every change as one it would make.
+    let mut done: Vec<String> = plan.changes.iter().map(|c| c.path()).collect();
+    let (mut left, mut stopped, mut indexed) = (Vec::new(), Ok(()), Ok(()));
     if a.apply {
         println!(
             "clearing {}; if this is interrupted, run the same command again",
             plural(plan.changes.len(), "review date")
         );
-        left = import::write_clearing(
+        let out = import::write_clearing(
             &vault,
             &plan.changes,
             &mut ledger,
             &mut archive,
             &mut |ledger| ledger.save(dirs),
             &mut |archive| archive.save(dirs),
-        )
-        .context("the clearing stopped; run the same command again")?;
+        );
+        (done, left, stopped) = (out.done, out.left, out.stopped);
         // Said after the report: the notes are written whatever the index does.
         if writer.is_some() {
             indexed = index(dirs)
@@ -1216,6 +1218,7 @@ fn clear_review_dates(
                 .map(|r| daemon::forget(dirs, &r));
         }
     }
+    let undone = left.len();
     let (mut saved, mut refused) = (Vec::new(), Vec::new());
     for note in left {
         match note {
@@ -1223,10 +1226,9 @@ fn clear_review_dates(
             Left::Refused(path, why) => refused.push((path, why)),
         }
     }
-    let undone = saved.len() + refused.len();
     let mut lines = vec![format!(
         "{} {}, {} written by capture and {} set some other way left as they are{}",
-        plural(plan.changes.len() - undone, "review date"),
+        plural(done.len(), "review date"),
         if a.apply {
             "cleared"
         } else {
@@ -1236,12 +1238,7 @@ fn clear_review_dates(
         plan.other,
         if a.apply { "" } else { " (nothing written)" }
     )];
-    let done = plan.changes.iter().map(|c| c.path());
-    lines.extend(
-        done.filter(|p| !saved.contains(p) && !refused.iter().any(|(r, _)| r == p))
-            .take(10)
-            .map(|p| format!("  {p}")),
-    );
+    lines.extend(done.iter().take(10).map(|p| format!("  {p}")));
     if !plan.days.is_empty() {
         lines.push(format!(
             "if an import or a follow wrote any of those left, it was on one of: {}",
@@ -1274,6 +1271,7 @@ fn clear_review_dates(
         lines.push("brain's daemon will index them".into());
     }
     println!("{}", terminal(&lines.join("\n")));
+    stopped.context("the clearing stopped; run the same command again")?;
     indexed
         .context("the notes are written but the index could not be updated; run `brain index`")?;
     anyhow::ensure!(undone == 0, "{} left undone", plural(undone, "note"));

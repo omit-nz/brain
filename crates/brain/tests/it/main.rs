@@ -44,7 +44,12 @@ impl Home {
     }
 
     fn brain(&self) -> Command {
-        let mut c = Command::cargo_bin("brain").unwrap();
+        Command::from_std(self.command())
+    }
+
+    /// `brain` as every test runs it, for one that has to spawn it.
+    fn command(&self) -> std::process::Command {
+        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"));
         c.env("BRAIN_HOME", self.home.path())
             // A loaded CI runner must not turn a hook test into a timing test.
             .env("BRAIN_TEST_HOOK_BUDGET_MS", "30000")
@@ -52,6 +57,32 @@ impl Home {
             .env_remove("LL_MODELS_DIR")
             .current_dir(self.vault.path());
         c
+    }
+
+    /// A clearing run held once its first records are saved and before it writes a note. It goes
+    /// on once the file returned is removed.
+    fn held(&self, args: &[&str]) -> (std::process::Child, std::path::PathBuf) {
+        let gate = self.home.path().join("gate");
+        fs::write(&gate, "").unwrap();
+        let waiting = self.home.path().join("gate.waiting");
+        let mut child = self
+            .command()
+            .args(args)
+            .env("BRAIN_TEST_CLEAR_GATE", &gate)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !waiting.exists() {
+            assert!(child.try_wait().unwrap().is_none(), "it was not held");
+            assert!(
+                started.elapsed().as_secs() < 60,
+                "it never reached the gate"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        (child, waiting)
     }
 
     fn run(&self, args: &[&str]) -> String {

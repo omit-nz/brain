@@ -116,7 +116,7 @@ fn an_unwritten_file_put_back_by_hand_is_the_archived_one() {
 }
 
 #[test]
-fn a_restored_unwritten_copy_is_settled_as_it_reads() {
+fn a_restored_unwritten_copy_keeps_both_hashes() {
     let (h, p) = two();
     let source = fs::read(p.file("one")).unwrap();
     archive_one(&h, &p);
@@ -125,7 +125,9 @@ fn a_restored_unwritten_copy_is_settled_as_it_reads() {
     let said = pass(&h);
     assert!(said.contains("1 restored"), "{said}");
     let bytes = fs::read(copy_path(h.vault.path(), "one")).unwrap();
-    assert_eq!(read(&h, LEDGER)[KEY]["dst_hash"], digest(&bytes).as_str());
+    let record = read(&h, LEDGER)[KEY].clone();
+    assert_eq!(record["was"], digest(&bytes).as_str(), "{record}");
+    assert_eq!(record["dst_hash"], UNWRITTEN, "{record}");
 }
 
 /// The move was made and the ledger not yet saved, then a rewrite stopped between the two files.

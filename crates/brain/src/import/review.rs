@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use brain_note::{Entry, Split, Vault, rel_key, text_of};
-use brain_platform::fs::{Privacy, replace_unchanged, set_modified};
+use brain_platform::fs::{Privacy, rename_within, replace_unchanged, set_modified};
 use jiff::ToSpan;
 use jiff::civil::Date;
 use sha2::{Digest, Sha256};
@@ -160,17 +160,36 @@ fn abort_at(hook: &str, reached: usize) {
     }
 }
 
-/// A test that acts while a run is part-way names a file here: the run waits until it is gone.
+/// A test that acts while a run is part-way makes the file this names: the run renames it to
+/// `<name>.waiting` to say it is there, and waits until that is gone.
 fn wait_at_gate() {
     let gate = std::env::var_os("BRAIN_TEST_CLEAR_GATE").filter(|_| cfg!(debug_assertions));
-    while gate.as_ref().is_some_and(|gate| Path::new(gate).exists()) {
-        std::thread::sleep(Duration::from_millis(20));
+    let Some(gate) = gate.map(PathBuf::from) else {
+        return;
+    };
+    let waiting = gate.with_extension("waiting");
+    let (Some(folder), Some(from), Some(to)) =
+        (gate.parent(), gate.file_name(), waiting.file_name())
+    else {
+        return;
+    };
+    if rename_within(folder, Path::new(from), Path::new(to)).is_ok() {
+        while waiting.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
-/// Writes each change that its note still reads as planned, leaving the file's time, and returns
-/// the notes left. Each batch's records are saved before any of its notes is written, the ledger
-/// first.
+/// What a run did: the notes written, those left, and why it stopped early if it did.
+pub struct Outcome {
+    pub done: Vec<String>,
+    pub left: Vec<Left>,
+    pub stopped: anyhow::Result<()>,
+}
+
+/// Writes each change that its note still reads as planned, leaving the file's time. Each batch's
+/// records are saved before any of its notes is written, the ledger first; a save that fails
+/// stops the run there.
 pub fn write(
     vault: &Vault,
     changes: &[Change],
@@ -178,8 +197,12 @@ pub fn write(
     archive: &mut Archive,
     save_ledger: &mut dyn FnMut(&Ledger) -> anyhow::Result<()>,
     save_archive: &mut dyn FnMut(&Archive) -> anyhow::Result<()>,
-) -> anyhow::Result<Vec<Left>> {
-    let (mut left, mut written) = (Vec::new(), 0);
+) -> Outcome {
+    let mut out = Outcome {
+        done: Vec::new(),
+        left: Vec::new(),
+        stopped: Ok(()),
+    };
     for batch in changes.chunks(BATCH) {
         let (mut in_ledger, mut in_archive) = (false, false);
         for c in batch {
@@ -188,11 +211,14 @@ pub fn write(
             in_archive |= archive.rewrite(&vault.root, &from, &to);
         }
         if in_ledger {
-            save_ledger(ledger)?;
+            out.stopped = save_ledger(ledger);
         }
         abort_at("BRAIN_TEST_ABORT_BETWEEN_CLEAR_SAVES", 1);
-        if in_archive {
-            save_archive(archive)?;
+        if out.stopped.is_ok() && in_archive {
+            out.stopped = save_archive(archive);
+        }
+        if out.stopped.is_err() {
+            break;
         }
         abort_at("BRAIN_TEST_ABORT_AFTER_CLEARED", 0);
         wait_at_gate();
@@ -210,7 +236,7 @@ pub fn write(
                     Ok(now) => now != c.raw.as_bytes(),
                     Err(why) => why.kind() == ErrorKind::NotFound,
                 };
-                left.push(if changed {
+                out.left.push(if changed {
                     Left::Saved(c.path())
                 } else {
                     Left::Refused(c.path(), e.to_string())
@@ -220,11 +246,11 @@ pub fn write(
             if let Ok(at) = at {
                 let _ = set_modified(&vault.root, &c.rel, at);
             }
-            written += 1;
-            abort_at("BRAIN_TEST_ABORT_AFTER_CLEARED", written);
+            out.done.push(c.path());
+            abort_at("BRAIN_TEST_ABORT_AFTER_CLEARED", out.done.len());
         }
     }
-    Ok(left)
+    out
 }
 
 #[cfg(test)]
@@ -255,7 +281,7 @@ mod tests {
         write(vault, changes, ledger, none, &mut |_| Ok(()), &mut |_| {
             Ok(())
         })
-        .unwrap()
+        .left
     }
 
     fn change(rel: &str, raw: &str, text: &str) -> Change {
@@ -370,47 +396,63 @@ mod tests {
         let text = |n: usize| format!("---\nreview: 2027-01-01\n---\n{n}\n");
         let cleared = |n: usize| format!("---\n---\n{n}\n");
         let mut ledger = Ledger::default();
+        let mut records = Vec::new();
+        // Recorded paths are matched against the vault's own root.
+        let root = Vault::open(dir.path()).unwrap().root;
         let changes: Vec<Change> = (0..BATCH + 5)
             .map(|n| {
                 let rel = format!("{n}.md");
                 note(dir.path(), &rel, &text(n));
-                let key = format!("vault/{rel}");
-                ledger
-                    .0
-                    .extend(recorded(&key, None, &hash(text(n).as_bytes())).0);
+                // Past the first batch the copies are archived ones, as `plan` orders them.
+                let held = hash(text(n).as_bytes());
+                if n < BATCH {
+                    let key = format!("vault/{rel}");
+                    ledger.0.extend(recorded(&key, None, &held).0);
+                } else {
+                    records.push(serde_json::json!({
+                        "key": format!("memory/-proj/{rel}"), "path": rel, "id": ID,
+                        "src_hash": "", "dst_hash": held, "from": "projects", "vault": root
+                    }));
+                }
                 change(&rel, &text(n), &cleared(n))
             })
             .collect();
-        let before = stored(&ledger);
-        let back =
-            |held: &serde_json::Value| -> Ledger { serde_json::from_value(held.clone()).unwrap() };
+        let before = (stored(&ledger), serde_json::Value::Array(records));
         let vault = Vault::open(dir.path()).unwrap();
-        // Whole, and then with the second batch's save failing.
-        for fail_at in [0, 2] {
+        // Whole, then with the second batch's archive save failing.
+        for fails in [false, true] {
             for (n, c) in changes.iter().enumerate() {
                 note(dir.path(), &c.path(), &text(n));
             }
-            ledger = back(&before);
-            let (mut saves, mut saved) = (0, before.clone());
+            let mut ledger: Ledger = serde_json::from_value(before.0.clone()).unwrap();
+            let mut archive: Archive = serde_json::from_value(before.1.clone()).unwrap();
+            let (mut in_ledger, mut in_archive) = before.clone();
             let done = write(
                 &vault,
                 &changes,
                 &mut ledger,
-                &mut Archive::default(),
+                &mut archive,
                 &mut |l| {
-                    saves += 1;
-                    anyhow::ensure!(saves != fail_at, "no room");
-                    saved = stored(l);
+                    in_ledger = stored(l);
                     Ok(())
                 },
-                &mut |_| Ok(()),
+                &mut |a| {
+                    anyhow::ensure!(!fails, "no room");
+                    in_archive = serde_json::to_value(a).unwrap();
+                    Ok(())
+                },
             );
-            assert_eq!(done.is_ok(), fail_at == 0);
-            let saved = back(&saved);
-            for c in &changes {
-                let now = std::fs::read(dir.path().join(c.path())).unwrap();
-                let entry = &saved.0[&format!("vault/{}", c.path())];
-                assert!(entry.copy.accepts(&hash(&now)), "{}", c.path());
+            assert_eq!(done.stopped.is_err(), fails);
+            assert_eq!(done.done.len(), if fails { BATCH } else { BATCH + 5 });
+            for (n, c) in changes.iter().enumerate() {
+                let now = hash(&std::fs::read(dir.path().join(c.path())).unwrap());
+                let record = if n < BATCH {
+                    in_ledger[format!("vault/{}", c.path())].clone()
+                } else {
+                    in_archive[n - BATCH].clone()
+                };
+                let held = [&record["dst_hash"], &record["was"]];
+                assert!(held.iter().any(|h| **h == *now), "{}: {record}", c.path());
             }
         }
     }

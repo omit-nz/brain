@@ -445,7 +445,12 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
             _ => continue,
         };
         if let Ok(bytes) = std::fs::read(dst.root.join(&rel)) {
-            entry.copy = Hashes::of(hash(&bytes));
+            // A copy the record already accepts, as one restored and not yet written, keeps
+            // both its hashes.
+            let now = hash(&bytes);
+            if !entry.copy.accepts(&now) {
+                entry.copy = Hashes::of(now);
+            }
             let text = String::from_utf8_lossy(&bytes);
             if let Some(id) = brain_note::Note::parse(&rel, &text, brain_note::Place::Kept).id {
                 entry.id = Some(id.to_string());
@@ -480,5 +485,27 @@ mod tests {
         let entry = &ledger.0["vault/a.md"];
         assert!(entry.copy.accepts(&hash(b"as it is\n")));
         assert!(!entry.copy.accepts("old"));
+    }
+
+    /// A copy restored and not yet written may be put back to either of its two hashes.
+    #[test]
+    fn settling_an_accepted_copy_keeps_both_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_atomic(
+            dir.path(),
+            Path::new("a.md"),
+            b"as it was\n",
+            Privacy::Normal,
+        )
+        .unwrap();
+        let mut ledger: Ledger = serde_json::from_value(serde_json::json!({
+            "vault/a.md": { "id": null, "src_hash": "", "dst_hash": "new",
+                            "was": hash(b"as it was\n") }
+        }))
+        .unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        settle(&mut ledger, &vault, &["vault/a.md".into()]).unwrap();
+        let entry = &ledger.0["vault/a.md"];
+        assert!(entry.copy.accepts("new") && entry.copy.accepts(&hash(b"as it was\n")));
     }
 }

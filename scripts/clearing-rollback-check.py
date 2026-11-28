@@ -81,6 +81,13 @@ def standing_for(data, vault):
             yield root, copy_of(record["key"]), record
 
 
+def holds_anything(folder):
+    try:
+        return any(folder.iterdir())
+    except OSError:
+        return False
+
+
 def in_the_way(path, record):
     """Why the file at `path` stops a rollback, or None. An older brain accepts only
     `dst_hash`, and reads a file that is not there the same as a newer one."""
@@ -105,30 +112,43 @@ def main():
         vault = tomllib.loads(args.config.read_text(encoding="utf-8"))["vault"]
     except (OSError, ValueError, KeyError) as error:
         sys.exit(f"{shown(args.config)} does not say where the vault is: {shown(error)}")
-    found = {}
-    for root, rel, record in standing_for(args.data, vault):
-        # A vault out of reach would read as one with nothing in the way.
-        if not root.is_dir():
-            sys.exit(f"the vault {shown(root)} is not there, so nothing is known")
-        why = in_the_way(root / rel, record)
-        if why:
-            found[str(root / rel)] = why
-    if not found:
+    found, gone = {}, {}
+    try:
+        for root, rel, record in standing_for(args.data, vault):
+            # A vault out of reach, or an empty folder where it was mounted, would read as one
+            # with nothing in the way.
+            if not holds_anything(root):
+                gone.setdefault(str(root), set()).add(rel)
+                continue
+            why = in_the_way(root / rel, record)
+            if why:
+                found[str(root / rel)] = why
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        sys.exit(f"a record is not one brain wrote, so nothing is known: {shown(repr(error))}")
+    if not found and not gone:
         print("no copy is waiting on the newer brain: rolling back is safe")
         return
-    names = sorted(found)
-    print(f"do not roll back yet: {len(names)} of brain's copies would read as edited by you")
-    for name in names[:SHOWN]:
-        print(f"  {shown(name)}: {found[name]}")
-    if len(names) > SHOWN:
-        print(f"  and {len(names) - SHOWN} more")
-    print(
-        "\nRun `brain import clear-review-dates --imported-on <day> --apply` again, with the same"
-        " days, then roll back. A file that cannot be read has to be made readable first.\n"
-        "If you put notes back from the commit made before clearing, this is why you see this: an"
-        " older brain would take those restored notes for ones you edited. Clearing them again"
-        " before rolling back removes the restored dates."
-    )
+    print("do not roll back yet")
+    if found:
+        names = sorted(found)
+        print(f"{len(names)} of brain's copies would read as edited by you:")
+        for name in names[:SHOWN]:
+            print(f"  {shown(name)}: {found[name]}")
+        if len(names) > SHOWN:
+            print(f"  and {len(names) - SHOWN} more")
+        print(
+            "\nRun `brain import clear-review-dates --imported-on <day> --apply` again, with the"
+            " same days, then roll back. A file that cannot be read has to be made readable"
+            " first.\nIf you put notes back from the commit made before clearing, this is why you"
+            " see this: an older brain would take those restored notes for ones you edited."
+            " Clearing them again before rolling back removes the restored dates."
+        )
+    for root, files in sorted(gone.items()):
+        print(
+            f"\n{shown(root)} is not there or is empty, so {len(files)} recorded copies in it could"
+            " not be looked at. Put the folder back and run this again. If it is gone for good,"
+            " it holds nothing an older brain could misread."
+        )
     sys.exit(1)
 
 

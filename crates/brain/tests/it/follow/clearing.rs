@@ -107,30 +107,17 @@ fn an_archived_copy_under_an_unreadable_folder_is_named() {
 fn a_follow_pass_started_during_a_clearing_waits() {
     let (h, p) = stamped_with_one_archived();
     p.write("stays", "stays second");
-    let gate = h.home.path().join("gate");
-    fs::write(&gate, "").unwrap();
-    let brain = || {
-        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"));
-        c.env("BRAIN_HOME", h.home.path())
-            .env("BRAIN_TEST_CLEAR_GATE", &gate)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        c
-    };
-    let clearing = brain().args(CLEAR).spawn().unwrap();
-    for _ in 0..1500 {
-        if fs::read_to_string(h.home.path().join(LEDGER))
-            .unwrap()
-            .contains("\"was\"")
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let mut follow = brain().args(["memory", "run"]).spawn().unwrap();
+    let (clearing, waiting) = h.held(&CLEAR);
+    let mut follow = h
+        .command()
+        .args(["memory", "run"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
     std::thread::sleep(Duration::from_secs(2));
     assert!(follow.try_wait().unwrap().is_none(), "it did not wait");
-    fs::remove_file(&gate).unwrap();
+    fs::remove_file(waiting).unwrap();
     let cleared = clearing.wait_with_output().unwrap();
     assert!(cleared.status.success(), "{cleared:?}");
     let followed = follow.wait_with_output().unwrap();
@@ -184,13 +171,21 @@ fn archive_records_that_cannot_be_saved_stop_the_run_and_hold_nothing() {
     comes_back_and_takes_a_change(&h, &p);
 }
 
-/// How many copies the two record files hold between them.
+/// The sources either record file holds a copy of.
 #[cfg(unix)]
-fn records(h: &Home) -> usize {
+fn records(h: &Home) -> std::collections::BTreeSet<String> {
     let read = |rel: &str| -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(h.home.path().join(rel)).unwrap()).unwrap()
     };
-    read(LEDGER).as_object().unwrap().len() + read(ARCHIVE).as_array().unwrap().len()
+    let archive = read(ARCHIVE);
+    let archived = archive.as_array().unwrap().iter();
+    read(LEDGER)
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .chain(archived.map(|r| r["key"].as_str().unwrap().to_string()))
+        .collect()
 }
 
 /// Each of these held follow for good, or lost a record, under an earlier design.
@@ -255,7 +250,8 @@ fn what_it_cannot_look_at_holds_nothing() {
             assert!(ran.status.success(), "{case}: {ran:?}");
             assert!(import.status.success(), "{case}: {import:?}");
         }
-        assert!(records(&h) >= before, "{case}: a record was dropped");
+        let lost: Vec<_> = before.difference(&records(&h)).cloned().collect();
+        assert!(lost.is_empty(), "{case}: records dropped: {lost:?}");
         match case {
             "archived file unreadable" => mode(&archived, 0o600),
             "project folder unreadable" => mode(&folder, 0o700),

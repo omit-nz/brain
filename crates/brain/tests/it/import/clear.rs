@@ -58,28 +58,9 @@ impl Import {
     /// Runs `--apply`, held once its records are saved and before it writes a note while
     /// `meanwhile` runs.
     fn apply_while(&self, meanwhile: impl FnOnce()) -> Output {
-        let gate = self.h.home.path().join("gate");
-        fs::write(&gate, "").unwrap();
-        let mut running = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"))
-            .env("BRAIN_HOME", self.h.home.path())
-            .env("BRAIN_TEST_CLEAR_GATE", &gate)
-            .args(CLEAR)
-            .arg("--apply")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let ledger = self.h.home.path().join("data/import-ledger.json");
-        for _ in 0..1500 {
-            if fs::read_to_string(&ledger).unwrap().contains("\"was\"") {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(running.try_wait().unwrap().is_none(), "it was not held");
+        let (running, waiting) = self.h.held(&[&CLEAR[..], &["--apply"]].concat());
         meanwhile();
-        fs::remove_file(&gate).unwrap();
+        fs::remove_file(waiting).unwrap();
         running.wait_with_output().unwrap()
     }
 
@@ -314,6 +295,8 @@ fn a_ledger_that_cannot_be_saved_stops_before_any_note_is_written() {
         !out.status.success() && why.contains("run the same command again"),
         "{why}"
     );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("0 review dates cleared"), "{said}");
     assert_eq!(i.dated(), 2);
     i.both_update();
 }
@@ -323,9 +306,8 @@ fn a_ledger_that_cannot_be_saved_stops_before_any_note_is_written() {
 fn clearing_waits_for_whoever_holds_the_import_lock() {
     let i = stamped();
     let held = Lock::acquire(&i.h.home.path().join("data/import.lock")).unwrap();
-    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"));
+    let mut command = i.h.command();
     command
-        .env("BRAIN_HOME", i.h.home.path())
         .args(CLEAR)
         .arg("--apply")
         .stdout(std::process::Stdio::null());
