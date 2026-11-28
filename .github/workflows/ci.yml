@@ -111,6 +111,7 @@ jobs:
       - run: bash scripts/install.test.sh
       - run: npm ci --ignore-scripts --prefix mcpb/tool
       - run: bash scripts/verify-mcpb.test.sh
+      - run: python3 -I scripts/eval-search.test.py
 
   gitleaks:
     runs-on: ubuntu-24.04
