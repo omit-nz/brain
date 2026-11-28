@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -20,7 +21,7 @@ use crate::config::Config;
 use crate::connect;
 use crate::daemon::{self, writer_lock};
 use crate::gaps;
-use crate::import::{self, Archive, Blocklist, Ledger, Written};
+use crate::import::{self, Archive, Blocklist, Ledger, Left, Written};
 use crate::inbox::{self, Dest};
 use crate::mcp;
 use crate::out::terminal;
@@ -190,6 +191,18 @@ struct SearchArgs {
 enum ImportFrom {
     /// A learning-loop vault and, optionally, Claude Code auto-memory.
     LearningLoop(LearningLoop),
+    /// Take out the review dates that brain 0.2.5 and earlier stamped on imported notes.
+    ClearReviewDates(ClearReviewDates),
+}
+
+#[derive(Args)]
+struct ClearReviewDates {
+    /// A day the notes were imported or followed, as 2026-11-27; give each one.
+    #[arg(long, required = true)]
+    imported_on: Vec<jiff::civil::Date>,
+    /// Write the change. Without it, only say what would be cleared.
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Args)]
@@ -431,6 +444,9 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Import {
             from: ImportFrom::LearningLoop(args),
         } => import_learning_loop(dirs, clock.today(), args),
+        Command::Import {
+            from: ImportFrom::ClearReviewDates(args),
+        } => clear_review_dates(dirs, clock.today(), args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
             let (result, event) = match action {
@@ -1130,6 +1146,130 @@ fn import_learning_loop(
     Ok(())
 }
 
+/// The days most of the dates left point to, newest first among equals, and how many more.
+fn days_line(days: &BTreeMap<jiff::civil::Date, usize>) -> String {
+    const SHOWN: usize = 10;
+    let mut by: Vec<_> = days.iter().collect();
+    by.sort_by_key(|(day, n)| std::cmp::Reverse((**n, **day)));
+    let mut line: Vec<String> = by
+        .iter()
+        .take(SHOWN)
+        .map(|(day, n)| format!("{day} ({})", plural(**n, "note")))
+        .collect();
+    if by.len() > SHOWN {
+        line.push(format!("and {}", plural(by.len() - SHOWN, "more day")));
+    }
+    line.join(", ")
+}
+
+/// `heading` and the first twenty of `paths`, when there are any.
+fn listed(lines: &mut Vec<String>, heading: &str, paths: Vec<String>) {
+    const SHOWN: usize = 20;
+    if paths.is_empty() {
+        return;
+    }
+    lines.push(format!("{heading}:"));
+    lines.extend(paths.iter().take(SHOWN).map(|p| format!("  {p}")));
+    if paths.len() > SHOWN {
+        lines.push(format!("  and {} more", paths.len() - SHOWN));
+    }
+}
+
+fn clear_review_dates(
+    dirs: &Dirs,
+    today: jiff::civil::Date,
+    a: ClearReviewDates,
+) -> anyhow::Result<()> {
+    let vault = Vault::open(&Config::load(dirs)?.vault)?;
+    // Held from the records' reading to their last save, as an import holds it: a follow pass
+    // saving an older copy over them would undo what this run recorded.
+    let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
+    let writer = Lock::try_acquire(&writer_lock(dirs))?;
+    let mut ledger = Ledger::load(dirs)?;
+    let mut archive = Archive::load(dirs)?;
+    let plan = import::plan_clearing(&vault, &ledger, &archive, &a.imported_on, today);
+    let mut left = Vec::new();
+    if a.apply {
+        println!(
+            "clearing {}; if this is interrupted, run the same command again",
+            plural(plan.changes.len(), "review date")
+        );
+        left = import::write_clearing(
+            &vault,
+            &plan.changes,
+            &mut ledger,
+            &mut archive,
+            &mut |ledger| ledger.save(dirs),
+            &mut |archive| archive.save(dirs),
+        )
+        .context("the clearing stopped; run the same command again")?;
+        if writer.is_some() {
+            let r = index(dirs)?.reindex(&vault)?;
+            daemon::forget(dirs, &r);
+        }
+    }
+    let (mut saved, mut refused) = (Vec::new(), Vec::new());
+    for note in left {
+        match note {
+            Left::Saved(path) => saved.push(path),
+            Left::Refused(path, why) => refused.push((path, why)),
+        }
+    }
+    let undone = saved.len() + refused.len();
+    let mut lines = vec![format!(
+        "{} review dates {}, {} written by capture and {} set some other way left as they are{}",
+        plan.changes.len() - undone,
+        if a.apply {
+            "cleared"
+        } else {
+            "would be cleared"
+        },
+        plan.captured,
+        plan.other,
+        if a.apply { "" } else { " (nothing written)" }
+    )];
+    let done = plan.changes.iter().map(|c| c.path());
+    lines.extend(
+        done.filter(|p| !saved.contains(p) && !refused.iter().any(|(r, _)| r == p))
+            .take(10)
+            .map(|p| format!("  {p}")),
+    );
+    if !plan.days.is_empty() {
+        lines.push(format!(
+            "if an import or a follow wrote any of those left, it was on one of: {}",
+            days_line(&plan.days)
+        ));
+        lines.push(
+            "name such a day with --imported-on; each day named can also take a date set by hand"
+                .into(),
+        );
+    }
+    let skipped = plan.skipped.iter().map(|(p, why)| format!("{p}: {why}"));
+    listed(&mut lines, "not looked at", skipped.collect());
+    listed(
+        &mut lines,
+        "saved since they were read; run it again",
+        saved,
+    );
+    let refused = refused.iter().map(|(p, why)| format!("{p}: {why}"));
+    listed(
+        &mut lines,
+        "could not be written, and running again will not; change these first",
+        refused.collect(),
+    );
+    if !a.apply {
+        lines.push(
+            "commit your vault first so they can be put back, then run it again with --apply"
+                .into(),
+        );
+    } else if writer.is_none() {
+        lines.push("brain's daemon will index them".into());
+    }
+    println!("{}", terminal(&lines.join("\n")));
+    anyhow::ensure!(undone == 0, "{} left undone", plural(undone, "note"));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -1184,6 +1324,21 @@ mod tests {
         assert_eq!(named(&cli, "brain init --me <you>").unwrap(), "init");
         assert_eq!(named(&cli, "brain memory mend"), None);
         assert_eq!(named(&cli, "brain mend"), None);
+    }
+
+    #[test]
+    fn the_days_left_are_listed_newest_first_and_the_rest_counted() {
+        let days: BTreeMap<jiff::civil::Date, usize> = (1..=12)
+            .map(|d| (jiff::civil::date(2026, 11, d), 1))
+            .collect();
+        let line = days_line(&days);
+        assert!(
+            line.starts_with("2026-11-12 (1 note), 2026-11-11 (1 note)"),
+            "{line}"
+        );
+        assert!(line.ends_with("and 2 more days"), "{line}");
+        let eleven = days.into_iter().take(11).collect();
+        assert!(days_line(&eleven).ends_with("and 1 more day"));
     }
 
     #[test]

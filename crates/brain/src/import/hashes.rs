@@ -29,6 +29,17 @@ impl Hashes {
         self.accepts(&other.written) || other.was.as_deref().is_some_and(|was| self.accepts(was))
     }
 
+    /// Records brain's rewrite of the file from `from` to `to`, before it is made. A record
+    /// that accepts `from` only as what it was stays as it is: it accepts the file already, and
+    /// the hash it would give up may be another file's. Says whether anything changed.
+    pub fn rewrite(&mut self, from: &str, to: &str) -> bool {
+        let moves = self.written == from;
+        if moves {
+            self.was = Some(std::mem::replace(&mut self.written, to.to_string()));
+        }
+        moves
+    }
+
     /// Records the copy's bytes as they are now.
     pub fn settle(&mut self, hash: String) {
         self.written = hash;

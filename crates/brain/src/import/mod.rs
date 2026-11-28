@@ -10,6 +10,7 @@ mod follow;
 mod hashes;
 mod memory;
 mod report;
+mod review;
 mod vault;
 
 use std::collections::{BTreeMap, HashSet};
@@ -28,6 +29,7 @@ pub use blocklist::Blocklist;
 pub use follow::{Followed, sync};
 use hashes::Hashes;
 pub use report::report;
+pub use review::{Left, plan as plan_clearing, write as write_clearing};
 
 pub const LEDGER: &str = "import-ledger.json";
 /// Held by whoever reads, changes and saves the ledger.
@@ -119,6 +121,24 @@ impl Ledger {
                 && e.from.as_deref().is_none_or(|from| from == folder)
                 && vault.root.join(follow::copy_of(vault, key)).is_file()
         })
+    }
+
+    /// The keys of the sources an import wrote the note `id` into `vault` from.
+    fn keys_of<'a>(&'a self, vault: &'a Path, id: &'a str) -> impl Iterator<Item = &'a str> {
+        self.0
+            .iter()
+            .filter(move |(_, e)| e.of(vault) && e.id.as_deref() == Some(id))
+            .map(|(key, _)| key.as_str())
+    }
+
+    /// Records brain's rewrite of the copies in `vault` that read as `from`, and says whether
+    /// any record changed.
+    fn rewrite(&mut self, vault: &Path, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for entry in self.0.values_mut().filter(|e| e.of(vault)) {
+            changed |= entry.copy.rewrite(from, to);
+        }
+        changed
     }
 
     pub fn save(&self, dirs: &Dirs) -> anyhow::Result<()> {

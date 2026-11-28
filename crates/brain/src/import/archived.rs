@@ -99,6 +99,33 @@ impl Archive {
         Ok(())
     }
 
+    /// Where `vault`'s archived copies are, relative to it.
+    pub(super) fn files<'a>(&'a self, vault: &'a Path) -> impl Iterator<Item = &'a Path> {
+        let of = self.0.iter().filter(move |r| r.vault == vault);
+        of.map(|r| r.path.as_path())
+    }
+
+    /// The keys of the sources whose archived copy in `vault` is the note `id`.
+    pub(super) fn keys_of<'a>(
+        &'a self,
+        vault: &'a Path,
+        id: &'a str,
+    ) -> impl Iterator<Item = &'a str> {
+        self.0
+            .iter()
+            .filter(move |r| r.vault == vault && r.id.as_deref() == Some(id))
+            .map(|r| r.key.as_str())
+    }
+
+    /// As `Ledger::rewrite`, for the archived records.
+    pub(super) fn rewrite(&mut self, vault: &Path, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for r in self.0.iter_mut().filter(|r| r.vault == vault) {
+            changed |= r.copy.rewrite(from, to);
+        }
+        changed
+    }
+
     /// Whether a record names the note `id`.
     pub fn names(&self, id: &str) -> bool {
         self.0.iter().any(|r| r.id.as_deref() == Some(id))
