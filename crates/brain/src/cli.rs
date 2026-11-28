@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -191,18 +190,6 @@ struct SearchArgs {
 enum ImportFrom {
     /// A learning-loop vault and, optionally, Claude Code auto-memory.
     LearningLoop(LearningLoop),
-    /// Take out the review dates that brain 0.2.5 and earlier stamped on imported notes.
-    ClearReviewDates(ClearReviewDates),
-}
-
-#[derive(Args)]
-struct ClearReviewDates {
-    /// A day the notes were imported or followed, as 2026-11-27; give each one.
-    #[arg(long, required = true)]
-    imported_on: Vec<jiff::civil::Date>,
-    /// Write the change. Without it, only say what would be cleared.
-    #[arg(long)]
-    apply: bool,
 }
 
 #[derive(Args)]
@@ -444,9 +431,6 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Import {
             from: ImportFrom::LearningLoop(args),
         } => import_learning_loop(dirs, clock.today(), args),
-        Command::Import {
-            from: ImportFrom::ClearReviewDates(args),
-        } => clear_review_dates(dirs, clock.today(), args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
             let (result, event) = match action {
@@ -478,7 +462,6 @@ fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
             // A link is stored as what it points at: the pass follows no link.
             let found = projects.canonicalize().ok().filter(|p| p.is_dir());
             let found = found.with_context(|| format!("{}: no such folder", projects.display()))?;
-            import::refuse_if_unfinished(dirs)?;
             config.memory.follow = Some(found);
             config.save(dirs)?;
         }
@@ -1035,12 +1018,6 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
         n => lines.push(format!("{n} copies are behind their source")),
     }
     lines.extend(archived.filter(|n| *n > 0).map(import::archived_line));
-    if import::unfinished_clearing(dirs).is_ok_and(|days| !days.is_empty()) {
-        lines.push(
-            "a clearing of review dates is unfinished, so follow and import hold; run `brain import clear-review-dates` again"
-                .into(),
-        );
-    }
     lines.extend(unread);
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());
@@ -1080,9 +1057,6 @@ fn import_learning_loop(
     } else {
         Some(Lock::acquire(&dirs.data.join(import::LOCK))?)
     };
-    if !a.dry_run {
-        import::refuse_if_unfinished(dirs)?;
-    }
     let mut ledger = Ledger::load(dirs)?;
     // Held through the copy too, so a daemon started mid-import waits for it.
     let lock = if a.dry_run {
@@ -1156,117 +1130,6 @@ fn import_learning_loop(
     Ok(())
 }
 
-/// The days most of the dates left point to, newest first among equals, and how many more.
-fn days_line(days: &BTreeMap<jiff::civil::Date, usize>) -> String {
-    const SHOWN: usize = 10;
-    let mut by: Vec<_> = days.iter().collect();
-    by.sort_by_key(|(day, n)| std::cmp::Reverse((**n, **day)));
-    let mut line: Vec<String> = by
-        .iter()
-        .take(SHOWN)
-        .map(|(day, n)| format!("{day} ({})", plural(**n, "note")))
-        .collect();
-    if by.len() > SHOWN {
-        line.push(format!("and {}", plural(by.len() - SHOWN, "more day")));
-    }
-    line.join(", ")
-}
-
-fn clear_review_dates(
-    dirs: &Dirs,
-    today: jiff::civil::Date,
-    a: ClearReviewDates,
-) -> anyhow::Result<()> {
-    let vault = Vault::open(&Config::load(dirs)?.vault)?;
-    // Held as an import holds them, so neither a memory pass nor the daemon writes meanwhile.
-    let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
-    let writer = Lock::try_acquire(&writer_lock(dirs))?;
-    let mut ledger = Ledger::load(dirs)?;
-    let mut archive = Archive::load(dirs)?;
-    // A clearing cut short is finished on its own days as well as those named now.
-    let cut_short = import::unfinished_clearing(dirs)?;
-    let finishing = !cut_short.is_empty();
-    let mut days = cut_short.clone();
-    days.extend(&a.imported_on);
-    days.sort();
-    days.dedup();
-    let plan = import::plan_clearing(&vault, &ledger, &archive, &days, today);
-    let mut failed = Vec::new();
-    if a.apply {
-        let save = &mut |ledger: &Ledger, archive: &Archive| {
-            ledger.save(dirs)?;
-            archive.save(dirs)
-        };
-        import::mark_clearing(dirs, &days)?;
-        failed = import::write_clearing(&vault, &plan.changes, &mut ledger, &mut archive, save)
-            .context("the clearing was cut short; run it again to finish it")?;
-        if failed.is_empty() && !(finishing && !plan.unread.is_empty()) {
-            import::mark_clearing(dirs, &[])?;
-        }
-        if writer.is_some() {
-            let r = index(dirs)?.reindex(&vault)?;
-            daemon::forget(dirs, &r);
-        }
-    }
-    let mut lines = vec![format!(
-        "{} review dates {}, {} written by capture and {} set some other way left as they are{}",
-        plan.changes.len() - failed.len(),
-        if a.apply {
-            "cleared"
-        } else {
-            "would be cleared"
-        },
-        plan.captured,
-        plan.other,
-        if a.apply { "" } else { " (nothing written)" }
-    )];
-    if finishing {
-        let on: Vec<String> = cut_short.iter().map(ToString::to_string).collect();
-        lines.push(format!(
-            "also finishing a run cut short, on {}",
-            on.join(", ")
-        ));
-    }
-    let done = plan.changes.iter().map(|c| c.path());
-    lines.extend(
-        done.filter(|p| !failed.contains(p))
-            .take(10)
-            .map(|p| format!("  {p}")),
-    );
-    if !plan.days.is_empty() {
-        lines.push(format!(
-            "if an import or a follow wrote any of those left, it was on one of: {}",
-            days_line(&plan.days)
-        ));
-        lines.push(
-            "name such a day with --imported-on; each day named can also take a date set by hand"
-                .into(),
-        );
-    }
-    if !failed.is_empty() {
-        lines.push("could not be written; follow and import hold until a run writes them:".into());
-        lines.extend(failed.iter().map(|p| format!("  {p}")));
-    }
-    let unread = if finishing { plan.unread.len() } else { 0 };
-    if unread > 0 {
-        lines.push("could not be read, so the run cut short is not finished:".into());
-        lines.extend(plan.unread.iter().map(|p| format!("  {p}")));
-    }
-    if !a.apply {
-        lines.push(
-            "commit your vault first so they can be put back, then run it again with --apply"
-                .into(),
-        );
-    }
-    println!("{}", terminal(&lines.join("\n")));
-    anyhow::ensure!(
-        !a.apply || failed.len() + unread == 0,
-        "{} left undone; fix them and run it again",
-        plural(failed.len() + unread, "note")
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -1321,21 +1184,6 @@ mod tests {
         assert_eq!(named(&cli, "brain init --me <you>").unwrap(), "init");
         assert_eq!(named(&cli, "brain memory mend"), None);
         assert_eq!(named(&cli, "brain mend"), None);
-    }
-
-    #[test]
-    fn the_days_left_are_listed_newest_first_and_the_rest_counted() {
-        let days: BTreeMap<jiff::civil::Date, usize> = (1..=12)
-            .map(|d| (jiff::civil::date(2026, 11, d), 1))
-            .collect();
-        let line = days_line(&days);
-        assert!(
-            line.starts_with("2026-11-12 (1 note), 2026-11-11 (1 note)"),
-            "{line}"
-        );
-        assert!(line.ends_with("and 2 more days"), "{line}");
-        let eleven = days.into_iter().take(11).collect();
-        assert!(days_line(&eleven).ends_with("and 1 more day"));
     }
 
     #[test]

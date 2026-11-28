@@ -81,7 +81,6 @@ pub fn sync(
     w: &Written<'_>,
     index: impl FnOnce(&Vault) -> anyhow::Result<()>,
 ) -> anyhow::Result<Followed> {
-    super::refuse_if_unfinished(dirs)?;
     // A vault that is not there would be made again, empty but for the memories.
     if !vault.root.is_dir() {
         bail!(

@@ -9,7 +9,6 @@ mod blocklist;
 mod follow;
 mod memory;
 mod report;
-mod review;
 mod vault;
 
 use std::collections::{BTreeMap, HashSet};
@@ -27,10 +26,6 @@ pub use archived::{Archive, archived_line};
 pub use blocklist::Blocklist;
 pub use follow::{Followed, sync};
 pub use report::report;
-pub use review::{
-    mark as mark_clearing, plan as plan_clearing, refuse_if_unfinished,
-    unfinished as unfinished_clearing, write as write_clearing,
-};
 
 pub const LEDGER: &str = "import-ledger.json";
 /// Held by whoever reads, changes and saves the ledger.
@@ -121,23 +116,6 @@ impl Ledger {
                 && e.from.as_deref().is_none_or(|from| from == folder)
                 && vault.root.join(follow::copy_of(vault, key)).is_file()
         })
-    }
-
-    /// The keys of the sources an import wrote the note `id` into `vault` from.
-    fn keys_of<'a>(&'a self, vault: &'a Path, id: &'a str) -> impl Iterator<Item = &'a str> {
-        self.0
-            .iter()
-            .filter(move |(_, e)| e.of(vault) && e.id.as_deref() == Some(id))
-            .map(|(key, _)| key.as_str())
-    }
-
-    /// Records brain's own rewrite of a copy in `vault`, from bytes it had recorded.
-    fn rewritten(&mut self, vault: &Path, from: &str, to: &str) {
-        for entry in self.0.values_mut() {
-            if entry.of(vault) && entry.dst_hash == from {
-                entry.dst_hash = to.to_string();
-            }
-        }
     }
 
     pub fn save(&self, dirs: &Dirs) -> anyhow::Result<()> {

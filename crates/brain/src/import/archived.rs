@@ -98,21 +98,6 @@ impl Archive {
         Ok(())
     }
 
-    /// Where `vault`'s archived copies are, relative to it.
-    pub(super) fn files<'a>(&'a self, vault: &'a Path) -> impl Iterator<Item = &'a Path> {
-        let of = self.0.iter().filter(move |r| r.vault == vault);
-        of.map(|r| r.path.as_path())
-    }
-
-    /// Records brain's own rewrite of an archived copy in `vault`, from bytes it had recorded.
-    pub(super) fn rewritten(&mut self, vault: &Path, from: &str, to: &str) {
-        for r in &mut self.0 {
-            if r.vault == vault && r.dst_hash == from {
-                r.dst_hash = to.to_string();
-            }
-        }
-    }
-
     /// Whether a record names the note `id`.
     pub fn names(&self, id: &str) -> bool {
         self.0.iter().any(|r| r.id.as_deref() == Some(id))

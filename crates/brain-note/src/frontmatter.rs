@@ -284,21 +284,6 @@ impl Frontmatter {
         Ok(())
     }
 
-    /// Takes out `key`'s line and the lines that continue it.
-    pub fn remove(&mut self, key: &str) {
-        if let Some(i) = self
-            .lines
-            .iter()
-            .position(|l| value_after(l, key).is_some())
-        {
-            let n = self.lines[i + 1..]
-                .iter()
-                .take_while(|l| continues(l))
-                .count();
-            self.lines.drain(i..=i + n);
-        }
-    }
-
     fn render(&self) -> String {
         let mut out = self.open.clone();
         for l in &self.lines {
