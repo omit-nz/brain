@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::SystemTime;
 
-use brain::fence::{attrs, escape, fence_ref};
+use brain::fence::{TITLE_CHARS, attrs, escape, fence_ref};
 use brain::update;
-use brain_index::{Hit, Index, Query, Scope, embed, is_gap};
+use brain_index::{Due, Hit, Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
 use brain_platform::clock::Clock;
 use brain_platform::dirs::Dirs;
@@ -19,6 +19,7 @@ use brain_platform::fs::Lock;
 use brain_platform::{process, service};
 use brain_report::{Door, Event};
 use jiff::ToSpan;
+use jiff::civil::Date;
 use ll_core::embed::EmbeddingProvider;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -77,6 +78,44 @@ const BODY_CHARS: usize = 4_000;
 const PAGE_CHARS: usize = 40_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
+const DUE_SHOWN: usize = 20;
+/// A tool result an AI's client takes whole; a review queue can hold thousands of notes.
+const DUE_CHARS: usize = 9_500;
+
+/// How many are due and of what kind, then the longest overdue, as many as fit.
+fn due_reply(due: &[Due], today: Date, within: i64) -> String {
+    let now = due.iter().filter(|d| d.review <= today).count();
+    let kinds: Vec<String> = [Kind::Knowledge, Kind::Rule, Kind::History]
+        .into_iter()
+        .filter_map(|k| {
+            let n = due.iter().filter(|d| d.kind == k).count();
+            (n > 0).then(|| format!("{n} {}", k.as_str()))
+        })
+        .collect();
+    let mut out = format!(
+        "Due for review: {now} now, {} more within {within} days.\nBy kind: {}.\nOldest first:",
+        due.len() - now,
+        kinds.join(", ")
+    );
+    let mut listed = 0;
+    for d in due.iter().take(DUE_SHOWN) {
+        let title: String = d.title.chars().take(TITLE_CHARS).collect();
+        let line = format!(
+            "\n{}  {}",
+            d.review,
+            fence_ref(d.note_uuid, &d.path, &title, None)
+        );
+        if out.len() + line.len() > DUE_CHARS {
+            break;
+        }
+        out.push_str(&line);
+        listed += 1;
+    }
+    if listed < due.len() {
+        out.push_str(&format!("\n{} more not listed.", due.len() - listed));
+    }
+    out
+}
 
 /// `body` cut at 4,000 characters.
 fn cut(body: &str) -> String {
@@ -403,25 +442,20 @@ impl Server {
         .await
     }
 
-    #[tool(description = "List this person's notes whose review has come, oldest first.")]
+    #[tool(
+        description = "Count this person's notes whose review has come or is coming, and list the oldest."
+    )]
     async fn due(&self, Parameters(a): Parameters<DueArgs>) -> Result<String, String> {
         self.blocking(move |s| {
             let within = i64::from(a.within_days.unwrap_or(14).min(365));
-            let by = s.clock.today().checked_add(within.days())?;
+            let today = s.clock.today();
+            let by = today.checked_add(within.days())?;
             let (vault, me) = s.current()?;
             let due = s.index_of(&vault)?.due(&me, by)?;
             if due.is_empty() {
                 return Ok("Nothing of theirs is due.".into());
             }
-            let mut out = vec!["Due for review, oldest first:".to_string()];
-            out.extend(due.iter().map(|d| {
-                format!(
-                    "{}  {}",
-                    d.review,
-                    fence_ref(d.note_uuid, &d.path, &d.title, None)
-                )
-            }));
-            Ok(out.join("\n"))
+            Ok(due_reply(&due, today, within))
         })
         .await
     }
