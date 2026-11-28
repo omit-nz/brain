@@ -283,6 +283,56 @@ fn check_names_a_newer_release_and_installs_nothing() {
     assert_eq!(update::check(local(&name), NEW).unwrap(), None);
 }
 
+/// A release listing in the order given, holding no assets.
+struct Listed(&'static [&'static str]);
+
+impl ReleaseSource for Listed {
+    fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
+        self.0
+            .iter()
+            .map(|v| Release::builder().version(*v).name(format!("v{v}")).build())
+            .collect()
+    }
+}
+
+impl update::Source for Listed {}
+
+/// An update takes the newest release of the line it is on, and moves line only when that line
+/// has nothing newer. `--check` names that one, whatever order the releases are listed in.
+#[test]
+fn check_names_the_release_an_update_installs() {
+    let listed: &[&str] = &["0.3.0", "0.2.9", "0.2.10", "0.2.8"];
+    for (from, to) in [
+        ("0.2.8", Some("0.2.10")),
+        ("0.2.10", Some("0.3.0")),
+        ("0.3.0", None),
+    ] {
+        assert_eq!(
+            update::check(Listed(listed), from).unwrap().as_deref(),
+            to,
+            "from {from}"
+        );
+    }
+}
+
+#[test]
+fn an_update_installs_what_check_names() {
+    let releases = tempfile::tempdir().unwrap();
+    for version in ["0.2.9", "0.2.10", "0.3.0"] {
+        archive(releases.path(), version, &[key(1)]);
+    }
+    let source = || update::LocalDir(releases.path().to_path_buf());
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("brain-current");
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    let named = update::check(source(), "0.2.8").unwrap().unwrap();
+    assert_eq!(named, "0.2.10");
+    let done = update::newer(source, &trusting(&[public(&key(1))]), &current, "0.2.8").unwrap();
+    assert_eq!(done, Some(named));
+    assert_eq!(installed(root.path()).0, "binary 0.2.10");
+}
+
 #[test]
 fn install_dir_names_the_folder_update_replaces() {
     let home = tempfile::tempdir().unwrap();
