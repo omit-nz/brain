@@ -130,6 +130,15 @@ impl Mcp {
 
 impl Drop for Mcp {
     fn drop(&mut self) {
+        // Hung up on, not killed: a server asked to go finishes the records it is still writing,
+        // and a test reads them next. One that will not go is killed.
+        self.hang_up();
+        for _ in 0..500 {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
