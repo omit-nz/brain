@@ -102,6 +102,14 @@ const SHARED: FtsConfig = FtsConfig::new(
     WEIGHTS,
 );
 
+/// The tables a scope searches; a shared-only search reads its view alone.
+fn config(scope: Scope) -> &'static FtsConfig {
+    match scope {
+        Scope::Mine => &MINE,
+        Scope::SharedOnly => &SHARED,
+    }
+}
+
 /// How many fused candidates the kinds filter and the limit choose from.
 const POOL: usize = 200;
 /// How many of the top the cross-encoder reorders.
@@ -163,13 +171,11 @@ impl Index {
                             found.hits.push(hit);
                         }
                     }
-                    found.words |= about.words;
                     found.hits.sort_by(|a, b| b.score.total_cmp(&a.score));
                 }
             }
             recent::newest_first(&mut found.hits);
         }
-        found.hits.truncate(q.limit);
         self.mark_overtaken(&mut found.hits, q)?;
         found.hits.truncate(q.limit);
         Ok(found)
@@ -187,10 +193,7 @@ impl Index {
             words: false,
             reranked: false,
         };
-        let config = match q.scope {
-            Scope::Mine => &MINE,
-            Scope::SharedOnly => &SHARED,
-        };
+        let config = config(q.scope);
         let items = config.items_table;
         let weights = FusionWeights::default();
         let mut fused = HashMap::new();
@@ -329,17 +332,14 @@ impl Index {
         }))
     }
 
-    /// Marks each hit another note corrects or supersedes, and lists that note directly above it.
+    /// Marks each hit within the limit that another note corrects or supersedes, and lists that
+    /// note directly above it: from further down the search's own hits when it is one of them, or
+    /// added when the hit it overtakes was itself judged.
     fn mark_overtaken(&self, hits: &mut Vec<Hit>, q: &Query<'_>) -> anyhow::Result<()> {
-        let items = match q.scope {
-            Scope::Mine => MINE.items_table,
-            Scope::SharedOnly => SHARED.items_table,
-        };
+        let items = config(q.scope).items_table;
         let declares: bool = self.conn.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM {items}
-                               WHERE corrects IS NOT NULL OR supersedes IS NOT NULL)"
-            ),
+            "SELECT EXISTS(SELECT 1 FROM notes
+                           WHERE corrects IS NOT NULL OR supersedes IS NOT NULL)",
             [],
             |r| r.get(0),
         )?;
@@ -347,7 +347,8 @@ impl Index {
             return Ok(());
         }
         let mut st = self.conn.prepare(&format!(
-            "SELECT path, note_uuid, said, corrects, supersedes FROM {items}"
+            "SELECT n.path, n.note_uuid, n.said, n.corrects, n.supersedes, v.id IS NOT NULL
+             FROM notes n LEFT JOIN {items} v ON v.id = n.id"
         ))?;
         let notes: Vec<Named> = st
             .query_map([], |r| {
@@ -357,24 +358,27 @@ impl Index {
                     said: recent::said(r.get::<_, Option<String>>(2)?.as_deref(), q.today),
                     corrects: r.get(3)?,
                     supersedes: r.get(4)?,
+                    seen: r.get(5)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
         let marks = recent::overtakers(&notes);
         let mut raised = HashSet::new();
         let mut i = 0;
-        while i < hits.len() {
+        while i < hits.len().min(q.limit) {
             let Some(&by) = marks.get(hits[i].path.as_str()) else {
                 i += 1;
                 continue;
             };
             hits[i].overtaken_by = Some(by.to_string());
-            // Each overtaker is raised once, so a ring of declarations ends.
-            if !raised.insert(by) || hits[..i].iter().any(|h| h.path == by) {
+            let listed = hits.iter().position(|h| h.path == by);
+            // Nothing to do when it is already above, or when it would be added over a hit the
+            // search never judged. Each is raised once, so a ring of declarations ends.
+            let settled = listed.map_or(hits[i].added, |at| at < i);
+            if settled || !raised.insert(by) {
                 i += 1;
                 continue;
             }
-            let listed = hits.iter().position(|h| h.path == by);
             let over = match listed {
                 Some(at) => Some(hits.remove(at)),
                 None => self
