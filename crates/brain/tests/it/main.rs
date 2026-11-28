@@ -11,6 +11,7 @@ mod gaps;
 mod hook;
 mod import;
 mod mcp;
+mod offer;
 mod room;
 mod service;
 mod update;

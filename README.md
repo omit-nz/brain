@@ -84,6 +84,7 @@ A room lets your AI sessions leave each other messages on this computer, even se
 - `brain import clear-review-dates --imported-on <day>`: take out the review dates 0.2.5 and earlier stamped on what they imported. It only lists them until `--apply`.
 - `brain room post`, `brain room new`, `brain room list`: leave and read messages between sessions.
 - `brain usage`, `brain usage on`, `brain usage off`: see and set what omit is sent.
+- `brain setup reminders`: turn brain's reminder to run setup off or on.
 
 ## What omit sees
 

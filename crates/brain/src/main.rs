@@ -11,6 +11,7 @@ mod hook;
 mod import;
 mod inbox;
 mod mcp;
+mod offer;
 mod open;
 mod plugin;
 mod room;

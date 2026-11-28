@@ -25,6 +25,7 @@ use crate::gaps;
 use crate::import::{self, Archive, Blocklist, Ledger, Left, Written};
 use crate::inbox::{self, Dest};
 use crate::mcp;
+use crate::offer;
 use crate::open;
 use crate::out::terminal;
 use crate::room;
@@ -104,6 +105,11 @@ enum Command {
     Usage {
         #[command(subcommand)]
         action: Option<UsageAction>,
+    },
+    /// Setting brain up.
+    Setup {
+        #[command(subcommand)]
+        action: SetupAction,
     },
     /// Serve brain to an AI tool over MCP on stdin and stdout.
     Mcp {
@@ -295,6 +301,18 @@ enum MemoryAction {
 }
 
 #[derive(Subcommand)]
+enum SetupAction {
+    /// Turn brain's reminder to run setup off or on.
+    Reminders { state: Switch },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
+}
+
+#[derive(Subcommand)]
 enum UsageAction {
     /// Send the day's counts to omit (the default).
     On,
@@ -405,6 +423,14 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Room { action } => room_cmd(dirs, &*clock, action),
+        Command::Setup {
+            action: SetupAction::Reminders { state },
+        } => {
+            let on = matches!(state, Switch::On);
+            offer::set_reminders(&dirs.data, &*clock, on)?;
+            println!("Setup reminders: {}", if on { "on" } else { "off" });
+            Ok(())
+        }
         Command::Usage { action } => match action {
             None => usage::show(dirs, clock.today()),
             Some(UsageAction::On) => usage::set(dirs, &*clock, true),
@@ -1038,7 +1064,21 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source + Clone) -> anyh
 }
 
 fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
-    let config = Config::load(dirs)?;
+    let aside = offer::set_aside(&dirs.data);
+    let aside_lines: Vec<String> = aside
+        .iter()
+        .map(|name| {
+            format!(
+                "{name}: brain set this unreadable file aside and its reminders started again; \
+                 `brain setup reminders off` turns them off"
+            )
+        })
+        .collect();
+    let config = Config::load(dirs).inspect_err(|_| {
+        for line in &aside_lines {
+            eprintln!("{}", terminal(line));
+        }
+    })?;
     let idx = index(dirs)?;
     // Another vault's counts are not this one's.
     let other = idx.check(&config.vault).err().map(|e| e.to_string());
@@ -1066,19 +1106,19 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             let v = json!({
                 "daemon": daemon,
                 "index": why,
+                "setup_unreadable": aside,
                 "vault": config.vault,
                 "version": version,
             });
             println!("{}", serde_json::to_string_pretty(&v)?);
         } else {
-            println!(
-                "{}",
-                terminal(&format!(
-                    "brain {version}, vault {}\n{why}\ndaemon: {}",
-                    config.vault.display(),
-                    if daemon { "running" } else { "not running" }
-                ))
-            );
+            let mut lines = vec![format!(
+                "brain {version}, vault {}\n{why}\ndaemon: {}",
+                config.vault.display(),
+                if daemon { "running" } else { "not running" }
+            )];
+            lines.extend(aside_lines);
+            println!("{}", terminal(&lines.join("\n")));
         }
         return Ok(());
     }
@@ -1094,6 +1134,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
             "unidentified": s.unidentified,
             "behind_source": behind,
             "memories_archived": archived,
+            "setup_unreadable": aside,
             "vault": config.vault,
             "version": version,
         });
@@ -1122,6 +1163,7 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
     }
     lines.extend(archived.filter(|n| *n > 0).map(import::archived_line));
     lines.extend(unread);
+    lines.extend(aside_lines);
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());
     }
