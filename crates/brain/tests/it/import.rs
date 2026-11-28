@@ -835,6 +835,37 @@ fn only_a_descriptions_own_words_head_the_copy() {
         ("flow-list", " [vents, noon]", "flow-list"),
         ("flow-map", " {a: b}", "flow-map"),
         ("bracketed", " [draft] vents", "[draft] vents"),
+        (
+            "quoted-then-comment",
+            " \"vents open\"\n  # checked 3 Mar 2019",
+            "vents open",
+        ),
+        (
+            "block-then-comment",
+            " |\n    vents open\n  # checked 3 Mar 2019",
+            "vents open",
+        ),
+        (
+            "comment-after-line",
+            " vents\n  open # checked 3 Mar 2019",
+            "vents open",
+        ),
+        (
+            "quoted-keys",
+            "\n  \"short\": vents\n  \"checked\": 3 Mar 2019",
+            "quoted-keys",
+        ),
+        (
+            "flow-then-comment",
+            " {a: b} # 2019-03-03",
+            "flow-then-comment",
+        ),
+        ("header-below", "\n  >-\n    vents open", "vents open"),
+        // Several lines that YAML cannot read are left out, as they were before.
+        ("unreadable", " a: b\n  c: d", "unreadable"),
+        // One line is taken as written, a ` #` in it too.
+        ("hash-in-line", " see issue #12", "see issue #12"),
+        ("colon-in-line", " Fix: the vents", "Fix: the vents"),
     ];
     for (name, value, _) in shapes {
         fs::write(

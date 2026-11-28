@@ -119,7 +119,7 @@ pub fn to_note(s: &Source, id: &str, w: &Written<'_>) -> anyhow::Result<String> 
     // One line about the memory leads every copy, so its own first line is always the next: the
     // date reader counts on it.
     let head = fm
-        .and_then(|f| f.one_line("description"))
+        .and_then(|f| f.words("description"))
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| title.clone());
