@@ -1059,3 +1059,58 @@ mod linked {
         texts
     }
 }
+
+/// A copy stamped by 0.2.5 and archived since comes back without its date once cleared, and is
+/// still brain's.
+#[test]
+fn an_archived_copys_stamped_date_is_cleared_too() {
+    let (h, p) = two();
+    let path = copy_path(h.vault.path(), "one");
+    let text = fs::read_to_string(&path).unwrap();
+    let id = text
+        .lines()
+        .find_map(|l| l.strip_prefix("id: "))
+        .unwrap()
+        .to_string();
+    // As an import on 2026-11-25 chose it: 1 to 90 days on, by a hash of the id.
+    let days = u64::from_le_bytes(
+        <sha2::Sha256 as sha2::Digest>::digest(id.as_bytes())[..8]
+            .try_into()
+            .unwrap(),
+    ) % 90;
+    let review = jiff::civil::date(2026, 11, 25)
+        .checked_add(jiff::ToSpan::days(days as i64 + 1))
+        .unwrap();
+    let stamped = text.replacen(
+        "owner: robin\n",
+        &format!("owner: robin\nreview: {review}\n"),
+        1,
+    );
+    assert_ne!(text, stamped);
+    let ledger_at = h.home.path().join("data/import-ledger.json");
+    let recorded = fs::read_to_string(&ledger_at).unwrap();
+    let (old, new) = (sha256(text.as_bytes()), sha256(stamped.as_bytes()));
+    assert!(recorded.contains(&old));
+    fs::write(&ledger_at, recorded.replace(&old, &new)).unwrap();
+    fs::write(&path, &stamped).unwrap();
+    let source = p.path().join("-proj/memory/one.md");
+    let words = fs::read_to_string(&source).unwrap();
+    fs::remove_file(&source).unwrap();
+    h.run(&["memory", "run"]);
+    h.run(&["memory", "run"]);
+    assert!(!path.exists(), "archived");
+    h.run(&[
+        "import",
+        "clear-review-dates",
+        "--imported-on",
+        "2026-11-25",
+        "--apply",
+    ]);
+    fs::write(&source, &words).unwrap();
+    h.run(&["memory", "run"]);
+    let back = fs::read_to_string(&path).unwrap();
+    assert!(!back.contains("review:"), "{back}");
+    fs::write(&source, format!("{words}changed\n")).unwrap();
+    let said = h.run(&["memory", "run"]);
+    assert!(said.contains("1 updated"), "{said}");
+}

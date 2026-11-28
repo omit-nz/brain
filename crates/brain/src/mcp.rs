@@ -120,7 +120,7 @@ fn due_reply(due: &[Due], today: Date, within: i64) -> String {
     }
     if listed < due.len() {
         out.push_str(&format!(
-            "\n{} more not listed: `brain due` prints them all.",
+            "\n{} more not listed: `brain due --within {within}` prints them all.",
             due.len() - listed
         ));
     }

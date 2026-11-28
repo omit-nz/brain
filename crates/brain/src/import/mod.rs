@@ -27,7 +27,7 @@ pub use archived::{Archive, archived_line};
 pub use blocklist::Blocklist;
 pub use follow::{Followed, sync};
 pub use report::report;
-pub use review::clear as clear_review_dates;
+pub use review::{plan as plan_clearing, write as write_clearing};
 
 pub const LEDGER: &str = "import-ledger.json";
 /// Held by whoever reads, changes and saves the ledger.

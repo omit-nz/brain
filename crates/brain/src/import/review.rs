@@ -3,46 +3,66 @@
 //! it ran plus 1 to 90 days chosen by a hash of the note's id, or of its source's key when the
 //! source had none.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
 use brain_note::{Entry, Split, Vault, rel_key, text_of};
 use brain_platform::fs::{Privacy, replace_unchanged, set_modified};
 use jiff::ToSpan;
 use jiff::civil::Date;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
-use super::{Ledger, hash};
+use super::{Archive, Ledger, hash};
 use crate::config::REVIEW_DAYS;
 
 /// The days an import spread its first reviews over.
 const SPREAD: u64 = 90;
+/// Notes recorded in the ledger at a time, ahead of their writing.
+const BATCH: usize = 200;
 
-fn stamped(day: Date, seed: &str) -> Option<Date> {
+/// How many days after an import `seed`'s review fell.
+fn offset(seed: &str) -> i64 {
     let h = Sha256::digest(seed.as_bytes());
-    let n = u64::from_le_bytes(h[..8].try_into().expect("8 bytes")) % SPREAD;
-    day.checked_add((n as i64 + 1).days()).ok()
+    (u64::from_le_bytes(h[..8].try_into().expect("8 bytes")) % SPREAD) as i64 + 1
 }
 
-/// What became of every note holding a review date.
-#[derive(Debug, Default)]
-pub struct Cleared {
+/// One note to take a date out of: what it read, and what it is to read.
+pub struct Change {
+    rel: PathBuf,
+    raw: String,
+    text: String,
+}
+
+impl Change {
+    pub fn path(&self) -> String {
+        rel_key(&self.rel)
+    }
+}
+
+/// What a clearing would do with every note holding a review date.
+#[derive(Default)]
+pub struct Plan {
     /// The notes whose date an import wrote.
-    pub notes: Vec<String>,
+    pub changes: Vec<Change>,
     /// Captures, whose date was agreed to with the note.
     pub captured: usize,
-    /// Dates no import of those days wrote.
+    /// Dates no import of the days given wrote.
     pub other: usize,
-    /// Notes whose date an import wrote that could not be written back.
-    pub failed: Vec<String>,
+    /// For the dates left, the other days an import would have written them on, and how many.
+    pub days: BTreeMap<Date, usize>,
 }
 
-/// Takes the `review` line out of every note whose date an import on one of `days` wrote, leaving
-/// its other bytes and its file time. A copy the ledger knows stays known as brain's. With
-/// `apply` unset nothing is written.
-pub fn clear(vault: &Vault, ledger: &mut Ledger, days: &[Date], apply: bool) -> Cleared {
-    let mut out = Cleared::default();
-    for entry in vault.walk() {
-        let Entry::Note { rel, .. } = entry else {
-            continue;
-        };
+/// Reads every note, the archived copies too, for a date an import on one of `days` wrote.
+/// Nothing is written.
+pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], today: Date) -> Plan {
+    let mut out = Plan::default();
+    let notes = vault.walk().filter_map(|entry| match entry {
+        Entry::Note { rel, .. } => Some(rel),
+        Entry::Skipped { .. } => None,
+    });
+    let archived = archive.files(&vault.root).map(Path::to_path_buf);
+    for rel in notes.chain(archived) {
         let Ok(raw) = vault.read(&rel) else {
             continue;
         };
@@ -54,48 +74,142 @@ pub fn clear(vault: &Vault, ledger: &mut Ledger, days: &[Date], apply: bool) -> 
         let Some(review) = date("review") else {
             continue;
         };
-        // A capture is dated the same way every time, and no import's ledger knows it.
-        let id = text_of(fm.get("id"));
+        // The id as brain writes one, which an import's choice was made by.
+        let id = text_of(fm.get("id"))
+            .and_then(|id| Uuid::parse_str(&id).ok())
+            .map(|id| id.to_string());
+        // A capture is dated the same way every time, and no import's record knows it.
         let known = id
             .as_deref()
-            .is_some_and(|id| ledger.copied(&vault.root, id));
-        if !known
-            && date("date").and_then(|d| d.checked_add(REVIEW_DAYS.days()).ok()) == Some(review)
-        {
+            .is_some_and(|id| ledger.copied(&vault.root, id) || archive.names(id));
+        let captured = date("date").and_then(|d| d.checked_add(REVIEW_DAYS.days()).ok());
+        if !known && captured == Some(review) {
             out.captured += 1;
             continue;
         }
-        let path = rel_key(&rel);
-        let seeds = [id, Some(format!("vault/{path}"))];
-        let imported = seeds
-            .iter()
+        let would: BTreeSet<Date> = [id, Some(format!("vault/{}", rel_key(&rel)))]
+            .into_iter()
             .flatten()
-            .any(|seed| days.iter().any(|d| stamped(*d, seed) == Some(review)));
-        if !imported {
+            .filter_map(|seed| review.checked_sub(offset(&seed).days()).ok())
+            .collect();
+        if !days.iter().any(|d| would.contains(d)) {
             out.other += 1;
+            for day in would.into_iter().filter(|d| *d <= today) {
+                *out.days.entry(day).or_default() += 1;
+            }
             continue;
         }
-        if apply {
-            fm.remove("review");
-            let text = split.render();
-            let at = std::fs::metadata(vault.root.join(&rel)).and_then(|m| m.modified());
-            let written = replace_unchanged(
+        fm.remove("review");
+        let text = split.render();
+        out.changes.push(Change { rel, raw, text });
+    }
+    out
+}
+
+/// A test that kills a run part-way sets this; release builds never read it.
+fn abort_after() -> Option<usize> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("BRAIN_TEST_ABORT_AFTER_NOTES")
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// Writes each change that its note still reads as planned, leaving the file's time, and returns
+/// the notes that could not be written. A copy the ledger knows stays known as brain's: it is
+/// recorded and saved before it is written, so a run cut short is finished by the next, which
+/// writes the same bytes.
+pub fn write(
+    vault: &Vault,
+    changes: &[Change],
+    ledger: &mut Ledger,
+    archive: &mut Archive,
+    save: &mut dyn FnMut(&Ledger, &Archive) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<String>> {
+    let record = |ledger: &mut Ledger, archive: &mut Archive, from: &str, to: &str| {
+        let (from, to) = (hash(from.as_bytes()), hash(to.as_bytes()));
+        ledger.rewritten(&vault.root, &from, &to);
+        archive.rewritten(&vault.root, &from, &to);
+    };
+    let (mut failed, mut written) = (Vec::new(), 0);
+    for batch in changes.chunks(BATCH) {
+        for c in batch {
+            record(ledger, archive, &c.raw, &c.text);
+        }
+        save(ledger, archive)?;
+        let before = failed.len();
+        for c in batch {
+            let at = std::fs::metadata(vault.root.join(&c.rel)).and_then(|m| m.modified());
+            let done = replace_unchanged(
                 &vault.root,
-                &rel,
-                |now| now == Some(raw.as_bytes()),
-                text.as_bytes(),
+                &c.rel,
+                |now| now == Some(c.raw.as_bytes()),
+                c.text.as_bytes(),
                 Privacy::Normal,
             );
-            if written.is_err() {
-                out.failed.push(path);
+            if done.is_err() {
+                record(ledger, archive, &c.text, &c.raw);
+                failed.push(c.path());
                 continue;
             }
             if let Ok(at) = at {
-                let _ = set_modified(&vault.root, &rel, at);
+                let _ = set_modified(&vault.root, &c.rel, at);
             }
-            ledger.rewritten(&vault.root, &hash(raw.as_bytes()), &hash(text.as_bytes()));
+            written += 1;
+            if abort_after() == Some(written) {
+                std::process::abort();
+            }
         }
-        out.notes.push(path);
+        if failed.len() > before {
+            save(ledger, archive)?;
+        }
     }
-    out
+    Ok(failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use brain_platform::fs as platform;
+
+    use super::*;
+
+    /// The person may save a note between the reading and the writing of it.
+    #[test]
+    fn a_note_saved_meanwhile_keeps_its_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |text: &str| {
+            platform::write_atomic(
+                dir.path(),
+                Path::new("a.md"),
+                text.as_bytes(),
+                Privacy::Normal,
+            )
+            .unwrap();
+        };
+        let at = dir.path().join("a.md");
+        put("---\nreview: 2027-01-01\n---\nold\n");
+        let vault = Vault::open(dir.path()).unwrap();
+        let change = Change {
+            rel: "a.md".into(),
+            raw: std::fs::read_to_string(&at).unwrap(),
+            text: "---\n---\nold\n".into(),
+        };
+        put("---\nreview: 2027-01-01\n---\nnew words\n");
+        let failed = write(
+            &vault,
+            &[change],
+            &mut Ledger::default(),
+            &mut Archive::default(),
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(failed, ["a.md"]);
+        assert!(
+            std::fs::read_to_string(&at)
+                .unwrap()
+                .ends_with("new words\n")
+        );
+    }
 }

@@ -196,7 +196,7 @@ enum ImportFrom {
 
 #[derive(Args)]
 struct ClearReviewDates {
-    /// A day the notes were imported, as 2026-11-27; give each one.
+    /// A day the notes were imported or followed, as 2026-11-27; give each one.
     #[arg(long, required = true)]
     imported_on: Vec<jiff::civil::Date>,
     /// Write the change. Without it, only say what would be cleared.
@@ -445,7 +445,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         } => import_learning_loop(dirs, clock.today(), args),
         Command::Import {
             from: ImportFrom::ClearReviewDates(args),
-        } => clear_review_dates(dirs, args),
+        } => clear_review_dates(dirs, clock.today(), args),
         Command::Inbox { action } => {
             let vault = Vault::open(&Config::load(dirs)?.vault)?;
             let (result, event) = match action {
@@ -1145,15 +1145,25 @@ fn import_learning_loop(
     Ok(())
 }
 
-fn clear_review_dates(dirs: &Dirs, a: ClearReviewDates) -> anyhow::Result<()> {
+fn clear_review_dates(
+    dirs: &Dirs,
+    today: jiff::civil::Date,
+    a: ClearReviewDates,
+) -> anyhow::Result<()> {
     let vault = Vault::open(&Config::load(dirs)?.vault)?;
     // Held as an import holds them, so neither a memory pass nor the daemon writes meanwhile.
     let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
     let writer = Lock::try_acquire(&writer_lock(dirs))?;
     let mut ledger = Ledger::load(dirs)?;
-    let c = import::clear_review_dates(&vault, &mut ledger, &a.imported_on, a.apply);
+    let mut archive = Archive::load(dirs)?;
+    let plan = import::plan_clearing(&vault, &ledger, &archive, &a.imported_on, today);
+    let mut failed = Vec::new();
     if a.apply {
-        ledger.save(dirs)?;
+        let save = &mut |ledger: &Ledger, archive: &Archive| {
+            ledger.save(dirs)?;
+            archive.save(dirs)
+        };
+        failed = import::write_clearing(&vault, &plan.changes, &mut ledger, &mut archive, save)?;
         if writer.is_some() {
             let r = index(dirs)?.reindex(&vault)?;
             daemon::forget(dirs, &r);
@@ -1161,20 +1171,42 @@ fn clear_review_dates(dirs: &Dirs, a: ClearReviewDates) -> anyhow::Result<()> {
     }
     let mut lines = vec![format!(
         "{} review dates {}, {} written by capture and {} set some other way left as they are{}",
-        c.notes.len(),
+        plan.changes.len() - failed.len(),
         if a.apply {
             "cleared"
         } else {
             "would be cleared"
         },
-        c.captured,
-        c.other,
+        plan.captured,
+        plan.other,
         if a.apply { "" } else { " (nothing written)" }
     )];
-    lines.extend(c.notes.iter().take(10).map(|p| format!("  {p}")));
-    if !c.failed.is_empty() {
+    let done = plan.changes.iter().map(|c| c.path());
+    lines.extend(
+        done.filter(|p| !failed.contains(p))
+            .take(10)
+            .map(|p| format!("  {p}")),
+    );
+    if !plan.days.is_empty() {
+        let mut days: Vec<_> = plan.days.iter().collect();
+        days.sort_by_key(|(day, n)| (std::cmp::Reverse(**n), **day));
+        let days: Vec<String> = days
+            .into_iter()
+            .take(10)
+            .map(|(day, n)| format!("{day} ({})", plural(*n, "note")))
+            .collect();
+        lines.push(format!(
+            "if an import or a follow wrote any of those left, it was on one of: {}",
+            days.join(", ")
+        ));
+        lines.push(
+            "name such a day with --imported-on; each day named can also take a date set by hand"
+                .into(),
+        );
+    }
+    if !failed.is_empty() {
         lines.push("could not be written, run it again:".into());
-        lines.extend(c.failed.iter().map(|p| format!("  {p}")));
+        lines.extend(failed.iter().map(|p| format!("  {p}")));
     }
     if !a.apply {
         lines.push(
@@ -1183,6 +1215,11 @@ fn clear_review_dates(dirs: &Dirs, a: ClearReviewDates) -> anyhow::Result<()> {
         );
     }
     println!("{}", terminal(&lines.join("\n")));
+    anyhow::ensure!(
+        failed.is_empty(),
+        "{} could not be written",
+        plural(failed.len(), "note")
+    );
     Ok(())
 }
 

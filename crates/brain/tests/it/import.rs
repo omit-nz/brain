@@ -287,8 +287,12 @@ fn stamped() -> Import {
     let i = Import::new();
     fs::write(
         i.src.path().join("3-permanent/byid.md"),
-        // Its own date sits 90 days before the stamp, as a capture's would.
-        format!("---\nid: {STAMPED_ID}\ndate: 2026-10-16\n---\nby id\n"),
+        // Its own date sits 90 days before the stamp, as a capture's would. The id is in
+        // capitals; the import chose the date by the id as brain writes it.
+        format!(
+            "---\nid: {}\ndate: 2026-10-16\n---\nby id\n",
+            STAMPED_ID.to_uppercase()
+        ),
     )
     .unwrap();
     fs::write(i.src.path().join("3-permanent/noid.md"), "no id\n").unwrap();
@@ -354,6 +358,92 @@ fn clearing_review_dates_takes_the_line_and_nothing_else() {
         again.contains("1 updated") && again.contains("0 conflicts"),
         "{again}"
     );
+}
+
+const CLEAR: [&str; 4] = [
+    "import",
+    "clear-review-dates",
+    "--imported-on",
+    "2026-11-25",
+];
+
+/// Changes both stamped sources; brain's own copies are then updated, none a conflict.
+fn both_update(i: &Import) {
+    for name in ["byid", "noid"] {
+        let path = i.src.path().join(format!("3-permanent/{name}.md"));
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(path, format!("{text}more\n")).unwrap();
+    }
+    let said = i.import(&[]);
+    assert!(
+        said.contains("2 updated") && said.contains("0 conflicts"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_run_killed_part_way_is_finished_by_the_next() {
+    let i = stamped();
+    let args = [&CLEAR[..], &["--apply"]].concat();
+    let killed =
+        i.h.brain()
+            .args(&args)
+            .env("BRAIN_TEST_ABORT_AFTER_NOTES", "1")
+            .output()
+            .unwrap();
+    assert!(!killed.status.success());
+    let said = i.h.run(&args);
+    assert!(said.contains("1 review dates cleared"), "{said}");
+    both_update(&i);
+}
+
+#[test]
+fn the_days_that_would_have_written_what_is_left_are_named() {
+    let i = stamped();
+    let said = i.h.run(&[
+        "--now",
+        NOW,
+        "import",
+        "clear-review-dates",
+        "--imported-on",
+        "2026-11-20",
+    ]);
+    assert!(said.contains("2026-11-25 (2 notes)"), "{said}");
+}
+
+#[test]
+fn a_cleared_note_leaves_the_review_queue() {
+    let i = stamped();
+    let due = || i.h.run(&["--now", NOW, "due", "--within", "365"]);
+    i.h.run(&["--now", NOW, "index"]);
+    assert!(due().contains("3-permanent/byid.md"), "{}", due());
+    i.clear(&["--apply"]);
+    let left = due();
+    assert!(
+        !left.contains("byid.md") && !left.contains("noid.md") && left.contains("hand.md"),
+        "{left}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_note_that_cannot_be_written_fails_the_run_and_stays_brains() {
+    use std::os::unix::fs::PermissionsExt;
+    let i = stamped();
+    let folder = i.h.vault.path().join("3-permanent");
+    let mode = |m| fs::set_permissions(&folder, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o500);
+    let out =
+        i.h.brain()
+            .args([&CLEAR[..], &["--apply"]].concat())
+            .output()
+            .unwrap();
+    mode(0o700);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("could not be written"), "{said}");
+    assert!(said.contains("0 review dates cleared"), "{said}");
+    both_update(&i);
 }
 
 #[test]
