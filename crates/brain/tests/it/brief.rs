@@ -124,7 +124,7 @@ fn a_session_starts_with_due_notes_and_the_named_indexes() {
         said.find("due-7.md").unwrap() < said.find("due-3.md").unwrap(),
         "{said}"
     );
-    assert!(said.contains("2 more: `brain due`"), "{said}");
+    assert!(said.contains("2 more: `brain due --all`"), "{said}");
     assert!(!said.contains("later.md"), "{said}");
     assert!(
         said.contains("- [prices](prices.md): the day rate"),
@@ -304,7 +304,7 @@ fn the_trace_holds_only_the_due_notes_that_were_shown() {
     }
     h.run(&["index"]);
     let said = started(&h, &Claude::new(), Path::new("/nowhere")).unwrap();
-    assert!(said.contains("2 more: `brain due`"), "{said}");
+    assert!(said.contains("2 more: `brain due --all`"), "{said}");
     let held: Vec<usize> = (1..=7).filter(|n| holding(&h, *n) == 1).collect();
     assert_eq!(held, [1, 2, 3, 4, 5]);
 }
