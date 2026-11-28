@@ -6,6 +6,7 @@
 //! replaced until the archive's zipsign signature checks against a key this build was shipped with
 //! and, on macOS, the binary and the library inside it are signed by omit's Apple team.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::env::consts::{ARCH, DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX, OS};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use anyhow::Context;
 use brain_platform::fs::Lock;
 use self_update::http::HeaderMap;
 use self_update::http_client::{HttpClient, HttpResponse};
+use self_update::version::{bump_is_compatible, bump_is_greater, cmp_versions};
 use self_update::{Release, ReleaseAsset, ReleaseSource};
 
 /// The protocol a release speaks; it changes when two brains of different releases can no longer
@@ -156,7 +158,7 @@ pub fn verify(archive: &Path, keys: &[[u8; 32]]) -> anyhow::Result<()> {
         .with_context(|| format!("{} is not signed by a brain release key", archive.display()))
 }
 
-/// The newest release `source` offers that is newer than `version`, if any.
+/// The release an update from `version` would install, if there is one to install.
 pub fn check(source: impl Source, version: &str) -> anyhow::Result<Option<String>> {
     let nothing = Trust {
         keys: Vec::new(),
@@ -182,7 +184,7 @@ pub fn newer<S: Source>(
     Ok((v != version).then_some(v))
 }
 
-/// Installs the newest release `source` offers over `current`, the install's `brain-current`
+/// Installs the release `check` names over `current`, the install's `brain-current`
 /// folder, once it meets `trust`. Returns the version now installed.
 pub fn run(
     source: impl Source,
@@ -203,8 +205,7 @@ pub fn run(
             Lock::acquire(&lock).context("waiting for another update")?
         }
     };
-    // Said once the lock is held, so a wait is never called a download. No version: the listing's
-    // first newer release need not be the one installed.
+    // Said once the lock is held, so a wait is never called a download.
     eprintln!("Downloading the newer release and checking it...");
     let status = configure(source, trust, current, version)?.update()?;
     Ok(status.version().to_string())
@@ -256,18 +257,48 @@ fn configure(
         b.verify_binary(move |release| meets(release, &code));
     }
     b.timeout(source.timeout());
-    Ok(b.source(source)
-        .bin_name("brain")
-        .target(host_target()?)
-        .current_version(version)
-        .bundle_path_in_archive("brain-{{ version }}")
-        .bundle_install_path(current)
-        .verifying_keys(trust.keys.clone())
-        .no_confirm(true)
-        .show_output(false)
-        // Drawn on a terminal's stderr only, so a daemon's log holds none of it.
-        .show_download_progress(true)
-        .build()?)
+    Ok(b.source(Offered {
+        source,
+        version: version.to_string(),
+    })
+    .bin_name("brain")
+    .target(host_target()?)
+    .current_version(version)
+    .bundle_path_in_archive("brain-{{ version }}")
+    .bundle_install_path(current)
+    .verifying_keys(trust.keys.clone())
+    .no_confirm(true)
+    .show_output(false)
+    // Drawn on a terminal's stderr only, so a daemon's log holds none of it.
+    .show_download_progress(true)
+    .build()?)
+}
+
+/// The one release of `source` an update from `version` takes: the newest that does not break
+/// with it, else the newest of all. Checking and installing both see this list, so a check never
+/// names a release an update would pass over.
+struct Offered<S> {
+    source: S,
+    version: String,
+}
+
+impl<S: ReleaseSource> ReleaseSource for Offered<S> {
+    fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
+        let from = &self.version;
+        let compatible = |r: &Release| bump_is_compatible(from, r.version()).unwrap_or(false);
+        // Backwards for `min_by`, which keeps the first listed of two equal releases.
+        let taken = self
+            .source
+            .get_releases()?
+            .into_iter()
+            .filter(|r| bump_is_greater(from, r.version()).unwrap_or(false))
+            .min_by(|a, b| {
+                compatible(b)
+                    .cmp(&compatible(a))
+                    .then_with(|| cmp_versions(b.version(), a.version()).unwrap_or(Ordering::Equal))
+            });
+        Ok(taken.into_iter().collect())
+    }
 }
 
 /// Where releases come from, and how their assets are fetched.

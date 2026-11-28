@@ -2,8 +2,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use brain::update::{self, PROTOCOL};
+use self_update::http::HeaderMap;
+use self_update::http_client::{HttpClient, HttpResponse};
 use self_update::{Release, ReleaseAsset, ReleaseSource};
 use zipsign_api::SigningKey;
 
@@ -281,6 +285,112 @@ fn check_names_a_newer_release_and_installs_nothing() {
         Some(NEW.to_string())
     );
     assert_eq!(update::check(local(&name), NEW).unwrap(), None);
+}
+
+/// A release listing in the order given, holding no assets.
+struct Listed(&'static [&'static str]);
+
+impl ReleaseSource for Listed {
+    fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
+        self.0
+            .iter()
+            .map(|v| Release::builder().version(*v).name(format!("v{v}")).build())
+            .collect()
+    }
+}
+
+impl update::Source for Listed {}
+
+/// An update takes the newest release of the line it is on, and moves line only when that line
+/// has nothing newer. `--check` names that one, whatever order the releases are listed in.
+#[test]
+fn check_names_the_release_an_update_installs() {
+    let listed: &[&str] = &["0.3.0", "0.2.9", "0.2.10", "0.2.8"];
+    for (from, to) in [
+        ("0.2.8", Some("0.2.10")),
+        ("0.2.10", Some("0.3.0")),
+        ("0.3.0", None),
+    ] {
+        assert_eq!(
+            update::check(Listed(listed), from).unwrap().as_deref(),
+            to,
+            "from {from}"
+        );
+    }
+}
+
+/// Two releases of one version, as tags `v1` and `1` give: the first listed is taken.
+#[test]
+fn of_two_releases_of_one_version_the_first_listed_is_taken() {
+    struct Twice;
+    impl ReleaseSource for Twice {
+        fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
+            ["first", "second"]
+                .iter()
+                .map(|name| {
+                    let asset = ReleaseAsset::new(
+                        format!("brain-9.9.9-{}.tar.gz", update::host_target().unwrap()),
+                        format!("x:{name}"),
+                    );
+                    Release::builder()
+                        .version("9.9.9")
+                        .name(*name)
+                        .assets([asset])
+                        .build()
+                })
+                .collect()
+        }
+    }
+    struct Asked(Arc<Mutex<Vec<String>>>);
+    impl HttpClient for Asked {
+        fn get(
+            &self,
+            url: &str,
+            _headers: &HeaderMap,
+            _timeout: Option<Duration>,
+        ) -> self_update::errors::Result<Box<dyn HttpResponse>> {
+            self.0.lock().unwrap().push(url.to_string());
+            Err(std::io::Error::other("not fetched").into())
+        }
+    }
+    struct Recording(Twice, Arc<Mutex<Vec<String>>>);
+    impl ReleaseSource for Recording {
+        fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
+            self.0.get_releases()
+        }
+    }
+    impl update::Source for Recording {
+        fn client(&self) -> Option<Arc<dyn HttpClient>> {
+            Some(Arc::new(Asked(self.1.clone())))
+        }
+    }
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("brain-current");
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    let source = Recording(Twice, asked.clone());
+    update::run(source, &trusting(&[public(&key(1))]), &current, "0.1.0").unwrap_err();
+    assert_eq!(*asked.lock().unwrap(), ["x:first"]);
+}
+
+#[test]
+fn an_update_installs_what_check_names() {
+    let releases = tempfile::tempdir().unwrap();
+    // A folder lists in string order, so the other line's release comes first.
+    for version in ["0.10.0", "0.2.10", "0.2.9"] {
+        archive(releases.path(), version, &[key(1)]);
+    }
+    let source = || update::LocalDir(releases.path().to_path_buf());
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("brain-current");
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    let named = update::check(source(), "0.2.8").unwrap().unwrap();
+    assert_eq!(named, "0.2.10");
+    let done = update::newer(source, &trusting(&[public(&key(1))]), &current, "0.2.8").unwrap();
+    assert_eq!(done, Some(named));
+    assert_eq!(installed(root.path()).0, "binary 0.2.10");
 }
 
 #[test]
