@@ -8,7 +8,9 @@
 //! plain run. The caller holds the import lock.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use brain_note::{Entry, Split, Vault, rel_key, text_of};
 use brain_platform::fs::{Privacy, replace_unchanged, set_modified};
@@ -70,10 +72,12 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
             Entry::Skipped { rel, why } => out.skipped.push((rel_key(&rel), why.describe())),
         }
     }
-    // An archived file that is not there has nothing to clear.
-    let archived = archive
-        .files(&vault.root)
-        .filter(|rel| std::fs::symlink_metadata(vault.root.join(rel)).is_ok());
+    // An archived file that is not there has nothing to clear; one that cannot be reached is
+    // named with the rest not looked at.
+    let archived = archive.files(&vault.root).filter(|rel| {
+        !std::fs::symlink_metadata(vault.root.join(rel))
+            .is_err_and(|e| e.kind() == ErrorKind::NotFound)
+    });
     notes.extend(archived.map(Path::to_path_buf));
     for rel in notes {
         let raw = match vault.read(&rel) {
@@ -91,6 +95,11 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
         let Some(review) = date("review") else {
             continue;
         };
+        // An import wrote the bare date: anything added to the line is the person's.
+        if !fm.holds_only("review", &review.to_string()) {
+            out.other += 1;
+            continue;
+        }
         // The id as brain writes one, which an import's choice was made by.
         let id = text_of(fm.get("id"))
             .and_then(|id| Uuid::parse_str(&id).ok())
@@ -137,9 +146,9 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
 
 /// A note that was to be written and was not.
 pub enum Left {
-    /// The person saved it since it was read: the next run takes it.
+    /// Saved, moved or removed since it was read: the next run takes what is there.
     Saved(String),
-    /// brain may not write it: running again will not.
+    /// It could not be written, and why.
     Refused(String, String),
 }
 
@@ -148,6 +157,14 @@ fn abort_at(hook: &str, reached: usize) {
     let at = std::env::var(hook).ok().and_then(|n| n.parse().ok());
     if cfg!(debug_assertions) && at == Some(reached) {
         std::process::abort();
+    }
+}
+
+/// A test that acts while a run is part-way names a file here: the run waits until it is gone.
+fn wait_at_gate() {
+    let gate = std::env::var_os("BRAIN_TEST_CLEAR_GATE").filter(|_| cfg!(debug_assertions));
+    while gate.as_ref().is_some_and(|gate| Path::new(gate).exists()) {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -178,6 +195,7 @@ pub fn write(
             save_archive(archive)?;
         }
         abort_at("BRAIN_TEST_ABORT_AFTER_CLEARED", 0);
+        wait_at_gate();
         for c in batch {
             let at = std::fs::metadata(vault.root.join(&c.rel)).and_then(|m| m.modified());
             let done = replace_unchanged(
@@ -188,12 +206,14 @@ pub fn write(
                 Privacy::Normal,
             );
             if let Err(e) = done {
-                let same =
-                    std::fs::read(vault.root.join(&c.rel)).is_ok_and(|now| now == c.raw.as_bytes());
-                left.push(if same {
-                    Left::Refused(c.path(), e.to_string())
-                } else {
+                let changed = match std::fs::read(vault.root.join(&c.rel)) {
+                    Ok(now) => now != c.raw.as_bytes(),
+                    Err(why) => why.kind() == ErrorKind::NotFound,
+                };
+                left.push(if changed {
                     Left::Saved(c.path())
+                } else {
+                    Left::Refused(c.path(), e.to_string())
                 });
                 continue;
             }
@@ -341,6 +361,58 @@ mod tests {
         .unwrap();
         run(&vault, &[change("a.md", STAMPED, CLEARED)], &mut ledger);
         assert_eq!(stored(&ledger)["vault/a.md"]["dst_hash"], "other");
+    }
+
+    /// Every batch's records are saved before its notes are written, also past the first.
+    #[test]
+    fn every_batch_is_recorded_before_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = |n: usize| format!("---\nreview: 2027-01-01\n---\n{n}\n");
+        let cleared = |n: usize| format!("---\n---\n{n}\n");
+        let mut ledger = Ledger::default();
+        let changes: Vec<Change> = (0..BATCH + 5)
+            .map(|n| {
+                let rel = format!("{n}.md");
+                note(dir.path(), &rel, &text(n));
+                let key = format!("vault/{rel}");
+                ledger
+                    .0
+                    .extend(recorded(&key, None, &hash(text(n).as_bytes())).0);
+                change(&rel, &text(n), &cleared(n))
+            })
+            .collect();
+        let before = stored(&ledger);
+        let back =
+            |held: &serde_json::Value| -> Ledger { serde_json::from_value(held.clone()).unwrap() };
+        let vault = Vault::open(dir.path()).unwrap();
+        // Whole, and then with the second batch's save failing.
+        for fail_at in [0, 2] {
+            for (n, c) in changes.iter().enumerate() {
+                note(dir.path(), &c.path(), &text(n));
+            }
+            ledger = back(&before);
+            let (mut saves, mut saved) = (0, before.clone());
+            let done = write(
+                &vault,
+                &changes,
+                &mut ledger,
+                &mut Archive::default(),
+                &mut |l| {
+                    saves += 1;
+                    anyhow::ensure!(saves != fail_at, "no room");
+                    saved = stored(l);
+                    Ok(())
+                },
+                &mut |_| Ok(()),
+            );
+            assert_eq!(done.is_ok(), fail_at == 0);
+            let saved = back(&saved);
+            for c in &changes {
+                let now = std::fs::read(dir.path().join(c.path())).unwrap();
+                let entry = &saved.0[&format!("vault/{}", c.path())];
+                assert!(entry.copy.accepts(&hash(&now)), "{}", c.path());
+            }
+        }
     }
 
     /// The person may save a note between the reading and the writing of it.

@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hashes {
     #[serde(rename = "dst_hash")]
     written: String,
@@ -38,10 +38,5 @@ impl Hashes {
             self.was = Some(std::mem::replace(&mut self.written, to.to_string()));
         }
         moves
-    }
-
-    /// Records the copy's bytes as they are now.
-    pub fn settle(&mut self, hash: String) {
-        self.written = hash;
     }
 }

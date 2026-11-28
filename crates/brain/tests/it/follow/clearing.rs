@@ -4,6 +4,7 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::digest;
 
 const LEDGER: &str = "data/import-ledger.json";
 const ARCHIVE: &str = "data/follow-archive.json";
@@ -14,13 +15,6 @@ const CLEAR: [&str; 5] = [
     "2026-11-25",
     "--apply",
 ];
-
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
 
 /// Leaves `name`'s followed copy as 0.2.5 wrote it on 2026-11-25: with a review date 1 to 90
 /// days on, chosen by a hash of its id, and recorded so in the ledger.
@@ -89,6 +83,64 @@ fn an_archived_copys_stamped_date_is_cleared_too() {
     assert!(!copy(&h, "one").unwrap().contains("review:"));
 }
 
+/// An archived copy brain may not reach is there all the same, and is named.
+#[cfg(unix)]
+#[test]
+fn an_archived_copy_under_an_unreadable_folder_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let (h, _p) = stamped_with_one_archived();
+    let folder = h.vault.path().join("_archive/working-memory/-proj");
+    let mode = |m| fs::set_permissions(&folder, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    let said = h.run(&CLEAR);
+    mode(0o700);
+    assert!(said.contains("2 review dates cleared"), "{said}");
+    assert!(
+        said.contains("not looked at:\n  _archive/working-memory/-proj/one.md"),
+        "{said}"
+    );
+}
+
+/// A follow pass started while a clearing runs waits for it, and both leave their work.
+#[test]
+fn a_follow_pass_started_during_a_clearing_waits() {
+    let (h, p) = stamped_with_one_archived();
+    p.write("stays", "stays second");
+    let gate = h.home.path().join("gate");
+    fs::write(&gate, "").unwrap();
+    let brain = || {
+        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"));
+        c.env("BRAIN_HOME", h.home.path())
+            .env("BRAIN_TEST_CLEAR_GATE", &gate)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        c
+    };
+    let clearing = brain().args(CLEAR).spawn().unwrap();
+    for _ in 0..1500 {
+        if fs::read_to_string(h.home.path().join(LEDGER))
+            .unwrap()
+            .contains("\"was\"")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut follow = brain().args(["memory", "run"]).spawn().unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(follow.try_wait().unwrap().is_none(), "it did not wait");
+    fs::remove_file(&gate).unwrap();
+    let cleared = clearing.wait_with_output().unwrap();
+    assert!(cleared.status.success(), "{cleared:?}");
+    let followed = follow.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&followed.stdout);
+    assert!(said.contains("1 updated"), "{said}");
+    assert!(said.contains("0 kept as they are"), "{said}");
+    assert!(copy(&h, "stays").unwrap().contains("stays second"));
+    assert!(!copy(&h, "keeps").unwrap().contains("review:"));
+    comes_back_and_takes_a_change(&h, &p);
+}
+
 /// The ledger saved, the archive's records not, or both saved and no note written.
 #[test]
 fn a_clearing_killed_before_writing_loses_no_archived_record() {
@@ -100,6 +152,12 @@ fn a_clearing_killed_before_writing_loses_no_archived_record() {
         let (h, p) = stamped_with_one_archived();
         let out = h.brain().args(CLEAR).env(hook, at).output().unwrap();
         assert!(!out.status.success(), "{hook}");
+        // The copies still in their places take their sources' changes too, written or not.
+        p.write("stays", "stays second");
+        p.write("keeps", "keeps second");
+        let said = pass(&h);
+        assert!(said.contains("2 updated"), "{hook}: {said}");
+        assert!(said.contains("0 kept as they are"), "{hook}: {said}");
         comes_back_and_takes_a_change(&h, &p);
     }
 }
@@ -125,18 +183,29 @@ fn archive_records_that_cannot_be_saved_stop_the_run_and_hold_nothing() {
     comes_back_and_takes_a_change(&h, &p);
 }
 
+/// How many copies the two record files hold between them.
+fn records(h: &Home) -> usize {
+    let read = |rel: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(h.home.path().join(rel)).unwrap()).unwrap()
+    };
+    read(LEDGER).as_object().unwrap().len() + read(ARCHIVE).as_array().unwrap().len()
+}
+
 /// Each of these held follow for good, or lost a record, under an earlier design.
 #[cfg(unix)]
 #[test]
 fn what_it_cannot_look_at_holds_nothing() {
     use std::os::unix::fs::PermissionsExt;
     let mode = |at: &Path, m| fs::set_permissions(at, fs::Permissions::from_mode(m)).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("note.md"), "a note\n").unwrap();
     for case in [
         "archived file deleted",
         "archived file moved back by hand",
         "archived file unreadable",
         "project folder unreadable",
         "project folder swapped for a link",
+        "vault unreadable",
     ] {
         let (h, p) = stamped_with_one_archived();
         let archived = archive_path(&h, "one");
@@ -149,20 +218,46 @@ fn what_it_cannot_look_at_holds_nothing() {
             }
             "archived file unreadable" => mode(&archived, 0o000),
             "project folder unreadable" => mode(&folder, 0o000),
+            "vault unreadable" => mode(h.vault.path(), 0o000),
             _ => {
                 fs::rename(&folder, &aside).unwrap();
                 std::os::unix::fs::symlink(&aside, &folder).unwrap();
             }
         }
-        let out = h.brain().args(CLEAR).output().unwrap();
+        // From outside the vault, which may not be entered.
+        let brain = || {
+            let mut c = h.brain();
+            c.current_dir(h.home.path());
+            c
+        };
+        let out = brain().args(CLEAR).output().unwrap();
         let said = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "{case}: {out:?}");
-        if case.contains("unreadable") || case.contains("link") {
+        assert_eq!(
+            out.status.success(),
+            case != "vault unreadable",
+            "{case}: {out:?}"
+        );
+        if case != "vault unreadable" && (case.contains("unreadable") || case.contains("link")) {
             assert!(said.contains("not looked at"), "{case}: {said}");
         }
+        // Follow and import run while it holds, and drop no record.
+        let before = records(&h);
+        let ran = brain().args(["memory", "run"]).output().unwrap();
+        let import = brain()
+            .args(["import", "learning-loop", "--from"])
+            .arg(source.path())
+            .output()
+            .unwrap();
+        // Neither can write into a vault it may not read.
+        if case != "vault unreadable" {
+            assert!(ran.status.success(), "{case}: {ran:?}");
+            assert!(import.status.success(), "{case}: {import:?}");
+        }
+        assert!(records(&h) >= before, "{case}: a record was dropped");
         match case {
             "archived file unreadable" => mode(&archived, 0o600),
             "project folder unreadable" => mode(&folder, 0o700),
+            "vault unreadable" => mode(h.vault.path(), 0o700),
             "project folder swapped for a link" => {
                 fs::remove_file(&folder).unwrap();
                 fs::rename(&aside, &folder).unwrap();

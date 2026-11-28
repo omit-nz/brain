@@ -1162,17 +1162,13 @@ fn days_line(days: &BTreeMap<jiff::civil::Date, usize>) -> String {
     line.join(", ")
 }
 
-/// `heading` and the first twenty of `paths`, when there are any.
+/// `heading` and every one of `paths`, when there are any.
 fn listed(lines: &mut Vec<String>, heading: &str, paths: Vec<String>) {
-    const SHOWN: usize = 20;
     if paths.is_empty() {
         return;
     }
     lines.push(format!("{heading}:"));
-    lines.extend(paths.iter().take(SHOWN).map(|p| format!("  {p}")));
-    if paths.len() > SHOWN {
-        lines.push(format!("  and {} more", paths.len() - SHOWN));
-    }
+    lines.extend(paths.iter().map(|p| format!("  {p}")));
 }
 
 fn clear_review_dates(
@@ -1180,7 +1176,17 @@ fn clear_review_dates(
     today: jiff::civil::Date,
     a: ClearReviewDates,
 ) -> anyhow::Result<()> {
+    if let Some(day) = a.imported_on.iter().find(|day| **day > today) {
+        anyhow::bail!("{day} is still to come, so no import ran on it; nothing changed");
+    }
     let vault = Vault::open(&Config::load(dirs)?.vault)?;
+    // A vault out of reach would read as one with nothing to clear.
+    std::fs::read_dir(&vault.root).with_context(|| {
+        format!(
+            "the vault folder {} cannot be read; nothing changed",
+            vault.root.display()
+        )
+    })?;
     // Held from the records' reading to their last save, as an import holds it: a follow pass
     // saving an older copy over them would undo what this run recorded.
     let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
@@ -1188,7 +1194,7 @@ fn clear_review_dates(
     let mut ledger = Ledger::load(dirs)?;
     let mut archive = Archive::load(dirs)?;
     let plan = import::plan_clearing(&vault, &ledger, &archive, &a.imported_on, today);
-    let mut left = Vec::new();
+    let (mut left, mut indexed) = (Vec::new(), Ok(()));
     if a.apply {
         println!(
             "clearing {}; if this is interrupted, run the same command again",
@@ -1203,9 +1209,11 @@ fn clear_review_dates(
             &mut |archive| archive.save(dirs),
         )
         .context("the clearing stopped; run the same command again")?;
+        // Said after the report: the notes are written whatever the index does.
         if writer.is_some() {
-            let r = index(dirs)?.reindex(&vault)?;
-            daemon::forget(dirs, &r);
+            indexed = index(dirs)
+                .and_then(|mut ix| ix.reindex(&vault))
+                .map(|r| daemon::forget(dirs, &r));
         }
     }
     let (mut saved, mut refused) = (Vec::new(), Vec::new());
@@ -1217,8 +1225,8 @@ fn clear_review_dates(
     }
     let undone = saved.len() + refused.len();
     let mut lines = vec![format!(
-        "{} review dates {}, {} written by capture and {} set some other way left as they are{}",
-        plan.changes.len() - undone,
+        "{} {}, {} written by capture and {} set some other way left as they are{}",
+        plural(plan.changes.len() - undone, "review date"),
         if a.apply {
             "cleared"
         } else {
@@ -1248,24 +1256,26 @@ fn clear_review_dates(
     listed(&mut lines, "not looked at", skipped.collect());
     listed(
         &mut lines,
-        "saved since they were read; run it again",
+        "changed since they were read; run it again",
         saved,
     );
     let refused = refused.iter().map(|(p, why)| format!("{p}: {why}"));
     listed(
         &mut lines,
-        "could not be written, and running again will not; change these first",
+        "could not be written; put right what each says, then run it again",
         refused.collect(),
     );
-    if !a.apply {
+    if !a.apply && !plan.changes.is_empty() {
         lines.push(
             "commit your vault first so they can be put back, then run it again with --apply"
                 .into(),
         );
-    } else if writer.is_none() {
+    } else if a.apply && writer.is_none() {
         lines.push("brain's daemon will index them".into());
     }
     println!("{}", terminal(&lines.join("\n")));
+    indexed
+        .context("the notes are written but the index could not be updated; run `brain index`")?;
     anyhow::ensure!(undone == 0, "{} left undone", plural(undone, "note"));
     Ok(())
 }

@@ -6,9 +6,9 @@ use std::process::Output;
 use std::time::Duration;
 
 use brain_platform::fs::Lock;
-use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::digest;
 
 /// What an import on `NOW`'s day stamped in 0.2.5: 1 to 90 days out by a hash of the note's id,
 /// or of its source's key when the source had none.
@@ -22,13 +22,6 @@ const CLEAR: [&str; 4] = [
     "2026-11-25",
 ];
 const NOTES: [&str; 2] = ["byid", "noid"];
-
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
 
 impl Import {
     /// Leaves the copy at `rel` as 0.2.5 wrote it: with `review`, recorded in the ledger.
@@ -60,6 +53,34 @@ impl Import {
             command.env(name, value);
         }
         command.output().unwrap()
+    }
+
+    /// Runs `--apply`, held once its records are saved and before it writes a note while
+    /// `meanwhile` runs.
+    fn apply_while(&self, meanwhile: impl FnOnce()) -> Output {
+        let gate = self.h.home.path().join("gate");
+        fs::write(&gate, "").unwrap();
+        let mut running = std::process::Command::new(assert_cmd::cargo::cargo_bin!("brain"))
+            .env("BRAIN_HOME", self.h.home.path())
+            .env("BRAIN_TEST_CLEAR_GATE", &gate)
+            .args(CLEAR)
+            .arg("--apply")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let ledger = self.h.home.path().join("data/import-ledger.json");
+        for _ in 0..1500 {
+            if fs::read_to_string(&ledger).unwrap().contains("\"was\"") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(running.try_wait().unwrap().is_none(), "it was not held");
+        meanwhile();
+        fs::remove_file(&gate).unwrap();
+        running.wait_with_output().unwrap()
     }
 
     fn dated(&self) -> usize {
@@ -167,7 +188,7 @@ fn a_review_key_spelled_another_way_is_left() {
     let rel = "3-permanent/byid.md";
     let theirs = i.copy(rel).replace("review:", "Review:");
     fs::write(i.h.vault.path().join(rel), &theirs).unwrap();
-    assert!(i.clear(&["--apply"]).contains("1 review dates cleared"));
+    assert!(i.clear(&["--apply"]).contains("1 review date cleared"));
     assert_eq!(i.copy(rel), theirs);
 }
 
@@ -266,7 +287,7 @@ fn a_note_that_cannot_be_written_is_named_and_stays_brains() {
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{said}");
     assert!(
-        said.contains("change these first") && said.contains("3-permanent/byid.md"),
+        said.contains("could not be written") && said.contains("3-permanent/byid.md"),
         "{said}"
     );
     assert!(said.contains("0 review dates cleared"), "{said}");
@@ -312,9 +333,214 @@ fn clearing_waits_for_whoever_holds_the_import_lock() {
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(i.dated(), 2);
     assert!(running.try_wait().unwrap().is_none(), "it did not wait");
+    // What the holder saves is what the run reads.
+    let path = i.h.home.path().join("data/import-ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    ledger["vault/theirs.md"] =
+        serde_json::json!({ "id": null, "src_hash": "", "dst_hash": "theirs" });
+    fs::write(&path, ledger.to_string()).unwrap();
     drop(held);
     assert!(running.wait().unwrap().success());
     assert_eq!(i.dated(), 0);
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(after.contains("vault/theirs.md"), "{after}");
+}
+
+#[test]
+fn the_import_lock_is_held_while_notes_are_written() {
+    let i = stamped();
+    let lock = i.h.home.path().join("data/import.lock");
+    let out = i.apply_while(|| assert!(Lock::try_acquire(&lock).unwrap().is_none()));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(i.dated(), 0);
+}
+
+#[test]
+fn a_note_saved_while_clearing_keeps_its_words_and_fails_the_run() {
+    let i = stamped();
+    let rel = "3-permanent/noid.md";
+    let theirs = format!("{}new words\n", i.copy(rel));
+    let out = i.apply_while(|| fs::write(i.h.vault.path().join(rel), &theirs).unwrap());
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{said}");
+    assert_eq!(i.copy(rel), theirs);
+    assert!(said.contains("1 review date cleared"), "{said}");
+    assert!(
+        said.contains("run it again:\n  3-permanent/noid.md"),
+        "{said}"
+    );
+}
+
+/// A note gone since it was read is for the next run to look at; one brain may not read is for
+/// the person to put right.
+#[cfg(unix)]
+#[test]
+fn a_note_that_could_not_be_written_is_told_from_one_that_moved() {
+    use std::os::unix::fs::PermissionsExt;
+    let i = stamped();
+    let gone = i.h.vault.path().join("3-permanent/byid.md");
+    let locked = i.h.vault.path().join("3-permanent/noid.md");
+    let out = i.apply_while(|| {
+        fs::remove_file(&gone).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    });
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("run it again:\n  3-permanent/byid.md"),
+        "{said}"
+    );
+    assert!(
+        said.contains("then run it again:\n  3-permanent/noid.md: "),
+        "{said}"
+    );
+}
+
+/// An import wrote the bare date: anything added to the line is the person's, and stays.
+#[test]
+fn a_review_line_a_person_added_to_is_left() {
+    let i = stamped();
+    let rel = "3-permanent/byid.md";
+    let original = i.copy(rel);
+    let bare = format!("review: {BY_ID}\n");
+    for theirs in [
+        format!("review: {BY_ID} # I checked this one, keep\n"),
+        format!("review: {BY_ID} (confirmed with the supplier)\n"),
+        format!("review: {BY_ID}, then again in June\n"),
+        format!("review: {BY_ID}T09:30:00\n"),
+        format!("review: \"{BY_ID}\"\n"),
+        format!("review: {BY_ID} \n"),
+        format!("review:  {BY_ID}\n"),
+    ] {
+        let text = original.replace(&bare, &theirs);
+        assert_ne!(text, original);
+        fs::write(i.h.vault.path().join(rel), &text).unwrap();
+        let said = i.clear(&[]);
+        assert!(
+            said.contains("1 review date would be cleared"),
+            "{theirs}: {said}"
+        );
+        assert!(said.contains("3 set some other way"), "{theirs}: {said}");
+    }
+    // A line carried on to the next is not even a date.
+    let theirs = original.replace(&bare, &format!("{bare}  and again\n"));
+    fs::write(i.h.vault.path().join(rel), &theirs).unwrap();
+    i.clear(&["--apply"]);
+    assert_eq!(i.copy(rel), theirs);
+}
+
+/// A copy saved with Windows line ends is still the line an import wrote.
+#[test]
+fn a_stamped_line_ending_in_crlf_is_cleared() {
+    let i = stamped();
+    let rel = "3-permanent/byid.md";
+    let crlf = i.copy(rel).replace('\n', "\r\n");
+    fs::write(i.h.vault.path().join(rel), &crlf).unwrap();
+    i.clear(&["--apply"]);
+    assert_eq!(
+        i.copy(rel),
+        crlf.replace(&format!("review: {BY_ID}\r\n"), "")
+    );
+}
+
+/// The notes are written by then: what was done is said before the index's trouble.
+#[test]
+fn an_index_that_cannot_be_updated_still_leaves_the_report() {
+    let i = stamped();
+    let data = i.h.home.path().join("data");
+    for name in ["index.db", "index.db-wal", "index.db-shm"] {
+        let _ = fs::remove_file(data.join(name));
+    }
+    fs::create_dir(data.join("index.db")).unwrap();
+    let out = i.apply_with(None);
+    let said = String::from_utf8_lossy(&out.stdout);
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("2 review dates cleared"), "{said}{why}");
+    assert!(why.contains("brain index"), "{why}");
+}
+
+/// No import ran on a day still to come, so naming one could only take a date set by hand.
+#[test]
+fn a_day_still_to_come_is_refused() {
+    let i = stamped();
+    let out =
+        i.h.brain()
+            .args([
+                "--now",
+                NOW,
+                "import",
+                "clear-review-dates",
+                "--imported-on",
+                "2026-11-26",
+                "--apply",
+            ])
+            .output()
+            .unwrap();
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && why.contains("2026-11-26"), "{why}");
+    assert_eq!(i.dated(), 2);
+}
+
+#[test]
+fn nothing_to_clear_asks_for_no_commit() {
+    let i = stamped();
+    i.clear(&["--apply"]);
+    let said = i.clear(&[]);
+    assert!(said.contains("0 review dates would be cleared"), "{said}");
+    assert!(!said.contains("commit your vault"), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn everything_not_looked_at_is_listed() {
+    let i = stamped();
+    for n in 0..25 {
+        std::os::unix::fs::symlink(
+            i.h.vault.path().join("hand.md"),
+            i.h.vault.path().join(format!("link{n:02}.md")),
+        )
+        .unwrap();
+    }
+    let said = i.clear(&[]);
+    assert!(said.contains("link24.md"), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_vault_that_cannot_be_read_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let i = stamped();
+    let mode = |m| fs::set_permissions(i.h.vault.path(), fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    let out =
+        i.h.brain()
+            .current_dir(i.h.home.path())
+            .args(CLEAR)
+            .output()
+            .unwrap();
+    mode(0o700);
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && why.contains("cannot be read"),
+        "{out:?}"
+    );
+}
+
+/// A read-only note is replaced like any other, and keeps its time too.
+#[cfg(unix)]
+#[test]
+fn a_read_only_note_keeps_its_time() {
+    use std::os::unix::fs::PermissionsExt;
+    let i = stamped();
+    let at = i.h.vault.path().join("3-permanent/byid.md");
+    let before = fs::metadata(&at).unwrap().modified().unwrap();
+    fs::set_permissions(&at, fs::Permissions::from_mode(0o444)).unwrap();
+    i.clear(&["--apply"]);
+    assert_eq!(i.dated(), 0);
+    assert_eq!(fs::metadata(&at).unwrap().modified().unwrap(), before);
 }
 
 /// The rollback check refuses after a run cut short, and passes once it has run again.

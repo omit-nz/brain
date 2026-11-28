@@ -20,6 +20,15 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+/// A file's hash as brain's records keep it.
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 struct Home {
     home: tempfile::TempDir,

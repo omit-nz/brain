@@ -445,7 +445,7 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
             _ => continue,
         };
         if let Ok(bytes) = std::fs::read(dst.root.join(&rel)) {
-            entry.copy.settle(hash(&bytes));
+            entry.copy = Hashes::of(hash(&bytes));
             let text = String::from_utf8_lossy(&bytes);
             if let Some(id) = brain_note::Note::parse(&rel, &text, brain_note::Place::Kept).id {
                 entry.id = Some(id.to_string());
@@ -453,4 +453,32 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A copy brain has just read from disk is the only thing its record stands for: the hash it
+    /// was rewritten from is no file's any more.
+    #[test]
+    fn settling_a_copy_keeps_only_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        write_atomic(
+            dir.path(),
+            Path::new("a.md"),
+            b"as it is\n",
+            Privacy::Normal,
+        )
+        .unwrap();
+        let mut ledger: Ledger = serde_json::from_value(serde_json::json!({
+            "vault/a.md": { "id": null, "src_hash": "", "dst_hash": "new", "was": "old" }
+        }))
+        .unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        settle(&mut ledger, &vault, &["vault/a.md".into()]).unwrap();
+        let entry = &ledger.0["vault/a.md"];
+        assert!(entry.copy.accepts(&hash(b"as it is\n")));
+        assert!(!entry.copy.accepts("old"));
+    }
 }

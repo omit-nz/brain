@@ -4,22 +4,15 @@
 use std::time::SystemTime;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::digest;
 
 const LEDGER: &str = "data/import-ledger.json";
 const ARCHIVE: &str = "data/follow-archive.json";
 const KEY: &str = "memory/-proj/one.md";
 /// The hash of bytes brain meant to write and never did.
 const UNWRITTEN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-
-fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
 
 fn read(h: &Home, rel: &str) -> Value {
     serde_json::from_str(&fs::read_to_string(h.home.path().join(rel)).unwrap()).unwrap()
@@ -31,7 +24,7 @@ fn write(h: &Home, rel: &str, value: &Value) {
 
 /// Moves a record on to bytes never written, still accepting the file as it is.
 fn move_on(record: &mut Value, file: &Path) {
-    record["was"] = json!(sha256(&fs::read(file).unwrap()));
+    record["was"] = json!(digest(&fs::read(file).unwrap()));
     record["dst_hash"] = json!(UNWRITTEN);
 }
 
@@ -100,7 +93,7 @@ fn an_unwritten_copy_is_given_its_sources_time() {
 fn an_unwritten_copy_of_a_gone_source_is_archived_with_both_hashes() {
     let (h, p) = two();
     let path = copy_path(h.vault.path(), "one");
-    let was = sha256(&fs::read(&path).unwrap());
+    let was = digest(&fs::read(&path).unwrap());
     move_ledger_on(&h, &path);
     let said = archive_one(&h, &p);
     assert!(said.contains("1 archived"), "{said}");
@@ -119,7 +112,7 @@ fn an_unwritten_file_put_back_by_hand_is_the_archived_one() {
     pass(&h);
     assert_eq!(read(&h, ARCHIVE).as_array().unwrap().len(), 0);
     let entry = &read(&h, LEDGER)[KEY];
-    assert_eq!(entry["was"], sha256(&fs::read(&back).unwrap()).as_str());
+    assert_eq!(entry["was"], digest(&fs::read(&back).unwrap()).as_str());
 }
 
 #[test]
@@ -132,7 +125,7 @@ fn a_restored_unwritten_copy_is_settled_as_it_reads() {
     let said = pass(&h);
     assert!(said.contains("1 restored"), "{said}");
     let bytes = fs::read(copy_path(h.vault.path(), "one")).unwrap();
-    assert_eq!(read(&h, LEDGER)[KEY]["dst_hash"], sha256(&bytes).as_str());
+    assert_eq!(read(&h, LEDGER)[KEY]["dst_hash"], digest(&bytes).as_str());
 }
 
 /// The move was made and the ledger not yet saved, then a rewrite stopped between the two files.
