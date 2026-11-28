@@ -5,6 +5,7 @@ mod capture;
 #[cfg(unix)]
 mod connect;
 mod daemon;
+mod due;
 mod follow;
 mod gaps;
 mod hook;

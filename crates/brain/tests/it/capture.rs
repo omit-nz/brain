@@ -135,7 +135,7 @@ fn due_prints_mine_oldest_first() {
         out, "2026-11-20  a.md  First\n2026-11-30  b.md  Second\n",
         "within 14 days by default"
     );
-    let json = h.json(&[now[0], now[1], "due", "--within", "0", "--json"]);
+    let json = h.json(&[now[0], now[1], "due", "--within", "0", "--json"])["due"].clone();
     assert_eq!(json.as_array().unwrap().len(), 1);
     assert_eq!(json[0]["path"], "a.md");
     let empty = Home::new();

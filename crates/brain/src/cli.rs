@@ -25,6 +25,7 @@ use crate::gaps;
 use crate::import::{self, Archive, Blocklist, Ledger, Left, Written};
 use crate::inbox::{self, Dest};
 use crate::mcp;
+use crate::open;
 use crate::out::terminal;
 use crate::room;
 use crate::usage;
@@ -878,8 +879,13 @@ fn list_calls(dirs: &Dirs, last: u32, as_json: bool) -> anyhow::Result<()> {
 
 fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
-    let by = clock.today().checked_add(within.days())?;
-    let due = reader(dirs, &config)?.due(&config.me, by)?;
+    let today = clock.today();
+    let by = today.checked_add(within.days())?;
+    let index = reader(dirs, &config)?;
+    let due = index.due(&config.me, by)?;
+    let open = open::notes(&index, &Vault::open(&config.vault)?, &config.me, today)?;
+    let shown = open.notes.iter().take(open::SHOWN);
+    let more = open.notes.len().saturating_sub(open::SHOWN);
     if as_json {
         let rows: Vec<_> = due
             .iter()
@@ -892,7 +898,23 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let left: Vec<_> = shown
+            .map(|w| {
+                json!({
+                    "id": w.note_uuid.map(|u| u.to_string()),
+                    "path": w.path,
+                    "title": w.title,
+                    "said": w.said.to_string(),
+                })
+            })
+            .collect();
+        let all = json!({
+            "due": rows,
+            "open": left,
+            "open_more": more,
+            "open_unread": open.unread,
+        });
+        println!("{}", serde_json::to_string_pretty(&all)?);
         return Ok(());
     }
     if due.is_empty() {
@@ -903,6 +925,21 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
             "{}",
             terminal(&format!("{}  {}  {}", d.review, d.path, d.title))
         );
+    }
+    if !open.notes.is_empty() {
+        println!("{}", open::heading());
+    }
+    for w in shown {
+        println!(
+            "{}",
+            terminal(&format!("{}  {}  {}", w.said, w.path, w.title))
+        );
+    }
+    if more > 0 {
+        println!("{more} more not listed.");
+    }
+    if let Some(line) = open.unread_line() {
+        println!("{line}");
     }
     Ok(())
 }

@@ -4,6 +4,7 @@
 
 use crate::frontmatter::{Split, Value};
 use crate::note::Note;
+use crate::prose::prose;
 
 /// learning-loop's markers of a claim not yet settled.
 const MARKERS: &[&str] = &[
@@ -38,28 +39,10 @@ pub enum Route {
     Maps,
 }
 
-/// The markers in `body`, in order, skipping fenced code: a fence opens on three or more
-/// backticks or tildes and closes on at least as many of the same.
+/// The markers in `body`, in order, skipping fenced code.
 fn markers(body: &str) -> Vec<String> {
-    let mut fence: Option<(char, usize)> = None;
     let mut out = Vec::new();
-    for line in body.lines() {
-        let t = line.trim_start();
-        let run = |c: char| t.chars().take_while(|&x| x == c).count();
-        match fence {
-            Some((c, n)) => {
-                if run(c) >= n && t.trim_start_matches(c).trim().is_empty() {
-                    fence = None;
-                }
-                continue;
-            }
-            None => {
-                if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
-                    fence = Some((c, run(c)));
-                    continue;
-                }
-            }
-        }
+    for line in prose(body) {
         let lower = line.to_lowercase();
         let mut found: Vec<(usize, &str)> = MARKERS
             .iter()

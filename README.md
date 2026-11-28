@@ -74,7 +74,7 @@ A room lets your AI sessions leave each other messages on this computer, even se
 
 - `brain init`, `brain status`, `brain update`: set up over a folder of notes, see what the index holds, install the newest signed release.
 - `brain start`, `brain stop`, `brain daemon`: keep the index up to date at every login or in a terminal.
-- `brain index`, `brain search`, `brain show`, `brain gaps`, `brain due`: index now, search, print a note, list unanswered questions and notes due for review.
+- `brain index`, `brain search`, `brain show`, `brain gaps`, `brain due`: index now, search, print a note, list unanswered questions, notes due for review and recent notes with something left open.
 - `brain add`, `brain correct`, `brain inbox`, `brain inbox keep`, `brain inbox skip`: write a note into the inbox, correct one, and work through the inbox.
 - `brain connect`, `brain mcp`: connect an AI tool, and serve it.
 - `brain calls`: the last tool calls your AI tools made and what each asked. No reply and no captured text is kept.
