@@ -333,7 +333,7 @@ fn a_long_review_queue_is_counted_and_cut() {
     assert!(first.contains("path=\"oldest.md\""), "{first}");
     assert!(
         text.ends_with(&format!(
-            "{} more not listed: `brain due --within 14` prints them all.",
+            "{} more not listed: `brain due --within 14 --all` prints them all.",
             350 - listed
         )),
         "{text}"
@@ -371,7 +371,7 @@ fn due_lists_at_most_twenty() {
     let text = due_over(&vec![old("Old"); 21], json!({}));
     assert_eq!(text.matches("<note ").count(), 20, "{text}");
     assert!(
-        text.ends_with("\n1 more not listed: `brain due --within 14` prints them all."),
+        text.ends_with("\n1 more not listed: `brain due --within 14 --all` prints them all."),
         "{text}"
     );
 }
