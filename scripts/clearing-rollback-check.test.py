@@ -130,7 +130,7 @@ if os.name == "posix" and os.geteuid() != 0:
     code, said, _ = run({"vault/a.md": MOVED_ON}, {"a.md": OLD}, locked=".")
     check("a vault that cannot be read is said to be that, not gone",
           code == 1 and "cannot be read" in said and "gone for good" not in said, said)
-code, said, _ = run({}, {}, archive=[{**record, "was": 3}])
+code, said, _ = run({}, {"other.md": NEW}, archive=[{**record, "was": 3}])
 check("an archive record's hash that is no text is refused",
       code != 0 and "safe" not in said and "Traceback" not in said, said)
 for name, ledger in [
