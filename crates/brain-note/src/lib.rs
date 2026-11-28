@@ -1,5 +1,6 @@
 //! One note: frontmatter that round-trips, what a note may disclose, ids and wikilinks.
 
+mod dates;
 mod disclosure;
 mod frontmatter;
 pub mod gate;

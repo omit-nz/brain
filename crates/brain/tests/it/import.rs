@@ -181,16 +181,12 @@ fn ids_tags_links_and_intentions_come_across_as_they_are() {
     let i = Import::new();
     i.import(&[]);
     let copy = i.copy("3-permanent/kept-idea.md");
-    for key in ["visibility", "owner", "review"] {
+    for key in ["visibility", "owner"] {
         assert!(line(&copy, key).is_some(), "{key} missing:\n{copy}");
     }
     let stripped: Vec<&str> = copy
         .lines()
-        .filter(|l| {
-            !["visibility: ", "owner: ", "review: "]
-                .iter()
-                .any(|k| l.starts_with(k))
-        })
+        .filter(|l| !["visibility: ", "owner: "].iter().any(|k| l.starts_with(k)))
         .collect();
     assert_eq!(
         stripped,
@@ -203,32 +199,61 @@ fn ids_tags_links_and_intentions_come_across_as_they_are() {
     assert_eq!(line(&inbox, "review"), None);
 }
 
+/// A review date is a person's: set when they keep or confirm a note, never by copying it.
 #[test]
-fn imported_kept_notes_get_owner_and_review() {
+fn an_import_writes_no_review_date() {
     let i = Import::new();
-    for n in 0..1000 {
-        let id = format!("0195f2e0-0000-7000-8000-{n:012x}");
-        fs::write(
-            i.src.path().join(format!("3-permanent/n{n:04}.md")),
-            format!("---\nid: {id}\n---\nnote {n}\n"),
-        )
-        .unwrap();
-    }
-    i.import(&[]);
-    let today = jiff::civil::date(2026, 11, 25);
-    let mut days = std::collections::BTreeSet::new();
-    for n in 0..1000 {
-        let copy = i.copy(&format!("3-permanent/n{n:04}.md"));
-        assert_eq!(line(&copy, "owner"), Some("robin"));
-        let review: jiff::civil::Date = line(&copy, "review").unwrap().parse().unwrap();
-        let ahead = (review - today).get_days();
-        assert!(
-            (1..=90).contains(&ahead),
-            "review {review} is {ahead} days out"
-        );
-        days.insert(review);
-    }
-    assert!(days.len() >= 80, "only {} distinct review days", days.len());
+    fs::write(
+        i.src.path().join("3-permanent/theirs.md"),
+        "---\nreview: 2027-03-01\n---\nx\n",
+    )
+    .unwrap();
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    let reviews: Vec<(String, String)> = snapshot(i.h.vault.path())
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            let text = String::from_utf8(bytes).ok()?;
+            Some((path, line(&text, "review")?.to_string()))
+        })
+        .collect();
+    assert_eq!(
+        reviews,
+        // Both came with their authors' own.
+        [
+            ("3-permanent/declared.md", "2027-01-10"),
+            ("3-permanent/theirs.md", "2027-03-01"),
+        ]
+        .map(|(p, d)| (p.to_string(), d.to_string()))
+    );
+    assert_eq!(
+        line(&i.copy("3-permanent/kept-idea.md"), "owner"),
+        Some("robin")
+    );
+    assert!(
+        snapshot(i.h.vault.path())
+            .keys()
+            .any(|p| p.starts_with("working-memory/")),
+        "a memory copy was among them"
+    );
+}
+
+/// Brain has no command that edits the notes it imported, and no marker holds an import.
+#[test]
+fn nothing_clears_review_dates_or_holds_an_import() {
+    let i = Import::new();
+    let data = i.h.home.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("clearing.json"), "[\"2026-11-25\"]").unwrap();
+    let said = i.import(&[]);
+    assert!(said.contains("0 conflicts"), "{said}");
+    let out =
+        i.h.brain()
+            .args(["import", "clear-review-dates"])
+            .output()
+            .unwrap();
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("unrecognized subcommand"), "{why}");
 }
 
 #[test]

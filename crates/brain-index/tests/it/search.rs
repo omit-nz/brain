@@ -11,6 +11,7 @@ fn query(text: &str) -> Query<'_> {
         kinds: None,
         scope: Scope::Mine,
         rerank: false,
+        today: jiff::civil::date(2026, 11, 28),
     }
 }
 

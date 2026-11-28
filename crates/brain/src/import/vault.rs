@@ -1,8 +1,8 @@
 //! Notes from a learning-loop vault. The copy is the source byte for byte but for the lines the
-//! import adds: `visibility` when none is declared, and `owner` and `review` outside the inbox
-//! when the note has none.
+//! import adds: `visibility` when none is declared, and `owner` outside the inbox when the note
+//! has none.
 
-use brain_note::{Entry, Frontmatter, Note, Place, Skip, Split, Vault, rel_key};
+use brain_note::{Entry, Frontmatter, Place, Skip, Split, Vault, rel_key};
 
 use super::{Source, Written};
 
@@ -43,9 +43,6 @@ pub fn to_note(s: &Source, w: &Written<'_>, prior_id: Option<&str>) -> anyhow::R
     if split.fm.is_err() {
         return Ok(s.raw.clone());
     }
-    let id = Note::parse(&s.dst_rel, &s.raw, Place::Kept)
-        .id
-        .map(|u| u.to_string());
     let mut adds: Vec<(&str, String)> = Vec::new();
     {
         let fm = split.fm.as_ref().ok().and_then(Option::as_ref);
@@ -57,14 +54,8 @@ pub fn to_note(s: &Source, w: &Written<'_>, prior_id: Option<&str>) -> anyhow::R
         if !has("visibility") {
             adds.push(("visibility", w.visibility(&s.dst_rel).into()));
         }
-        if w.layout.place(&s.dst_rel) != Place::Inbox {
-            if !has("owner") {
-                adds.push(("owner", w.me.to_string()));
-            }
-            if !has("review") {
-                let seed = id.clone().unwrap_or_else(|| s.key.clone());
-                adds.push(("review", w.review_date(&seed).to_string()));
-            }
+        if w.layout.place(&s.dst_rel) != Place::Inbox && !has("owner") {
+            adds.push(("owner", w.me.to_string()));
         }
     }
     if adds.is_empty() {

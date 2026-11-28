@@ -386,7 +386,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
                 Ok(())
             }
         },
-        Command::Memory { action } => memory_cmd(dirs, &*clock, action),
+        Command::Memory { action } => memory_cmd(dirs, action),
         Command::Due { within, json } => due(dirs, &*clock, within, json),
         Command::Mcp {
             door,
@@ -449,7 +449,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
     }
 }
 
-fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::Result<()> {
+fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
     let mut config = Config::load(dirs)?;
     match action {
         MemoryAction::Unfollow => {
@@ -474,7 +474,7 @@ fn memory_cmd(dirs: &Dirs, clock: &dyn Clock, action: MemoryAction) -> anyhow::R
     let vault = Vault::open(&config.vault)?;
     let _held = Lock::acquire(&dirs.data.join(import::LOCK))?;
     let writer = Lock::try_acquire(&writer_lock(dirs))?;
-    let w = Written::for_memory(&config.me, clock.today(), &vault);
+    let w = Written::for_memory(&config.me, &vault);
     let done = import::sync(dirs, &vault, followed, &w, |vault| {
         if writer.is_some() {
             let r = index(dirs)?.reindex(vault)?;
@@ -684,6 +684,7 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
             Scope::Mine
         },
         rerank: embed::runtime().is_ok(),
+        today: clock.today(),
     };
     let started = std::time::Instant::now();
     let found = idx.search(&q, provider.as_deref())?;
@@ -711,7 +712,9 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                     "disclosure": h.disclosure.as_str(),
                     "score": h.score,
                     "snippet": h.snippet,
-                    "modified": h.modified.map(|d| d.to_string()),
+                    "said": h.said.map(|d| d.to_string()),
+                    "file_changed": h.modified.map(|d| d.to_string()),
+                    "overtaken_by": h.overtaken_by,
                     "source_newer": newer.is_some(),
                 })
             })
@@ -737,14 +740,20 @@ fn search(dirs: &Dirs, clock: &dyn Clock, text: &str, s: SearchArgs) -> anyhow::
                 )
             })
             .unwrap_or_default();
+        let said = h.said.map(|d| format!(", said {d}")).unwrap_or_default();
         let changed = h
             .modified
             .map(|d| format!(", changed {d}"))
             .unwrap_or_default();
+        let overtaken = h
+            .overtaken_by
+            .as_ref()
+            .map(|by| format!("\n    overtaken by {by}"))
+            .unwrap_or_default();
         println!(
             "{}",
             terminal(&format!(
-                "{}  ({}{changed})\n    {}{stale}",
+                "{}  ({}{said}{changed})\n    {}{overtaken}{stale}",
                 h.title, h.path, h.snippet
             ))
         );
@@ -1038,7 +1047,6 @@ fn import_learning_loop(
     let blocklist = a.ll_config.as_deref().map(Blocklist::load).transpose()?;
     let w = Written {
         me: &config.me,
-        today,
         share: &share,
         blocklist: blocklist.as_ref(),
         layout: &dst.layout,

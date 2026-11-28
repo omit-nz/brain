@@ -186,6 +186,28 @@ fn an_edited_copy_survives_its_source_going() {
     assert!(!again.contains("one.md"), "{again}");
 }
 
+/// No marker holds a pass, and no pass dates a copy: not one made, changed or brought back.
+#[test]
+fn follow_runs_over_a_stray_clearing_marker_and_dates_nothing() {
+    let (h, p) = following(&["one", "two"]);
+    fs::write(h.home.path().join("data/clearing.json"), "[\"2026-11-25\"]").unwrap();
+    p.remove("one");
+    pass(&h);
+    pass(&h);
+    assert!(archived(&h, "one"));
+    p.write("one", "one first");
+    p.write("two", "two second");
+    p.write("three", "three first");
+    let said = follow(&h, &p);
+    for did in ["1 copied", "1 updated", "1 restored"] {
+        assert!(said.contains(did), "{said}");
+    }
+    for name in ["one", "two", "three"] {
+        let text = copy(&h, name).unwrap();
+        assert!(!text.contains("review:"), "{text}");
+    }
+}
+
 #[test]
 fn a_missing_or_empty_memory_folder_removes_nothing() {
     let (h, p) = following(&["one"]);

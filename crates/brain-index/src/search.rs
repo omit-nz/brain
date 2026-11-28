@@ -19,6 +19,7 @@ use ll_core::scoring::{
 use rusqlite::OptionalExtension;
 
 use crate::Index;
+use crate::recent::{self, Named};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -34,6 +35,8 @@ pub struct Query<'a> {
     pub kinds: Option<&'a [Kind]>,
     pub scope: Scope,
     pub rerank: bool,
+    /// The day here, which decides whether a note's date has come.
+    pub today: Date,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +52,13 @@ pub struct Hit {
     pub body: String,
     /// The day, here, the note's file was last changed; `None` while it waits for its id.
     pub modified: Option<Date>,
+    /// The day the note says it was written; `None` when it says none that has come.
+    pub said: Option<Date>,
+    /// The path of the note that corrects or supersedes this one.
+    pub overtaken_by: Option<String>,
+    /// Listed only because it overtakes a hit: the search did not judge it, so it never counts as
+    /// an answer.
+    pub added: bool,
 }
 
 /// A search's hits, and how they were judged.
@@ -92,6 +102,14 @@ const SHARED: FtsConfig = FtsConfig::new(
     WEIGHTS,
 );
 
+/// The tables a scope searches; a shared-only search reads its view alone.
+fn config(scope: Scope) -> &'static FtsConfig {
+    match scope {
+        Scope::Mine => &MINE,
+        Scope::SharedOnly => &SHARED,
+    }
+}
+
 /// How many fused candidates the kinds filter and the limit choose from.
 const POOL: usize = 200;
 /// How many of the top the cross-encoder reorders.
@@ -131,24 +149,60 @@ impl Index {
         if q.rerank {
             crate::embed::runtime().context("reranking needs ONNX Runtime")?;
         }
+        let text = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return Ok(Found {
+                hits: Vec::new(),
+                words: false,
+                reranked: false,
+            });
+        }
+        let (mut found, judged) = self.judged(&text, q, provider, &[])?;
+        // Asking for the latest: the topic is also asked on its own, since a question's framing
+        // can leave every note under the floor, and the answer is ordered by date.
+        if found.reranked
+            && let Some(topic) = recent::latest(&text)
+        {
+            if let Some(topic) = topic {
+                // The whole question may have found a note the topic alone ranks too low to
+                // judge, as in a long note about many things, so those are judged on it too.
+                let (about, _) = self.judged(&topic, q, provider, &judged)?;
+                if about.reranked {
+                    for hit in about.hits {
+                        if !found.hits.iter().any(|h| h.path == hit.path) {
+                            found.hits.push(hit);
+                        }
+                    }
+                    found.hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+                }
+            }
+            recent::newest_first(&mut found.hits);
+        }
+        self.mark_overtaken(&mut found.hits, q)?;
+        found.hits.truncate(q.limit);
+        Ok(found)
+    }
+
+    /// Every hit for `text`, ranked, and judged by the cross-encoder when the query asks, with the
+    /// paths it judged: the top of the ranking and each of `also`.
+    fn judged(
+        &self,
+        text: &str,
+        q: &Query<'_>,
+        provider: Option<&dyn EmbeddingProvider>,
+        also: &[String],
+    ) -> anyhow::Result<(Found, Vec<String>)> {
         let mut found = Found {
             hits: Vec::new(),
             words: false,
             reranked: false,
         };
-        let text = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
-            return Ok(found);
-        }
-        let config = match q.scope {
-            Scope::Mine => &MINE,
-            Scope::SharedOnly => &SHARED,
-        };
+        let config = config(q.scope);
         let items = config.items_table;
         let weights = FusionWeights::default();
         let mut fused = HashMap::new();
 
-        let bm25 = try_fts_bm25_query(&self.conn, &text, POOL, config)?;
+        let bm25 = try_fts_bm25_query(&self.conn, text, POOL, config)?;
         found.words = !bm25.is_empty();
         add_weighted_rrf(
             &mut fused,
@@ -157,7 +211,7 @@ impl Index {
         );
 
         if let Some(provider) = provider {
-            let qv = provider.embed_query(&text)?;
+            let qv = provider.embed_query(text)?;
             let mut st = self.conn.prepare(&format!(
                 "SELECT n.path, e.data FROM embeddings e JOIN {items} n ON n.id = e.id
                  WHERE e.model = ?1"
@@ -198,57 +252,28 @@ impl Index {
         }
 
         let mut hits = Vec::new();
-        let mut st = self.conn.prepare(&format!(
-            "SELECT n.note_uuid, n.title, n.kind, n.disclosure, c.body, n.place, n.mtime_ns
-             FROM {items} n JOIN notes_content c ON c.id = n.id WHERE n.path = ?1"
-        ))?;
         for (path, score) in finalize_rrf(fused, POOL) {
-            let row = st
-                .query_row([&path], |r| {
-                    Ok((
-                        r.get::<_, Option<String>>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, String>(5)?,
-                        r.get::<_, i64>(6)?,
-                    ))
-                })
-                .optional()?;
-            // A path the scope's view does not hold is not a hit; any other failure is an error.
-            let Some((uuid, title, kind, disclosure, body, place, mtime_ns)) = row else {
-                continue;
-            };
-            let kind = Kind::parse(&kind);
-            if q.kinds.is_some_and(|ks| !ks.contains(&kind)) {
-                continue;
-            }
-            hits.push(Hit {
-                note_uuid: uuid.and_then(|u| u.parse().ok()),
-                path,
-                title,
-                kind,
-                disclosure: Disclosure::parse(&disclosure),
-                place: Place::parse(&place),
-                score,
-                snippet: snippet(&body),
-                body,
-                modified: day(mtime_ns),
-            });
+            hits.extend(self.hit(items, path, score, q)?);
         }
 
+        let mut judged = Vec::new();
         if q.rerank {
-            let top = hits.len().min(RERANK_TOP);
-            let docs: Vec<(String, String)> = hits[..top]
+            let mut pool = hits[..hits.len().min(RERANK_TOP)].to_vec();
+            for path in also {
+                if !pool.iter().any(|h| h.path == *path) {
+                    pool.extend(self.hit(items, path.clone(), 0.0, q)?);
+                }
+            }
+            let docs: Vec<(String, String)> = pool
                 .iter()
                 .map(|h| (h.path.clone(), format!("{}\n{}", h.title, h.body)))
                 .collect();
-            let order = rerank(&text, &docs, top);
+            let order = rerank(text, &docs, docs.len());
             // A cross-encoder that scored nothing (its model would not load) leaves the fused
             // order, judged by words as an unreranked search is.
-            if top == 0 || !order.is_empty() {
-                let mut head: Vec<Option<Hit>> = hits.drain(..top).map(Some).collect();
+            if pool.is_empty() || !order.is_empty() {
+                judged = pool.iter().map(|h| h.path.clone()).collect();
+                let mut head: Vec<Option<Hit>> = pool.into_iter().map(Some).collect();
                 hits = order
                     .iter()
                     .filter(|r| r.score >= RERANK_FLOOR)
@@ -263,9 +288,121 @@ impl Index {
             }
         }
 
-        hits.truncate(q.limit);
         found.hits = hits;
-        Ok(found)
+        Ok((found, judged))
+    }
+
+    /// The note at `path` as a hit, when the scope's view holds it and the query takes its kind.
+    fn hit(
+        &self,
+        items: &str,
+        path: String,
+        score: f64,
+        q: &Query<'_>,
+    ) -> anyhow::Result<Option<Hit>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT n.note_uuid, n.title, n.kind, n.disclosure, c.body, n.place, n.mtime_ns, n.said
+             FROM {items} n JOIN notes_content c ON c.id = n.id WHERE n.path = ?1"
+        ))?;
+        let row = st
+            .query_row([&path], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            })
+            .optional()?;
+        // A path the view does not hold is not a hit; any other failure is an error.
+        let Some((uuid, title, kind, disclosure, body, place, mtime_ns, dates)) = row else {
+            return Ok(None);
+        };
+        let kind = Kind::parse(&kind);
+        if q.kinds.is_some_and(|ks| !ks.contains(&kind)) {
+            return Ok(None);
+        }
+        Ok(Some(Hit {
+            note_uuid: uuid.and_then(|u| u.parse().ok()),
+            path,
+            title,
+            kind,
+            disclosure: Disclosure::parse(&disclosure),
+            place: Place::parse(&place),
+            score,
+            snippet: snippet(&body),
+            body,
+            modified: day(mtime_ns),
+            said: recent::said(dates.as_deref(), q.today),
+            overtaken_by: None,
+            added: false,
+        }))
+    }
+
+    /// Marks each hit within the limit that another note corrects or supersedes, and lists that
+    /// note directly above it: from further down the search's own hits when it is one of them, or
+    /// added when the hit it overtakes was itself judged.
+    fn mark_overtaken(&self, hits: &mut Vec<Hit>, q: &Query<'_>) -> anyhow::Result<()> {
+        let items = config(q.scope).items_table;
+        let declares: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM notes
+                           WHERE corrects IS NOT NULL OR supersedes IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?;
+        if !declares {
+            return Ok(());
+        }
+        let mut st = self.conn.prepare(&format!(
+            "SELECT n.path, n.note_uuid, n.said, n.corrects, n.supersedes, v.id IS NOT NULL
+             FROM notes n LEFT JOIN {items} v ON v.id = n.id"
+        ))?;
+        let notes: Vec<Named> = st
+            .query_map([], |r| {
+                Ok(Named {
+                    path: r.get(0)?,
+                    id: r.get(1)?,
+                    said: recent::said(r.get::<_, Option<String>>(2)?.as_deref(), q.today),
+                    corrects: r.get(3)?,
+                    supersedes: r.get(4)?,
+                    seen: r.get(5)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let marks = recent::overtakers(&notes);
+        let mut raised = HashSet::new();
+        let mut i = 0;
+        while i < hits.len().min(q.limit) {
+            let Some(&by) = marks.get(hits[i].path.as_str()) else {
+                i += 1;
+                continue;
+            };
+            hits[i].overtaken_by = Some(by.to_string());
+            let listed = hits.iter().position(|h| h.path == by);
+            // Nothing to do when it is already above, or when it would be added over a hit the
+            // search never judged. Each is raised once, so a ring of declarations ends.
+            let settled = listed.map_or(hits[i].added, |at| at < i);
+            if settled || !raised.insert(by) {
+                i += 1;
+                continue;
+            }
+            let over = match listed {
+                Some(at) => Some(hits.remove(at)),
+                None => self
+                    .hit(items, by.to_string(), hits[i].score, q)?
+                    .map(|h| Hit { added: true, ..h }),
+            };
+            // The one just placed here is looked at next: it may be overtaken in turn.
+            match over {
+                Some(over) => hits.insert(i, over),
+                None => i += 1,
+            }
+        }
+        Ok(())
     }
 
     /// Links between notes in `items`, both ways, with targets resolved by lowercased file stem

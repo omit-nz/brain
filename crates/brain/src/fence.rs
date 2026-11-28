@@ -5,6 +5,9 @@ use brain_note::Kind;
 
 use crate::out::terminal;
 
+/// The most of a note's title a list of notes shows.
+pub const TITLE_CHARS: usize = 200;
+
 /// Bidi embeddings, overrides and isolates, which reorder what a reader sees, and the tag block,
 /// which spells hidden ASCII. Joiners stay: emoji and several scripts need them.
 fn hidden(c: char) -> bool {
@@ -29,7 +32,7 @@ pub fn attrs(id: Option<uuid::Uuid>, path: &str, title: &str, kind: Option<Kind>
     a.push_str(&format!(
         " path=\"{}\" title=\"{}\"",
         escape(path),
-        escape(title)
+        escape(&title.chars().take(TITLE_CHARS).collect::<String>())
     ));
     if let Some(k) = kind {
         a.push_str(&format!(" kind=\"{}\"", k.as_str()));

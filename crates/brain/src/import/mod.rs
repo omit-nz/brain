@@ -19,8 +19,6 @@ use anyhow::{Context, bail};
 use brain_note::{Layout, Place, Skip, Vault, rel_key};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Privacy, replace_unchanged, set_modified, write_atomic};
-use jiff::ToSpan;
-use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -29,8 +27,6 @@ pub use blocklist::Blocklist;
 pub use follow::{Followed, sync};
 pub use report::report;
 
-/// Days over which first reviews are spread.
-const REVIEW_SPREAD: i64 = 90;
 pub const LEDGER: &str = "import-ledger.json";
 /// Held by whoever reads, changes and saves the ledger.
 pub const LOCK: &str = "import.lock";
@@ -163,7 +159,6 @@ pub struct Source {
 /// What every copy is written with.
 pub struct Written<'a> {
     pub me: &'a str,
-    pub today: Date,
     pub share: &'a [PathBuf],
     pub blocklist: Option<&'a Blocklist>,
     pub layout: &'a Layout,
@@ -171,10 +166,9 @@ pub struct Written<'a> {
 
 impl<'a> Written<'a> {
     /// What a memory copy is written with: it is private, so no share rule applies.
-    pub fn for_memory(me: &'a str, today: Date, vault: &'a Vault) -> Written<'a> {
+    pub fn for_memory(me: &'a str, vault: &'a Vault) -> Written<'a> {
         Written {
             me,
-            today,
             share: &[],
             blocklist: None,
             layout: &vault.layout,
@@ -194,16 +188,6 @@ impl<'a> Written<'a> {
         } else {
             "private"
         }
-    }
-
-    /// A first review between 1 and 90 days out, chosen by a hash of `seed`, so a large import
-    /// does not land every review on one day.
-    fn review_date(&self, seed: &str) -> Date {
-        let h = Sha256::digest(seed.as_bytes());
-        let n = u64::from_le_bytes(h[..8].try_into().expect("8 bytes")) % REVIEW_SPREAD as u64;
-        self.today
-            .checked_add((n as i64 + 1).days())
-            .unwrap_or(self.today)
     }
 }
 

@@ -398,13 +398,14 @@ fn upsert(tx: &Transaction<'_>, w: &Work) -> anyhow::Result<()> {
     }
     let id: i64 = tx.query_row(
         "INSERT INTO notes(note_uuid, path, hash, size, mtime_ns, title, tags, kind, place,
-                           disclosure, owner, review, embedded)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)
+                           disclosure, owner, review, said, corrects, supersedes, embedded)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0)
          ON CONFLICT(path) DO UPDATE SET
              note_uuid = excluded.note_uuid, hash = excluded.hash, size = excluded.size,
              mtime_ns = excluded.mtime_ns, title = excluded.title, tags = excluded.tags,
              kind = excluded.kind, place = excluded.place, disclosure = excluded.disclosure,
-             owner = excluded.owner, review = excluded.review
+             owner = excluded.owner, review = excluded.review, said = excluded.said,
+             corrects = excluded.corrects, supersedes = excluded.supersedes
          RETURNING id",
         params![
             w.uuid,
@@ -419,6 +420,12 @@ fn upsert(tx: &Transaction<'_>, w: &Work) -> anyhow::Result<()> {
             n.disclosure.as_str(),
             n.owner,
             n.review.map(|d| d.to_string()),
+            (!n.dates.is_empty()).then(|| {
+                let dates: Vec<String> = n.dates.iter().map(ToString::to_string).collect();
+                dates.join(" ")
+            }),
+            n.corrects,
+            n.supersedes,
         ],
         |r| r.get(0),
     )?;

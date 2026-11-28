@@ -4,12 +4,14 @@
 pub mod activity;
 pub mod db;
 pub mod embed;
+mod recent;
 mod reindex;
 mod search;
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use brain_note::Kind;
 use rusqlite::{Connection, OptionalExtension};
 
 pub use embed::{Embedded, HashEmbedder};
@@ -121,7 +123,7 @@ impl Index {
     /// `owner`'s kept notes whose review falls on or before `by`, oldest review first.
     pub fn due(&self, owner: &str, by: jiff::civil::Date) -> anyhow::Result<Vec<Due>> {
         let mut st = self.conn.prepare(
-            "SELECT note_uuid, path, title, review FROM notes
+            "SELECT note_uuid, path, title, review, kind FROM notes
              WHERE place = 'kept' AND owner = ?1 AND review <= ?2
              ORDER BY review, path",
         )?;
@@ -131,16 +133,18 @@ impl Index {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (uuid, path, title, review) = row?;
+            let (uuid, path, title, review, kind) = row?;
             out.push(Due {
                 note_uuid: uuid.and_then(|u| u.parse().ok()),
                 path,
                 title,
                 review: review.parse()?,
+                kind: Kind::parse(&kind),
             });
         }
         Ok(out)
@@ -162,6 +166,7 @@ pub struct Due {
     pub path: String,
     pub title: String,
     pub review: jiff::civil::Date,
+    pub kind: Kind,
 }
 
 /// What the index holds, for `brain status`.

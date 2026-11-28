@@ -140,6 +140,19 @@ fn an_answer_from_a_kept_note_is_counted() {
     assert!(c.contains(&"answer_kept cli 1".to_string()), "{c:?}");
 }
 
+/// A kept note listed only because it supersedes an inbox hit did not answer anything.
+#[test]
+fn an_added_overtaker_is_never_counted_as_an_answer() {
+    let h = indexed(&[
+        ("0-inbox/old.md", "mailbox notes\n"),
+        ("3-permanent/new.md", "---\nsupersedes: old\n---\nlater\n"),
+    ]);
+    let shown = h.run(&["search", "mailbox"]);
+    assert!(shown.contains("3-permanent/new.md"), "{shown}");
+    let c = counts(&h);
+    assert!(!c.iter().any(|l| l.starts_with("answer_kept")), "{c:?}");
+}
+
 #[test]
 fn a_gap_is_never_counted_as_an_answer() {
     let h = indexed(&[("3-permanent/a.md", "mailbox notes\n")]);
