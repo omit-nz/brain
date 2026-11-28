@@ -184,7 +184,7 @@ pub fn newer<S: Source>(
     Ok((v != version).then_some(v))
 }
 
-/// Installs the newest release `source` offers over `current`, the install's `brain-current`
+/// Installs the release `check` names over `current`, the install's `brain-current`
 /// folder, once it meets `trust`. Returns the version now installed.
 pub fn run(
     source: impl Source,
@@ -286,15 +286,16 @@ impl<S: ReleaseSource> ReleaseSource for Offered<S> {
     fn get_releases(&self) -> self_update::errors::Result<Vec<Release>> {
         let from = &self.version;
         let compatible = |r: &Release| bump_is_compatible(from, r.version()).unwrap_or(false);
+        // Backwards for `min_by`, which keeps the first listed of two equal releases.
         let taken = self
             .source
             .get_releases()?
             .into_iter()
             .filter(|r| bump_is_greater(from, r.version()).unwrap_or(false))
-            .max_by(|a, b| {
-                compatible(a)
-                    .cmp(&compatible(b))
-                    .then_with(|| cmp_versions(a.version(), b.version()).unwrap_or(Ordering::Equal))
+            .min_by(|a, b| {
+                compatible(b)
+                    .cmp(&compatible(a))
+                    .then_with(|| cmp_versions(b.version(), a.version()).unwrap_or(Ordering::Equal))
             });
         Ok(taken.into_iter().collect())
     }
