@@ -31,7 +31,7 @@ fn a_notes_date_comes_from_frontmatter_name_or_first_line() {
         ["2026-11-24"]
     );
     assert_eq!(
-        dates("a.md", "Priority rulings 27 Nov 2026: absum\n"),
+        dates("a.md", "Priority rulings 27 Nov 2026: seats\n"),
         ["2026-11-27"]
     );
     assert_eq!(dates("a.md", "on 3 September 2026, said\n"), ["2026-09-03"]);

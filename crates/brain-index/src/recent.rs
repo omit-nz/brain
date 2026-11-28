@@ -188,8 +188,8 @@ mod tests {
             Some("pricing / marketing direction for omit")
         );
         assert_eq!(
-            topic("most recent ruling about Jake").as_deref(),
-            Some("Jake")
+            topic("most recent ruling about Sam").as_deref(),
+            Some("Sam")
         );
         assert_eq!(topic("latest decision on"), None);
         assert_eq!(topic("latest decision?"), None);
