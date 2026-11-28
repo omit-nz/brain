@@ -343,6 +343,25 @@ impl Index {
         }))
     }
 
+    /// Every note as far as a declaration can name it, `seen` when `view` holds it.
+    pub(crate) fn named(&self, view: &str, today: jiff::civil::Date) -> anyhow::Result<Vec<Named>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT n.path, n.note_uuid, n.said, n.corrects, n.supersedes, v.id IS NOT NULL
+             FROM notes n LEFT JOIN {view} v ON v.id = n.id"
+        ))?;
+        let notes = st.query_map([], |r| {
+            Ok(Named {
+                path: r.get(0)?,
+                id: r.get(1)?,
+                said: recent::said(r.get::<_, Option<String>>(2)?.as_deref(), today),
+                corrects: r.get(3)?,
+                supersedes: r.get(4)?,
+                seen: r.get(5)?,
+            })
+        })?;
+        Ok(notes.collect::<Result<_, _>>()?)
+    }
+
     /// Marks each hit within the limit that another note corrects or supersedes, and lists that
     /// note directly above it: from further down the search's own hits when it is one of them, or
     /// added when the hit it overtakes was itself judged.
@@ -357,22 +376,7 @@ impl Index {
         if !declares {
             return Ok(());
         }
-        let mut st = self.conn.prepare(&format!(
-            "SELECT n.path, n.note_uuid, n.said, n.corrects, n.supersedes, v.id IS NOT NULL
-             FROM notes n LEFT JOIN {items} v ON v.id = n.id"
-        ))?;
-        let notes: Vec<Named> = st
-            .query_map([], |r| {
-                Ok(Named {
-                    path: r.get(0)?,
-                    id: r.get(1)?,
-                    said: recent::said(r.get::<_, Option<String>>(2)?.as_deref(), q.today),
-                    corrects: r.get(3)?,
-                    supersedes: r.get(4)?,
-                    seen: r.get(5)?,
-                })
-            })?
-            .collect::<Result<_, _>>()?;
+        let notes = self.named(items, q.today)?;
         let marks = recent::overtakers(&notes);
         let mut raised = HashSet::new();
         let mut i = 0;

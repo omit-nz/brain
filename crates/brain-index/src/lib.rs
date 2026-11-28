@@ -149,6 +149,55 @@ impl Index {
         }
         Ok(out)
     }
+
+    /// `owner`'s kept notes written on or after `since` that no note corrects or supersedes,
+    /// newest first.
+    pub fn written_since(
+        &self,
+        owner: &str,
+        since: jiff::civil::Date,
+        today: jiff::civil::Date,
+    ) -> anyhow::Result<Vec<Written>> {
+        let mut st = self.conn.prepare(
+            "SELECT note_uuid, path, title, said FROM notes
+             WHERE place = 'kept' AND owner = ?1 AND said IS NOT NULL",
+        )?;
+        let rows = st.query_map([owner], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (uuid, path, title, said) = row?;
+            let Some(said) = recent::said(Some(&said), today).filter(|d| *d >= since) else {
+                continue;
+            };
+            out.push(Written {
+                note_uuid: uuid.and_then(|u| u.parse().ok()),
+                path,
+                title,
+                said,
+            });
+        }
+        let named = self.named("notes", today)?;
+        let overtaken = recent::overtakers(&named);
+        out.retain(|w| !overtaken.contains_key(w.path.as_str()));
+        out.sort_by(|a, b| b.said.cmp(&a.said).then_with(|| a.path.cmp(&b.path)));
+        Ok(out)
+    }
+}
+
+/// A kept note and the day it was written.
+#[derive(Debug, Clone)]
+pub struct Written {
+    pub note_uuid: Option<uuid::Uuid>,
+    pub path: String,
+    pub title: String,
+    pub said: jiff::civil::Date,
 }
 
 /// An indexed note, named.
