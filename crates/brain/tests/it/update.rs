@@ -828,29 +828,46 @@ fn brain_update_says_what_it_is_waiting_for() {
     .unwrap();
     let releases = tempfile::tempdir().unwrap();
     let hex: String = public(&key(7)).iter().map(|b| format!("{b:02x}")).collect();
-    let update = || {
-        let out = h
-            .brain()
-            .env("BRAIN_TEST_RELEASE_KEY", &hex)
+    let command = || {
+        let mut c = h.command();
+        c.env("BRAIN_TEST_RELEASE_KEY", &hex)
             // The real one would restart the daemon of whoever runs the tests.
             .env("BRAIN_LAUNCHCTL", "no-launchctl")
             .args(["update", "--from-dir"])
-            .arg(releases.path())
-            .output()
-            .unwrap();
-        let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+            .arg(releases.path());
+        c
+    };
+    let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let update = || {
+        let out = command().output().unwrap();
         assert!(out.status.success(), "{}", said(&out.stderr));
         (said(&out.stdout), said(&out.stderr))
     };
     let (out, err) = update();
-    assert!(err.starts_with("Looking for a newer release...\n"), "{err}");
-    assert!(!err.contains("Downloading"), "{err}");
+    assert_eq!(err, "Looking for a newer release...\n");
     assert!(out.ends_with("is the newest release.\n"), "{out}");
+    let checked = command().arg("--check").output().unwrap();
+    assert_eq!(said(&checked.stderr), "Looking for a newer release...\n");
     archive(releases.path(), "99.0.0", &[key(7)]);
-    let (out, err) = update();
-    assert!(
-        err.contains("Looking for a newer release...\nDownloading brain 99.0.0 and checking it..."),
-        "{err}"
-    );
+    // Another updater holds the lock: that wait is named, and nothing is downloading yet.
+    let lock = brain_platform::fs::Lock::acquire(&current.with_file_name("update.lock")).unwrap();
+    let mut child = command()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut errors = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut next = || {
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut errors, &mut line).unwrap();
+        line
+    };
+    assert_eq!(next(), "Looking for a newer release...\n");
+    assert_eq!(next(), "Waiting for another update to finish...\n");
+    drop(lock);
+    assert_eq!(next(), "Downloading the newer release and checking it...\n");
+    let done = child.wait_with_output().unwrap();
+    assert!(done.status.success());
+    let out = said(&done.stdout);
     assert!(out.starts_with("brain 99.0.0 installed over "), "{out}");
 }

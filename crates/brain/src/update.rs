@@ -166,6 +166,22 @@ pub fn check(source: impl Source, version: &str) -> anyhow::Result<Option<String
     Ok(newer.map(|r| r.version().to_string()))
 }
 
+/// The version installed over `current`, when a newer one was out.
+pub fn newer<S: Source>(
+    source: impl Fn() -> S,
+    current: &Path,
+    version: &str,
+) -> anyhow::Result<Option<String>> {
+    let trust = release_trust();
+    // A build that can check nothing says so before it asks anyone anything.
+    require(&trust.keys)?;
+    if check(source(), version)?.is_none() {
+        return Ok(None);
+    }
+    let v = run(source(), &trust, current, version)?;
+    Ok((v != version).then_some(v))
+}
+
 /// Installs the newest release `source` offers over `current`, the install's `brain-current`
 /// folder, once it meets `trust`. Returns the version now installed.
 pub fn run(
@@ -178,7 +194,17 @@ pub fn run(
     let install = current
         .parent()
         .context("the install folder has no parent")?;
-    let _lock = Lock::acquire(&install.join(UPDATE_LOCK)).context("waiting for another update")?;
+    let lock = install.join(UPDATE_LOCK);
+    let _lock = match Lock::try_acquire(&lock)? {
+        Some(held) => held,
+        None => {
+            eprintln!("Waiting for another update to finish...");
+            Lock::acquire(&lock).context("waiting for another update")?
+        }
+    };
+    // Said once the lock is held, so a wait is never called a download. No version: the listing's
+    // first newer release need not be the one installed.
+    eprintln!("Downloading the newer release and checking it...");
     let status = configure(source, trust, current, version)?.update()?;
     Ok(status.version().to_string())
 }
