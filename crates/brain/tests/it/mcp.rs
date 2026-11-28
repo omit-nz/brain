@@ -967,3 +967,111 @@ fn an_overtaken_note_names_its_overtaker_to_the_ai_and_the_terminal() {
     let said = h.run(&["search", "quince"]);
     assert!(said.contains("overtaken by r&d.md"), "{said}");
 }
+
+/// In bytes: about 8,000 tokens, the most any one tool may put into a session.
+const REPLY_BUDGET: usize = 32_000;
+
+/// A vault built to flood every tool: long notes of characters that grow when escaped or take
+/// several bytes, titles to match, a long review queue, many rooms and a room full of long posts.
+fn flood() -> Home {
+    let h = Home::new();
+    h.init();
+    let body = "quokka é&<> ".repeat(1_500);
+    let title = "&".repeat(900);
+    for n in 0..40 {
+        h.put(
+            &format!("long/n{n:02}.md"),
+            &format!("---\ntitle: {title}\ndate: 2026-01-01\n---\n{body}\n"),
+        );
+    }
+    for n in 0..400 {
+        h.put(
+            &format!("due/d{n:03}.md"),
+            &format!("---\ntitle: {title}\nowner: robin\nreview: 2020-01-01\n---\nx\n"),
+        );
+    }
+    for n in 0..900 {
+        h.put(
+            &format!("rooms/room-with-a-long-name-for-listing-{n:03}/20260101T000000Z-a.md"),
+            "hello\n",
+        );
+    }
+    for n in 0..60 {
+        h.put(
+            &format!("rooms/squads/20260101T0000{n:02}Z-a.md"),
+            &format!("---\ntitle: {title}\nauthor: {title}\nposted: {title}\n---\n{body}\n"),
+        );
+    }
+    // Enough of these to fill a search, each path alone over a hit's share.
+    let deep = "&".repeat(200);
+    for n in 0..24 {
+        h.put(&format!("{deep}/{deep}/n{n}.md"), "numbat\n");
+    }
+    // Two bytes to the character, so a page counted in characters is twice the size.
+    for n in 0..20 {
+        h.put(
+            &format!("rooms/accented/20260101T0000{n:02}Z-a.md"),
+            &"é".repeat(4_000),
+        );
+    }
+    h.run(&["index"]);
+    h
+}
+
+#[test]
+fn no_tool_can_flood_a_session() {
+    let h = flood();
+    let mut m = Mcp::start(&h);
+    let huge = "&".repeat(100_000);
+    let calls = [
+        ("search_my_brain", json!({"query": "quokka", "limit": 20})),
+        ("search_company", json!({"query": "quokka", "limit": 20})),
+        ("search_my_brain", json!({"query": huge})),
+        // Only the long paths answer this one.
+        ("search_my_brain", json!({"query": "numbat", "limit": 20})),
+        ("due", json!({"within_days": 365})),
+        ("room_list", json!({})),
+        ("room_new", json!({})),
+        ("room_new", json!({"room": "accented"})),
+        ("capture", json!({"text": huge, "title": huge})),
+        (
+            "correct",
+            json!({"target": "long/n00.md", "correction": huge}),
+        ),
+        ("correct", json!({"target": huge, "correction": "x"})),
+        ("room_post", json!({"text": huge})),
+        ("room_post", json!({"room": huge, "text": "x"})),
+        ("room_new", json!({"as": huge})),
+    ];
+    let listed = m.request("tools/list", json!({}));
+    for tool in listed["result"]["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            calls.iter().any(|(called, _)| *called == name),
+            "{name} has no call here: add one that tries to flood it"
+        );
+    }
+    for (tool, args) in calls {
+        let asked: String = args.to_string().chars().take(80).collect();
+        let (text, _) = m.text(tool, args);
+        assert!(!text.is_empty(), "{tool} {asked}");
+        assert!(
+            text.len() <= REPLY_BUDGET,
+            "{tool} {asked} replied with {} bytes",
+            text.len()
+        );
+        // Cut replies still close every fence they open.
+        for (open, close) in [("<note ", "</note>"), ("<post ", "</post>")] {
+            let opened = text
+                .split(open)
+                .skip(1)
+                .filter(|rest| !rest.split('>').next().unwrap_or_default().ends_with('/'))
+                .count();
+            assert_eq!(
+                opened,
+                text.matches(close).count(),
+                "{tool} {asked}: {open}"
+            );
+        }
+    }
+}

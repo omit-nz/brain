@@ -74,9 +74,11 @@ const NO_DAEMON: &str =
 const GAP: &str = "Nothing in your brain answers this yet; it is logged as a gap.";
 const MAX_QUERY: usize = 2_000;
 const BODY_CHARS: usize = 4_000;
-/// The most a room_new reply holds, well inside what an AI tool takes from one call (Claude
-/// Code's default is 25,000 tokens).
-const PAGE_CHARS: usize = 40_000;
+/// In bytes, about 8,000 tokens: the most one tool reply holds, so none can flood a session.
+const REPLY_BYTES: usize = 32_000;
+/// Room kept for the line that says how many more were left out.
+const MORE_BYTES: usize = 80;
+const ERROR_BYTES: usize = 2_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
 const DUE_SHOWN: usize = 20;
@@ -104,11 +106,10 @@ fn due_reply(due: &[Due], today: Date, within: i64) -> String {
     );
     let mut listed = 0;
     for d in due.iter().take(DUE_SHOWN) {
-        let title: String = d.title.chars().take(TITLE_CHARS).collect();
         let line = format!(
             "\n{}  {}",
             d.review,
-            fence_ref(d.note_uuid, &d.path, &title, None)
+            fence_ref(d.note_uuid, &d.path, &d.title, None)
         );
         // A path too long to fit leaves its own note out, never the ones after it.
         if out.len() + line.len() > DUE_BYTES {
@@ -126,17 +127,29 @@ fn due_reply(due: &[Due], today: Date, within: i64) -> String {
     out
 }
 
-/// `body` cut at 4,000 characters.
-fn cut(body: &str) -> String {
+/// `body` escaped, cut at 4,000 characters and to at most `room` bytes.
+fn cut(body: &str, room: usize) -> String {
     let body = body.trim_end();
-    match body.char_indices().nth(BODY_CHARS) {
-        Some((i, _)) => format!("{}...", &body[..i]),
-        None => body.to_string(),
+    let end = body.char_indices().nth(BODY_CHARS).map(|(i, _)| i);
+    let mut out = escape(&body[..end.unwrap_or(body.len())]);
+    if end.is_none() && out.len() <= room {
+        return out;
     }
+    let mut at = out.floor_char_boundary(room.saturating_sub(3));
+    // Never half an entity: every `&` of escaped text starts one.
+    if let Some(amp) = out[..at].rfind('&')
+        && !out[amp..at].contains(';')
+    {
+        at = amp;
+    }
+    out.truncate(at);
+    out.push_str("...");
+    out
 }
 
-/// A hit with its body, cut at 4,000 characters, as data the AI cannot mistake for instructions.
-pub fn fence(hit: &Hit, source_newer: bool) -> String {
+/// A hit with its body, cut to keep it within `room` bytes, as data the AI cannot mistake for
+/// instructions; `None` when its name alone is over that.
+pub fn fence(hit: &Hit, source_newer: bool, room: usize) -> Option<String> {
     let mut attrs = attrs(hit.note_uuid, &hit.path, &hit.title, Some(hit.kind));
     // A file's time alone would read as when the note was written, so it goes only beside that.
     if let Some(said) = hit.said {
@@ -151,7 +164,14 @@ pub fn fence(hit: &Hit, source_newer: bool) -> String {
     if source_newer {
         attrs.push_str(" source_newer=\"true\"");
     }
-    format!("<note{attrs}>{}</note>", escape(&cut(&hit.body)))
+    let tags = "<note></note>".len() + attrs.len();
+    let body = cut(&hit.body, room.checked_sub(tags + "...".len())?);
+    Some(format!("<note{attrs}>{body}</note>"))
+}
+
+/// A post's attribute, escaped and no longer than a title: a post written by hand may say anything.
+fn short(value: &str) -> String {
+    escape(&value.chars().take(TITLE_CHARS).collect::<String>())
 }
 
 /// A room post, fenced and escaped as a note is; one that cannot be read is named with why.
@@ -159,12 +179,13 @@ pub fn fence_post(p: &Post) -> String {
     match &p.read {
         Ok(m) => format!(
             "<post id=\"{}\" room=\"{}\" author=\"{}\" posted=\"{}\" title=\"{}\">{}</post>",
-            escape(&m.id),
-            escape(&m.room),
-            escape(&m.author),
-            escape(&m.posted),
-            escape(&m.title),
-            escape(&cut(&m.body))
+            short(&m.id),
+            short(&m.room),
+            short(&m.author),
+            short(&m.posted),
+            short(&m.title),
+            // The attributes at their longest leave this much of a reply.
+            cut(&m.body, REPLY_BYTES / 2)
         ),
         Err(why) => format!(
             "<post path=\"{}\" unreadable=\"{}\" />",
@@ -281,10 +302,23 @@ impl State {
             });
         }
         let ledger = self.ledger();
-        out.extend(found.hits.iter().map(|hit| {
+        let mut bytes: usize = out.iter().map(|line| line.len() + 1).sum();
+        let mut left_out = 0;
+        for (i, hit) in found.hits.iter().enumerate() {
             let newer = ledger.as_ref().and_then(|l| l.moved_on(&vault, &hit.path));
-            fence(hit, newer.is_some())
-        }));
+            // What is left, shared among the hits still to come: a short note leaves more for them.
+            let share = REPLY_BYTES.saturating_sub(bytes + MORE_BYTES) / (found.hits.len() - i);
+            match fence(hit, newer.is_some(), share.saturating_sub(1)) {
+                Some(note) => {
+                    bytes += note.len() + 1;
+                    out.push(note);
+                }
+                None => left_out += 1,
+            }
+        }
+        if left_out > 0 {
+            out.push(format!("{left_out} more not shown; ask for fewer."));
+        }
         Ok(out.join("\n"))
     }
 }
@@ -371,7 +405,8 @@ impl Server {
         let state = self.state.clone();
         match tokio::task::spawn_blocking(move || f(&state)).await {
             Ok(Ok(text)) => Ok(text),
-            Ok(Err(e)) => Err(escape(&format!("{e:#}"))),
+            // An error can repeat what was asked, however long that was.
+            Ok(Err(e)) => Err(cut(&format!("{e:#}"), ERROR_BYTES)),
             Err(e) => Err(format!("brain failed: {e}")),
         }
     }
@@ -519,9 +554,8 @@ impl Server {
                 }
                 let mut out = format!("New in {}, oldest first:", escape(name));
                 let mut shown = 0;
-                // The more line is at most 60 characters.
                 for f in page.posts.iter().map(fence_post) {
-                    if shown > 0 && out.chars().count() + 1 + f.chars().count() > PAGE_CHARS - 60 {
+                    if shown > 0 && out.len() + 1 + f.len() > REPLY_BYTES - MORE_BYTES {
                         break;
                     }
                     out.push('\n');
@@ -546,8 +580,7 @@ impl Server {
             if rooms.is_empty() {
                 return Ok("No rooms yet; room_post makes one.".into());
             }
-            let mut out = vec!["Rooms:".to_string()];
-            out.extend(rooms.iter().map(|r| match &r.posts {
+            let lines = rooms.iter().map(|r| match &r.posts {
                 Ok((n, newest)) => {
                     let posts = if *n == 1 {
                         "1 post".to_string()
@@ -560,8 +593,24 @@ impl Server {
                     }
                 }
                 Err(why) => format!("{}: unreadable: {}", r.name, escape(why)),
-            }));
-            Ok(out.join("\n"))
+            });
+            let mut out = "Rooms:".to_string();
+            let mut shown = 0;
+            for line in lines {
+                if out.len() + 1 + line.len() > REPLY_BYTES - MORE_BYTES {
+                    break;
+                }
+                out.push('\n');
+                out.push_str(&line);
+                shown += 1;
+            }
+            if shown < rooms.len() {
+                let left = rooms.len() - shown;
+                out.push_str(&format!(
+                    "\n{left} more not shown; `brain room list` has them all."
+                ));
+            }
+            Ok(out)
         })
         .await
     }

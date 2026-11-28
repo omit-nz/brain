@@ -32,7 +32,7 @@ pub fn attrs(id: Option<uuid::Uuid>, path: &str, title: &str, kind: Option<Kind>
     a.push_str(&format!(
         " path=\"{}\" title=\"{}\"",
         escape(path),
-        escape(title)
+        escape(&title.chars().take(TITLE_CHARS).collect::<String>())
     ));
     if let Some(k) = kind {
         a.push_str(&format!(" kind=\"{}\"", k.as_str()));
