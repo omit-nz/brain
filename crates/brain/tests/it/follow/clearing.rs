@@ -7,6 +7,7 @@ use super::*;
 use crate::digest;
 
 const LEDGER: &str = "data/import-ledger.json";
+#[cfg(unix)]
 const ARCHIVE: &str = "data/follow-archive.json";
 const CLEAR: [&str; 5] = [
     "import",
@@ -184,6 +185,7 @@ fn archive_records_that_cannot_be_saved_stop_the_run_and_hold_nothing() {
 }
 
 /// How many copies the two record files hold between them.
+#[cfg(unix)]
 fn records(h: &Home) -> usize {
     let read = |rel: &str| -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(h.home.path().join(rel)).unwrap()).unwrap()
