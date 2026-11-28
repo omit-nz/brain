@@ -26,12 +26,12 @@ fn a_notes_date_comes_from_frontmatter_name_or_first_line() {
     assert_eq!(
         dates(
             "a.md",
-            "---\nid: x\n---\n\n2026-11-24 rulings: a fee\nlater 2026-01-01\n"
+            "---\nid: x\n---\n\n2026-11-24 rulings: a gate\nlater 2026-01-01\n"
         ),
         ["2026-11-24"]
     );
     assert_eq!(
-        dates("a.md", "Priority rulings 27 Nov 2026: seats\n"),
+        dates("a.md", "Garden rulings 27 Nov 2026: vents\n"),
         ["2026-11-27"]
     );
     assert_eq!(dates("a.md", "on 3 September 2026, said\n"), ["2026-09-03"]);

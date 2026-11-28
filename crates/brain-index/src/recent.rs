@@ -159,20 +159,20 @@ mod tests {
     #[test]
     fn only_the_trigger_phrases_trigger() {
         for yes in [
-            "what was the latest decision we made on pricing",
+            "what was the latest decision we made on watering",
             "Newest rulings, please",
             "most recent change to the plan",
-            "the latest pricing decisions",
+            "the latest watering decisions",
             "any latest updates?",
         ] {
             assert!(latest(yes).is_some(), "{yes}");
         }
         for no in [
             "the latest.json file has a note",
-            "how does the current seat setup work",
-            "current decision on pricing",
+            "how does the current vent setup work",
+            "current decision on watering",
             "most recent version of the plan",
-            "latest pricing and marketing direction decision",
+            "latest watering and planting direction decision",
             "decision on the latest model",
         ] {
             assert_eq!(latest(no), None, "{no}");
@@ -183,9 +183,9 @@ mod tests {
     fn the_frame_is_removed_up_to_the_topic() {
         let topic = |q| latest(q).flatten();
         assert_eq!(
-            topic("what was the latest decision we made on pricing / marketing direction for omit")
+            topic("what was the latest decision we made on watering / planting direction for the orchard")
                 .as_deref(),
-            Some("pricing / marketing direction for omit")
+            Some("watering / planting direction for the orchard")
         );
         assert_eq!(
             topic("most recent ruling about Sam").as_deref(),
@@ -194,12 +194,12 @@ mod tests {
         assert_eq!(topic("latest decision on"), None);
         assert_eq!(topic("latest decision?"), None);
         assert_eq!(
-            topic("latest decision, omit pricing").as_deref(),
-            Some("omit pricing")
+            topic("latest decision, orchard watering").as_deref(),
+            Some("orchard watering")
         );
         assert_eq!(
-            topic("latest decision omit pricing marketing direction").as_deref(),
-            Some("omit pricing marketing direction")
+            topic("latest decision orchard watering planting direction").as_deref(),
+            Some("orchard watering planting direction")
         );
     }
 }

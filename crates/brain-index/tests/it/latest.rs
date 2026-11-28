@@ -9,14 +9,14 @@ use super::Fixture;
 const TODAY: Date = date(2026, 11, 28);
 
 /// The older note answers the question in its own words; the newer one only in substance.
-fn pricing(f: &Fixture) {
+fn rental(f: &Fixture) {
     f.put(
-        "pricing.md",
-        "---\ntitle: Omit pricing decision\ndate: 2026-10-27\n---\nThe decision on omit pricing: omit pricing is a share of sales for store migrations.\n",
+        "rental.md",
+        "---\ntitle: Hall rental decision\ndate: 2026-10-27\n---\nThe decision on hall rental: hall rental is a share of takings for weekend markets.\n",
     );
     f.put(
         "working-memory/p/direction.md",
-        "2026-11-24 omit pricing decision: setup fee plus flat monthly care, on every plan.\n",
+        "2026-11-24 hall rental decision: bond fee plus flat weekly cleaning, on every booking.\n",
     );
 }
 
@@ -67,15 +67,15 @@ fn hit<'a>(found: &'a Found, path: &str) -> &'a Hit {
 #[test]
 fn a_query_for_the_latest_orders_by_date() {
     let f = Fixture::new();
-    pricing(&f);
+    rental(&f);
     assert_eq!(
-        paths(&ask(&f, "decision on omit pricing")),
-        ["pricing.md", "working-memory/p/direction.md"]
+        paths(&ask(&f, "decision on hall rental")),
+        ["rental.md", "working-memory/p/direction.md"]
     );
-    let latest = ask(&f, "latest decision on omit pricing");
+    let latest = ask(&f, "latest decision on hall rental");
     assert_eq!(
         paths(&latest),
-        ["working-memory/p/direction.md", "pricing.md"]
+        ["working-memory/p/direction.md", "rental.md"]
     );
     assert_eq!(latest.hits[0].said, Some(date(2026, 11, 24)));
 }
@@ -83,12 +83,12 @@ fn a_query_for_the_latest_orders_by_date() {
 #[test]
 fn undated_hits_keep_their_places() {
     let f = Fixture::new();
-    pricing(&f);
+    rental(&f);
     f.put(
         "undated.md",
-        "---\ntitle: Omit pricing decision\n---\nThe decision on omit pricing: omit pricing is under review.\n",
+        "---\ntitle: Hall rental decision\n---\nThe decision on hall rental: hall rental is under review.\n",
     );
-    let latest = ask(&f, "latest decision on omit pricing");
+    let latest = ask(&f, "latest decision on hall rental");
     // Its place is the one its score gives it.
     let at = paths(&latest).iter().position(|p| *p == "undated.md");
     let score = hit(&latest, "undated.md").score;
@@ -98,36 +98,33 @@ fn undated_hits_keep_their_places() {
         .into_iter()
         .filter(|p| *p != "undated.md")
         .collect();
-    assert_eq!(dated, ["working-memory/p/direction.md", "pricing.md"]);
+    assert_eq!(dated, ["working-memory/p/direction.md", "rental.md"]);
 }
 
 #[test]
 fn a_current_question_keeps_score_order() {
     let f = Fixture::new();
     f.put(
-        "seats-old.md",
-        "---\ntitle: Claude seat setup\ndate: 2026-10-01\n---\nThe current seat setup for Claude is four Max seats, one per account.\n",
+        "vents-old.md",
+        "---\ntitle: Greenhouse vent setup\ndate: 2026-10-01\n---\nThe current vent setup for the greenhouse is four roof vents, one per bay.\n",
     );
     f.put(
-        "seats-new.md",
-        "---\ntitle: Seat review\ndate: 2026-11-20\n---\nA review of how seats are used: the current setup works.\n",
+        "vents-new.md",
+        "---\ntitle: Vent review\ndate: 2026-11-20\n---\nA review of how vents are used: the current setup works.\n",
     );
-    let found = ask(&f, "how does the current Claude seat setup work");
-    assert_eq!(paths(&found), ["seats-old.md", "seats-new.md"]);
+    let found = ask(&f, "how does the current greenhouse vent setup work");
+    assert_eq!(paths(&found), ["vents-old.md", "vents-new.md"]);
 }
 
 #[test]
 fn without_a_reranker_score_order_stands() {
     let f = Fixture::new();
-    pricing(&f);
-    assert_eq!(
-        paths(&words(&f, "decision on omit pricing"))[0],
-        "pricing.md"
-    );
+    rental(&f);
+    assert_eq!(paths(&words(&f, "decision on hall rental"))[0], "rental.md");
     // "latest" is in neither note, so the words fall back to any of them; the older still leads.
     assert_eq!(
-        paths(&words(&f, "latest decision on omit pricing"))[0],
-        "pricing.md"
+        paths(&words(&f, "latest decision on hall rental"))[0],
+        "rental.md"
     );
 }
 
@@ -520,9 +517,9 @@ fn a_framed_question_finds_its_topic() {
     let f = Fixture::new();
     f.put(
         "fees.md",
-        "Omit pricing is a setup fee plus monthly care.\n",
+        "Hall rental is a bond fee plus weekly cleaning.\n",
     );
-    let found = ask(&f, "what was the latest decision we made on omit pricing");
+    let found = ask(&f, "what was the latest decision we made on hall rental");
     assert!(!is_gap(&found));
     assert_eq!(paths(&found), ["fees.md"]);
 }
@@ -584,15 +581,15 @@ fn the_topic_is_also_judged_against_what_the_whole_question_found() {
     f.put(
         "direction.md",
         &format!(
-            "---\ndate: 2026-11-24\n---\n{filler} Omit pricing: setup fee plus care. {filler} Most recent of all: a decision about the van.\n"
+            "---\ndate: 2026-11-24\n---\n{filler} Hall rental: bond fee plus cleaning. {filler} Most recent of all: a decision about the ladder.\n"
         ),
     );
     for n in 0..35 {
         f.put(
             &format!("page{n:02}.md"),
-            "---\ndate: 2026-10-01\n---\nomit pricing page: the font is too small on a phone\n",
+            "---\ndate: 2026-10-01\n---\nhall rental page: the font is too small on a phone\n",
         );
     }
-    let framed = ask(&f, "most recent decision about omit pricing");
+    let framed = ask(&f, "most recent decision about hall rental");
     assert_eq!(paths(&framed)[0], "direction.md", "{:?}", paths(&framed));
 }
