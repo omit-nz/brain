@@ -316,3 +316,34 @@ fn clearing_waits_for_whoever_holds_the_import_lock() {
     assert!(running.wait().unwrap().success());
     assert_eq!(i.dated(), 0);
 }
+
+/// The rollback check refuses after a run cut short, and passes once it has run again.
+#[cfg(unix)]
+#[test]
+fn rolling_back_is_refused_until_the_clearing_has_finished() {
+    let i = stamped();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/clearing-rollback-check.py");
+    let check = || {
+        std::process::Command::new("python3")
+            .arg("-I")
+            .arg(&script)
+            .arg("--data")
+            .arg(i.h.home.path().join("data"))
+            .arg("--config")
+            .arg(i.h.home.path().join("config/config.toml"))
+            .output()
+            .unwrap()
+    };
+    let killed = i.apply_with(Some(("BRAIN_TEST_ABORT_AFTER_CLEARED", "1")));
+    assert!(!killed.status.success());
+    let out = check();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success() && said.contains("still holds") && said.contains("3-permanent/"),
+        "{out:?}"
+    );
+    i.clear(&["--apply"]);
+    let out = check();
+    assert!(out.status.success(), "{out:?}");
+}

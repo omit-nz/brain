@@ -78,6 +78,8 @@ The release key's public half is `crates/brain/src/keys/release.pub`, 32 bytes, 
 
 To put one machine back on an older release, run `scripts/install.sh <older version>`.
 
+After `brain import clear-review-dates`, before going back past 0.2.7, run `scripts/clearing-rollback-check.py`: it exits 1 and names the copies an older brain would take for the person's edits, and says what to do.
+
 ## The signing key
 
 The key is a zipsign ed25519 key pair. `scripts/release-key.sh init` makes it once: the private key goes base64-encoded to 1Password (item `brain release signing key`, vault `Omit-Infra`) and to the repo secret `RELEASE_SIGNING_KEY`, both on stdin only, and the public key is written to `crates/brain/src/keys/release.pub` to be committed. The script never puts the private key in an argument, on stdout or on stderr, and removes its temporary folder on exit; `scripts/release-key.test.sh` pins that with stubs for `zipsign`, `op` and `gh`.
