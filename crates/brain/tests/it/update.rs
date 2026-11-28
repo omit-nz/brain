@@ -871,3 +871,29 @@ fn brain_update_says_what_it_is_waiting_for() {
     let out = said(&done.stdout);
     assert!(out.starts_with("brain 99.0.0 installed over "), "{out}");
 }
+
+/// A build that can check nothing says so before it asks anyone anything.
+#[test]
+fn an_update_without_a_key_lists_no_releases() {
+    let dir = tempfile::tempdir().unwrap();
+    // Listing a folder that is not there would be a different error.
+    let none = || update::LocalDir(dir.path().join("none"));
+    let err = update::newer(
+        none,
+        &trusting(&[]),
+        &dir.path().join("brain-current"),
+        "0.1.0",
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("no release key"), "{err:#}");
+}
+
+#[test]
+fn a_lock_that_cannot_be_opened_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("update.lock")).unwrap();
+    let source = update::LocalDir(dir.path().to_path_buf());
+    let current = dir.path().join("brain-current");
+    let err = update::run(source, &trusting(&[public(&key(1))]), &current, "0.1.0").unwrap_err();
+    assert!(format!("{err:#}").contains("update.lock"), "{err:#}");
+}

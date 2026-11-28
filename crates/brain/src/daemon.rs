@@ -147,8 +147,16 @@ fn update_self(
     }
     let version = env!("CARGO_PKG_VERSION");
     let installed = match from_dir {
-        Some(dir) => update::newer(|| update::LocalDir(dir.to_path_buf()), &current, version),
-        None => update::newer(|| update::GitHub, &current, version),
+        Some(dir) => {
+            let source = || update::LocalDir(dir.to_path_buf());
+            update::newer(source, &update::release_trust(), &current, version)
+        }
+        None => update::newer(
+            || update::GitHub,
+            &update::release_trust(),
+            &current,
+            version,
+        ),
     };
     installed
         .map_err(|e| {

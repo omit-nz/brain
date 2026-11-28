@@ -169,16 +169,16 @@ pub fn check(source: impl Source, version: &str) -> anyhow::Result<Option<String
 /// The version installed over `current`, when a newer one was out.
 pub fn newer<S: Source>(
     source: impl Fn() -> S,
+    trust: &Trust,
     current: &Path,
     version: &str,
 ) -> anyhow::Result<Option<String>> {
-    let trust = release_trust();
     // A build that can check nothing says so before it asks anyone anything.
     require(&trust.keys)?;
     if check(source(), version)?.is_none() {
         return Ok(None);
     }
-    let v = run(source(), &trust, current, version)?;
+    let v = run(source(), trust, current, version)?;
     Ok((v != version).then_some(v))
 }
 
@@ -195,7 +195,8 @@ pub fn run(
         .parent()
         .context("the install folder has no parent")?;
     let lock = install.join(UPDATE_LOCK);
-    let _lock = match Lock::try_acquire(&lock)? {
+    let held = Lock::try_acquire(&lock).with_context(|| format!("locking {}", lock.display()))?;
+    let _lock = match held {
         Some(held) => held,
         None => {
             eprintln!("Waiting for another update to finish...");
