@@ -336,7 +336,7 @@ fn a_locked_trace_store_does_not_silence_the_hook() {
 #[test]
 fn a_locked_verdict_store_is_not_waited_on() {
     let home = Home::temp();
-    let env = home.env();
+    let mut env = home.env();
     fire(
         Point::Prompt,
         home.payload("s-0", "alpha\n"),
@@ -346,6 +346,9 @@ fn a_locked_verdict_store_is_not_waited_on() {
     )
     .unwrap();
     let _lock = locked(&env.data.join(VERDICTS));
+    // Untraced, so the clock is on the verdict store: a trace's writes alone have taken seconds
+    // on a Windows runner.
+    env.trace_wait = Duration::ZERO;
     let start = std::time::Instant::now();
     let out = fire(
         Point::Prompt,

@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use brain_report::{Door, Event, accept};
@@ -301,6 +301,8 @@ enum Answer {
 struct Endpoint {
     url: String,
     got: Arc<Mutex<Vec<Received>>>,
+    /// How long a sender left unanswered waited before it hung up.
+    waited: mpsc::Receiver<Duration>,
 }
 
 impl Endpoint {
@@ -314,8 +316,8 @@ impl Endpoint {
         let url = format!("http://{}/v1/day", listener.local_addr().unwrap());
         let got = Arc::new(Mutex::new(Vec::new()));
         let kept = got.clone();
+        let (hung_up, waited) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut held = Vec::new();
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
                 let r = read_request(&stream);
@@ -328,7 +330,16 @@ impl Endpoint {
                             "HTTP/1.1 {code} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
                         );
                     }
-                    Answer::Silent => held.push(stream),
+                    Answer::Silent => {
+                        let (arrived, hung_up) = (Instant::now(), hung_up.clone());
+                        // Nothing more is coming, so the read ends when the sender gives up:
+                        // with a close, or on some systems a reset. On its own thread, so
+                        // another request would still be taken and counted.
+                        std::thread::spawn(move || {
+                            let _ = stream.read_to_end(&mut Vec::new());
+                            let _ = hung_up.send(arrived.elapsed());
+                        });
+                    }
                     Answer::Redirect(to) => {
                         let _ = write!(
                             stream,
@@ -338,7 +349,7 @@ impl Endpoint {
                 }
             }
         });
-        Endpoint { url, got }
+        Endpoint { url, got, waited }
     }
 
     fn got(&self) -> Vec<Received> {
@@ -603,9 +614,11 @@ fn a_silent_endpoint_times_out() {
     let h = counted(&["2026-11-23", "2026-11-24"]);
     let e = Endpoint::start(Answer::Silent);
     e.point(&h);
-    let started = Instant::now();
     send(&h);
-    assert!(started.elapsed() < Duration::from_secs(15));
+    // Timed from the request's arrival to the hang up, so a slow machine's own start and writes
+    // are not counted. The sender allows ten seconds; the HTTP client's own default is thirty.
+    let waited = e.waited.recv_timeout(Duration::from_secs(60)).unwrap();
+    assert!(waited < Duration::from_secs(15), "{waited:?}");
     let rows = ledger(&h);
     assert_eq!(rows.len(), 1, "later days are not tried");
     assert_eq!(rows[0].0, "2026-11-23");
