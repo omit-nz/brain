@@ -864,4 +864,9 @@ fn a_call_that_named_an_archived_memory_says_so() {
     assert_eq!(after["archived"], serde_json::json!([id]), "{after}");
     let said = h.run(&["calls"]);
     assert!(said.trim_end().ends_with("(1 archived)"), "{said}");
+    // The records still name it once it is back; the index holding it says it is not archived.
+    p.write("one", "one first");
+    pass(&h);
+    assert_eq!(copy(&h, "one"), Some(text.clone()));
+    assert_eq!(calls()["archived"], serde_json::json!([]));
 }

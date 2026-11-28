@@ -16,6 +16,7 @@ use serde::Serializer;
 use serde_json::{Value, json};
 
 use crate::import::Archive;
+use crate::room;
 
 /// The name a tool call's run goes under, among the hooks' and the memory passes'.
 const RUN: &str = "mcp";
@@ -41,6 +42,26 @@ pub fn counted_if_given<S: Serializer>(text: &Option<String>, s: S) -> Result<S:
         Some(text) => counted(text, s),
         None => s.serialize_none(),
     }
+}
+
+/// A name is kept as given; what `check` says is none may be anything, a note's words among them.
+fn name_if<S: Serializer>(
+    name: &Option<String>,
+    check: fn(&str) -> anyhow::Result<()>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match name {
+        Some(text) if check(text).is_ok() => s.serialize_some(text),
+        other => counted_if_given(other, s),
+    }
+}
+
+pub fn room_name<S: Serializer>(name: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    name_if(name, room::check_room, s)
+}
+
+pub fn person_name<S: Serializer>(name: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    name_if(name, room::check_name, s)
 }
 
 /// Records one call and the reply it got, returning the writer when it is still at work. What
@@ -111,11 +132,16 @@ pub fn last(dirs: &Dirs, n: usize) -> anyhow::Result<Vec<Value>> {
     }
     let store = Store::open(&path)?;
     let archive = Archive::load(dirs)?;
-    let index = Index::open(&dirs.data.join("index.db"))?;
+    let held = dirs.data.join("index.db");
+    // Opening would make an empty one, which holds no note.
+    anyhow::ensure!(held.exists(), "no index here; run `brain index`");
+    let index = Index::open(&held)?;
     // Archived: set aside by brain and held by no note now.
-    let archived = |id: &str| {
-        archive.names(id)
-            && uuid::Uuid::parse_str(id).is_ok_and(|id| matches!(index.path_of(&id), Ok(None)))
+    let archived = |id: &str| -> anyhow::Result<bool> {
+        Ok(match uuid::Uuid::parse_str(id) {
+            Ok(uuid) if archive.names(id) => index.path_of(&uuid)?.is_none(),
+            _ => false,
+        })
     };
     let mut out = Vec::new();
     for run in store.runs()?.iter().filter(|r| r.name == RUN) {
@@ -137,7 +163,12 @@ pub fn last(dirs: &Dirs, n: usize) -> anyhow::Result<Vec<Value>> {
                 .iter()
                 .filter_map(|s| s.strip_prefix("note:"))
                 .collect();
-            let aside: Vec<&&str> = notes.iter().filter(|id| archived(id)).collect();
+            let mut aside = Vec::new();
+            for id in &notes {
+                if archived(id)? {
+                    aside.push(*id);
+                }
+            }
             out.push(json!({
                 "at": at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 "door": request["door"],

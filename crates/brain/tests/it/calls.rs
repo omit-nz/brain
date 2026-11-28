@@ -29,6 +29,23 @@ fn calls(h: &Home) -> Vec<Value> {
     h.json(&["calls", "--json"]).as_array().unwrap().clone()
 }
 
+/// The trace files' bytes, the log beside them included.
+fn kept(h: &Home) -> String {
+    let mut bytes = Vec::new();
+    for entry in fs::read_dir(h.home.path().join("data")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(TRACES)
+        {
+            bytes.extend(fs::read(path).unwrap_or_default());
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn db(h: &Home) -> rusqlite::Connection {
     rusqlite::Connection::open(h.home.path().join("data").join(TRACES)).unwrap()
 }
@@ -109,20 +126,7 @@ fn no_note_text_is_kept() {
     );
     // The post another session read is named, so retracting it takes the call too.
     assert_eq!(of("room_new")["notes"].as_array().unwrap().len(), 1);
-    // The files themselves, the log beside them included.
-    let mut bytes = Vec::new();
-    for entry in fs::read_dir(h.home.path().join("data")).unwrap() {
-        let path = entry.unwrap().path();
-        if path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with(TRACES)
-        {
-            bytes.extend(fs::read(path).unwrap_or_default());
-        }
-    }
-    let kept = String::from_utf8_lossy(&bytes);
+    let kept = kept(&h);
     assert!(kept.contains("search_my_brain"), "nothing was recorded");
     for words in [
         "zanzibar",
@@ -341,4 +345,42 @@ fn the_count_asked_for_is_of_calls() {
     assert_eq!(h.run(&["calls", "--last", "1"]).lines().count(), 1);
     assert!(h.run(&["calls", "--last", "1"]).contains("room_list"));
     h.brain().args(["calls", "--last", "0"]).assert().failure();
+}
+
+/// Words put in a name's place are no name, and a refused call has no note to be purged with.
+#[test]
+fn a_name_that_is_none_is_kept_as_its_length() {
+    let h = one_note();
+    let mut m = Mcp::start(&h);
+    for args in [
+        json!({"room": "Ferret text of a message", "text": "t"}),
+        json!({"as": "gibbon line one\ngibbon line two", "text": "t"}),
+    ] {
+        let (said, err) = m.text("room_post", args);
+        assert!(err, "{said}");
+    }
+    let (said, err) = m.text("room_new", json!({"room": "Marmot words", "as": "me"}));
+    assert!(err, "{said}");
+    drop(m);
+    let held = calls(&h);
+    assert_eq!(
+        held[0]["args"],
+        json!({"room": "12 characters", "as": "me"})
+    );
+    assert_eq!(held[2]["args"]["room"], "24 characters");
+    let kept = kept(&h);
+    for words in ["Ferret", "gibbon", "Marmot"] {
+        assert!(!kept.contains(words), "{words} was kept");
+    }
+}
+
+/// With no index brain cannot say what is archived, and reading makes none.
+#[test]
+fn the_calls_are_refused_without_an_index() {
+    let h = one_note();
+    Mcp::start(&h).text("room_list", json!({}));
+    let index = h.home.path().join("data/index.db");
+    fs::remove_file(&index).unwrap();
+    h.brain().args(["calls"]).assert().failure();
+    assert!(!index.exists());
 }

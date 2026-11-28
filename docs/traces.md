@@ -10,8 +10,8 @@ step can be read and replayed later on the same machine.
 - The same file holds a run for each call of a tool an AI tool makes through `brain mcp`: the
   tool, the door it came by, when it was answered, what it asked, how long the reply was, whether
   it failed, and the ids of the notes the reply named. No reply is kept. A capture, a correction,
-  a room post, their titles and the note a correction names are kept as their length, and so is
-  anything over 2,000 characters. A question is kept as asked, so it holds whatever words were put
+  a room post, their titles, the note a correction names and a room or session name that brain
+  would refuse as one are kept as their length, and so is anything over 2,000 characters. A question is kept as asked, so it holds whatever words were put
   in it. A call refused before it reaches its tool is not recorded, nor is one brain fails inside,
   and one can be missed when the store stays busy or brain is ended. `brain calls` reads them
   back, and they age out and are purged as the other runs are.
@@ -28,7 +28,7 @@ step can be read and replayed later on the same machine.
   removing that copy can purge the old words' runs too. An id is archived when brain's archive
   records name it and no note in the index holds it. Anything that gives an agent or a person text
   from a run or a verdict must say which of its sources are archived, worked out when it is read,
-  as `brain calls` does. Nothing else reads that text back yet.
+  as `brain calls --json` does (the plain list says how many). Nothing else reads that text back yet.
 - `verdicts.db`, beside it: one row per reflex per hook, with what it picked and any label you
   give it. The daemon drops a row with no label after 90 days.
 
