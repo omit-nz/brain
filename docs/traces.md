@@ -7,12 +7,14 @@ step can be read and replayed later on the same machine.
   which holds your prompt, and any note text) and each verdict. Secrets are scrubbed before
   anything is written. A run is dropped after 30 days, the next time brain opens the file, unless it
   is kept.
-- The same file holds a run for each call of a tool an AI tool makes through `brain mcp`, one
-  refused before it reaches its tool left out: the tool, the
-  door it came by, when, what it asked, how long the reply was, whether it failed, and the ids of
-  the notes the reply named. No reply is kept, and text that is or becomes a note (a capture, a
-  correction, a room post and their titles) is kept as its length. A question you ask is kept as
-  asked. `brain calls` reads them back, and they age out and are purged as the other runs are.
+- The same file holds a run for each call of a tool an AI tool makes through `brain mcp`: the
+  tool, the door it came by, when it was answered, what it asked, how long the reply was, whether
+  it failed, and the ids of the notes the reply named. No reply is kept. A capture, a correction,
+  a room post, their titles and the note a correction names are kept as their length, and so is
+  anything over 2,000 characters. A question is kept as asked, so it holds whatever words were put
+  in it. A call refused before it reaches its tool is not recorded, nor is one brain fails inside,
+  and one can be missed when the store stays busy or brain is ended. `brain calls` reads them
+  back, and they age out and are purged as the other runs are.
 - The same file holds a run for each pass of `brain memory follow` that changed something, with the
   full text of each memory it copied or updated.
 - When a note is removed, or stops being shared, the runs and verdicts holding its text are purged
@@ -25,8 +27,8 @@ step can be read and replayed later on the same machine.
   `_archive` purges nothing. A memory that returns with other words is copied under the same id, so
   removing that copy can purge the old words' runs too. An id is archived when brain's archive
   records name it and no note in the index holds it. Anything that gives an agent or a person text
-  from a run or a verdict must say which of its sources are archived, worked out when it is read.
-  Nothing reads that text back yet.
+  from a run or a verdict must say which of its sources are archived, worked out when it is read,
+  as `brain calls` does. Nothing else reads that text back yet.
 - `verdicts.db`, beside it: one row per reflex per hook, with what it picked and any label you
   give it. The daemon drops a row with no label after 90 days.
 

@@ -1,17 +1,21 @@
 //! What brain keeps of each tool call an AI makes, in the trace store: what was asked and how much
-//! came back, never a note's words. The notes a reply named are the call's sources, so a note that
-//! is removed takes the calls that named it with it.
+//! came back. No reply is kept, nor the words of a note being written. The notes a reply named are
+//! the call's sources, so a note that is removed takes the calls that named it with it.
 
 use std::path::Path;
 use std::sync::mpsc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use brain_index::Index;
+use brain_platform::dirs::Dirs;
 use brain_reflex::TRACES;
-use brain_reflex::trace::{Call, Kind, Reply, Store};
+use brain_reflex::trace::{Call, Error, Kind, Reply, Store};
 use jiff::Timestamp;
 use serde::Serializer;
 use serde_json::{Value, json};
+
+use crate::import::Archive;
 
 /// The name a tool call's run goes under, among the hooks' and the memory passes'.
 const RUN: &str = "mcp";
@@ -39,8 +43,8 @@ pub fn counted_if_given<S: Serializer>(text: &Option<String>, s: S) -> Result<S:
     }
 }
 
-/// Records one call and the reply it got. What cannot be written is said and never changes the
-/// reply.
+/// Records one call and the reply it got, returning the writer when it is still at work. What
+/// cannot be written is said and never changes the reply.
 pub fn record(
     data: &Path,
     door: &'static str,
@@ -48,7 +52,7 @@ pub fn record(
     mut args: Value,
     reply: &str,
     failed: bool,
-) {
+) -> Option<JoinHandle<()>> {
     for value in args
         .as_object_mut()
         .into_iter()
@@ -65,20 +69,26 @@ pub fn record(
     let response = json!({ "bytes": reply.len(), "error": failed });
     let sources = named(reply);
     let (done, waiting) = mpsc::channel();
-    thread::spawn(move || {
+    let writer = thread::Builder::new().spawn(move || {
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let mut call = Call::new(Kind::Tool, tool, &request);
+        // Written with the request, so no row is ever without the notes a purge finds it by.
+        call.sources = &sources;
         let mut run = brain_reflex::record(&data, RUN);
         // A recording run answers with what it was given, so there is nothing to read back.
-        let _ = run.call(Call::new(Kind::Tool, tool, &request), || {
-            let mut reply = Reply::new(response);
-            reply.sources = sources;
-            Ok(reply)
-        });
+        let _ = run.call(call, || Ok(Reply::new(response)));
         if let Err(e) = run.finish() {
             eprintln!("brain: this {tool} call was not traced: {e}");
         }
         let _ = done.send(());
     });
-    let _ = waiting.recv_timeout(WAIT);
+    match writer {
+        Ok(writer) => waiting.recv_timeout(WAIT).is_err().then_some(writer),
+        Err(e) => {
+            eprintln!("brain: this {tool} call was not traced: {e}");
+            None
+        }
+    }
 }
 
 /// The notes and posts a reply named, as a purge knows them. A note's own text is escaped, so only
@@ -92,18 +102,34 @@ fn named(reply: &str) -> Vec<String> {
         .collect()
 }
 
-/// The last `n` tool calls recorded in `data`, newest first.
-pub fn last(data: &Path, n: usize) -> anyhow::Result<Vec<Value>> {
-    let path = data.join(TRACES);
+/// The last `n` tool calls recorded, newest first, each saying which of its notes are archived.
+pub fn last(dirs: &Dirs, n: usize) -> anyhow::Result<Vec<Value>> {
+    let path = dirs.data.join(TRACES);
     // Opening would make the file.
     if !path.exists() {
         return Ok(Vec::new());
     }
     let store = Store::open(&path)?;
+    let archive = Archive::load(dirs)?;
+    let index = Index::open(&dirs.data.join("index.db"))?;
+    // Archived: set aside by brain and held by no note now.
+    let archived = |id: &str| {
+        archive.names(id)
+            && uuid::Uuid::parse_str(id).is_ok_and(|id| matches!(index.path_of(&id), Ok(None)))
+    };
     let mut out = Vec::new();
-    for run in store.runs()?.iter().filter(|r| r.name == RUN).take(n) {
+    for run in store.runs()?.iter().filter(|r| r.name == RUN) {
+        if out.len() == n {
+            break;
+        }
         let at = Timestamp::from_nanosecond(run.started_ns.into())?;
-        for span in store.spans(&run.id)? {
+        // A prune or a purge may take a run while the list is read.
+        let spans = match store.spans(&run.id) {
+            Err(Error::NoSuchRun) => continue,
+            spans => spans?,
+        };
+        // One call to a run; a run cut short before it holds none.
+        for span in spans {
             let request = span.request.unwrap_or_default();
             let response = span.response.unwrap_or_default();
             let notes: Vec<&str> = span
@@ -111,6 +137,7 @@ pub fn last(data: &Path, n: usize) -> anyhow::Result<Vec<Value>> {
                 .iter()
                 .filter_map(|s| s.strip_prefix("note:"))
                 .collect();
+            let aside: Vec<&&str> = notes.iter().filter(|id| archived(id)).collect();
             out.push(json!({
                 "at": at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 "door": request["door"],
@@ -119,6 +146,7 @@ pub fn last(data: &Path, n: usize) -> anyhow::Result<Vec<Value>> {
                 "reply_bytes": response["bytes"],
                 "error": response["error"],
                 "notes": notes,
+                "archived": aside,
             }));
         }
     }

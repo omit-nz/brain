@@ -101,7 +101,7 @@ fn no_note_text_is_kept() {
     );
     assert_eq!(
         of("correct")["args"],
-        json!({"target": "plan.md", "correction": "16 characters"})
+        json!({"target": "7 characters", "correction": "16 characters"})
     );
     assert_eq!(
         of("room_post")["args"],
@@ -225,4 +225,120 @@ fn a_busy_trace_store_never_holds_a_reply() {
         "{:?}",
         asked.elapsed()
     );
+}
+
+/// A captured note's file is named from its own words, so a path is words of a note too.
+#[test]
+fn a_corrected_note_is_kept_as_a_source_and_never_by_name() {
+    let h = one_note();
+    let mut m = Mcp::start(&h);
+    let (said, _) = m.text("capture", json!({"text": "obsidian wombat owes marmalade"}));
+    let path = said
+        .split("path=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(path.contains("obsidian-wombat"), "{said}");
+    h.run(&["index"]);
+    let (said, err) = m.text("correct", json!({"target": path, "correction": "no"}));
+    assert!(!err, "{said}");
+    drop(m);
+    let held = calls(&h);
+    assert_eq!(
+        held[0]["args"]["target"],
+        format!("{} characters", path.len())
+    );
+    // The correction and the note it corrects.
+    assert_eq!(held[0]["notes"].as_array().unwrap().len(), 2, "{held:?}");
+    h.run(&["index"]);
+    fs::remove_file(h.vault.path().join(path)).unwrap();
+    h.run(&["index"]);
+    assert_eq!(calls(&h), Vec::<Value>::new(), "both calls named it");
+}
+
+/// A row whose reply was never written still says which notes it must go with.
+#[test]
+fn a_calls_notes_are_written_with_it() {
+    let h = one_note();
+    let mut m = Mcp::start(&h);
+    m.text("room_list", json!({}));
+    db(&h)
+        .execute_batch(
+            "CREATE TRIGGER no_end BEFORE UPDATE ON spans BEGIN SELECT RAISE(ABORT, 'x'); END",
+        )
+        .unwrap();
+    m.text("search_my_brain", json!({"query": "orchard"}));
+    drop(m);
+    assert_eq!(calls(&h)[0]["notes"], json!([ID]));
+}
+
+#[test]
+fn a_client_that_quits_after_the_reply_still_leaves_the_call() {
+    let h = one_note();
+    let mut m = Mcp::start(&h);
+    m.text("room_list", json!({}));
+    let held = db(&h);
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    m.text("room_list", json!({}));
+    m.hang_up();
+    // Long enough for a server that does not wait for its record to be gone.
+    std::thread::sleep(Duration::from_millis(500));
+    held.execute_batch("COMMIT").unwrap();
+    m.exited();
+    assert_eq!(calls(&h).len(), 2);
+}
+
+#[test]
+fn a_question_of_2000_characters_is_kept_as_asked() {
+    let h = one_note();
+    let query = "x".repeat(2_000);
+    Mcp::start(&h).text("search_my_brain", json!({"query": query}));
+    assert_eq!(calls(&h)[0]["args"]["query"], query);
+}
+
+#[test]
+fn a_failed_call_and_two_notes_print_as_such() {
+    let h = indexed(&[
+        (
+            "a.md",
+            "---\nid: 0195f2e0-0000-7000-8000-00000000000a\nowner: robin\nreview: 2020-01-01\n---\nx\n",
+        ),
+        (
+            "b.md",
+            "---\nid: 0195f2e0-0000-7000-8000-00000000000b\nowner: robin\nreview: 2020-01-01\n---\ny\n",
+        ),
+    ]);
+    let mut m = Mcp::start(&h);
+    m.text("due", json!({}));
+    let (_, err) = m.text("correct", json!({"target": "no.md", "correction": "x"}));
+    assert!(err);
+    drop(m);
+    let said = h.run(&["calls"]);
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(lines[0].ends_with("bytes, 0 notes, error"), "{said}");
+    assert!(lines[1].ends_with("bytes, 2 notes"), "{said}");
+}
+
+#[test]
+fn a_trace_store_that_cannot_be_written_leaves_the_reply_alone() {
+    let h = one_note();
+    fs::create_dir_all(h.home.path().join("data").join(TRACES)).unwrap();
+    let (text, err) = Mcp::start(&h).text("room_list", json!({}));
+    assert!(!err && text.starts_with("No rooms yet"), "{text}");
+    let said = fs::read_to_string(h.home.path().join("mcp.err")).unwrap();
+    assert!(said.contains("not traced"), "{said}");
+}
+
+#[test]
+fn the_count_asked_for_is_of_calls() {
+    let h = one_note();
+    Mcp::start(&h).text("room_list", json!({}));
+    // A run cut short before its call was written is no call.
+    let store = Store::open(&h.home.path().join("data").join(TRACES)).unwrap();
+    Run::record(&store, "mcp").finish().unwrap();
+    assert_eq!(h.run(&["calls", "--last", "1"]).lines().count(), 1);
+    assert!(h.run(&["calls", "--last", "1"]).contains("room_list"));
+    h.brain().args(["calls", "--last", "0"]).assert().failure();
 }

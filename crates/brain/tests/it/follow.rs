@@ -843,3 +843,25 @@ mod links {
         assert!(!archived(&h, "one"));
     }
 }
+
+/// Whoever reads a run is told which of its notes are archived.
+#[test]
+fn a_call_that_named_an_archived_memory_says_so() {
+    let (h, p) = following(&["one", "two"]);
+    let text = copy(&h, "one").unwrap();
+    let id = text.lines().find_map(|l| l.strip_prefix("id: ")).unwrap();
+    super::mcp::Mcp::start(&h).text("search_my_brain", serde_json::json!({"query": "one first"}));
+    let calls = || h.json(&["calls", "--json"])[0].clone();
+    let before = calls();
+    let named = before["notes"].as_array().unwrap();
+    assert!(named.iter().any(|n| n == id), "{before}");
+    assert_eq!(before["archived"], serde_json::json!([]), "{before}");
+    p.remove("one");
+    pass(&h);
+    pass(&h);
+    assert!(archived(&h, "one"));
+    let after = calls();
+    assert_eq!(after["archived"], serde_json::json!([id]), "{after}");
+    let said = h.run(&["calls"]);
+    assert!(said.trim_end().ends_with("(1 archived)"), "{said}");
+}

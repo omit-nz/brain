@@ -72,12 +72,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// The tool calls AI tools made of brain lately, newest first: what was asked, never the
-    /// notes' words.
+    /// The tool calls AI tools made of brain lately, newest first, with what each asked.
     Calls {
         /// How many.
-        #[arg(long, default_value_t = 20)]
-        last: usize,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
+        last: u32,
         #[arg(long)]
         json: bool,
     },
@@ -390,7 +389,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             let vault = Vault::open(&config.vault)?;
             let today = clock.today();
             let idx = reader(dirs, &config)?;
-            let w = capture::correct(&vault, &idx, &config.me, today, &target, &text)?;
+            let (w, _) = capture::correct(&vault, &idx, &config.me, today, &target, &text)?;
             println!("{}", terminal(&w.rel));
             usage::count(
                 &usage::store(dirs),
@@ -846,8 +845,8 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
     Ok(())
 }
 
-fn list_calls(dirs: &Dirs, last: usize, as_json: bool) -> anyhow::Result<()> {
-    let calls = calls::last(&dirs.data, last)?;
+fn list_calls(dirs: &Dirs, last: u32, as_json: bool) -> anyhow::Result<()> {
+    let calls = calls::last(dirs, usize::try_from(last)?)?;
     if as_json {
         println!("{}", serde_json::to_string_pretty(&calls)?);
         return Ok(());
@@ -858,8 +857,12 @@ fn list_calls(dirs: &Dirs, last: usize, as_json: bool) -> anyhow::Result<()> {
     for call in calls {
         let word = |key: &str| call[key].as_str().unwrap_or_default().to_string();
         let notes = call["notes"].as_array().map_or(0, Vec::len);
+        let aside = match call["archived"].as_array().map_or(0, Vec::len) {
+            0 => String::new(),
+            n => format!(" ({n} archived)"),
+        };
         let line = format!(
-            "{}  {}  {}  {}  {} bytes, {notes} note{}{}",
+            "{}  {}  {}  {}  {} bytes, {notes} note{}{aside}{}",
             word("at"),
             word("door"),
             word("tool"),

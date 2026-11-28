@@ -7,6 +7,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use brain::fence::{TITLE_CHARS, attrs, escape, fence_ref};
@@ -214,6 +215,8 @@ struct State {
     activity: PathBuf,
     door: Door,
     clock: Box<dyn Clock>,
+    /// Records still being written when their reply went.
+    late: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl State {
@@ -357,6 +360,7 @@ struct CaptureArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct CorrectArgs {
     /// The wrong note's id or its path in the vault.
+    #[serde(serialize_with = "calls::counted")]
     target: String,
     /// What is true instead.
     #[serde(serialize_with = "calls::counted")]
@@ -420,7 +424,17 @@ impl Server {
                 Ok(text) => (text, false),
                 Err(text) => (text, true),
             };
-            calls::record(&state.data, state.door.as_str(), tool, args, reply, failed);
+            let late = calls::record(
+                &state.dirs.data,
+                state.door.as_str(),
+                tool,
+                args,
+                reply,
+                failed,
+            );
+            let mut kept = state.late.lock().unwrap_or_else(PoisonError::into_inner);
+            kept.retain(|writer| !writer.is_finished());
+            kept.extend(late);
             out
         })
         .await
@@ -492,7 +506,7 @@ impl Server {
     async fn correct(&self, Parameters(a): Parameters<CorrectArgs>) -> Result<String, String> {
         self.blocking("correct", a, |s, a| {
             let (vault, me) = s.current()?;
-            let w = capture::correct(
+            let (w, wrong) = capture::correct(
                 &vault,
                 &*s.index_of(&vault)?,
                 &me,
@@ -507,8 +521,9 @@ impl Server {
                 Some(s.door),
             );
             Ok(format!(
-                "Saved the correction to the inbox: {}",
-                fence_ref(Some(w.id), &w.rel, &w.title, Some(Kind::Rule))
+                "Saved the correction to the inbox: {}, correcting {}",
+                fence_ref(Some(w.id), &w.rel, &w.title, Some(Kind::Rule)),
+                fence_ref(wrong.note_uuid, &wrong.path, &wrong.title, None)
             ))
         })
         .await
@@ -672,11 +687,13 @@ pub fn run(
         activity: dirs.data.join("activity.db"),
         door,
         clock,
+        late: Mutex::new(Vec::new()),
     };
     let server = Server {
         state: Arc::new(state),
         tool_router: Server::tool_router(),
     };
+    let state = server.state.clone();
     let warm = server.state.clone();
     std::thread::spawn(move || warm.provider().is_some());
     tokio::runtime::Builder::new_current_thread()
@@ -686,7 +703,13 @@ pub fn run(
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
             anyhow::Ok(())
-        })
+        })?;
+    // The client may quit as soon as it has its reply; its record is still brain's to write.
+    let late = std::mem::take(&mut *state.late.lock().unwrap_or_else(PoisonError::into_inner));
+    for writer in late {
+        let _ = writer.join();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
