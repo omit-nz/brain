@@ -7,6 +7,7 @@
 mod archived;
 mod blocklist;
 mod follow;
+mod hashes;
 mod memory;
 mod report;
 mod vault;
@@ -25,6 +26,7 @@ use sha2::{Digest, Sha256};
 pub use archived::{Archive, archived_line};
 pub use blocklist::Blocklist;
 pub use follow::{Followed, sync};
+use hashes::Hashes;
 pub use report::report;
 
 pub const LEDGER: &str = "import-ledger.json";
@@ -35,7 +37,8 @@ pub const LOCK: &str = "import.lock";
 pub struct LedgerEntry {
     pub id: Option<String>,
     pub src_hash: String,
-    pub dst_hash: String,
+    #[serde(flatten)]
+    pub copy: Hashes,
     /// The folder the source was found in, a memory import's projects folder or the vault imported
     /// from; unknown for a copy made before this was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,7 +308,7 @@ fn classify_sources(
                 todo.push((s, dst_hash));
             }
             Some(e) if e.src_hash == src_hash => plan.unchanged += 1,
-            Some(e) if dst_hash.as_deref() == Some(e.dst_hash.as_str()) => {
+            Some(e) if dst_hash.as_deref().is_some_and(|now| e.copy.accepts(now)) => {
                 plan.updated.push(rel_key(&s.dst_rel));
                 todo.push((s, dst_hash));
             }
@@ -325,7 +328,7 @@ pub fn plan(
 }
 
 /// Classifies, then writes every new and updated copy, each with its id, and records it in the
-/// ledger. Returns the plan and the keys written, whose `dst_hash` the caller refreshes with
+/// ledger. Returns the plan and the keys written, whose hash the caller refreshes with
 /// `settle` after its own reindex, which can still give a copy a new id when another note holds
 /// its id.
 pub fn apply(
@@ -400,7 +403,7 @@ fn write_one(
         LedgerEntry {
             id,
             src_hash: hash(s.raw.as_bytes()),
-            dst_hash: hash(text.as_bytes()),
+            copy: Hashes::of(hash(text.as_bytes())),
             from: s.from.clone(),
             vault: Some(dst.root.clone()),
             missing: false,
@@ -422,7 +425,7 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
             _ => continue,
         };
         if let Ok(bytes) = std::fs::read(dst.root.join(&rel)) {
-            entry.dst_hash = hash(&bytes);
+            entry.copy.settle(hash(&bytes));
             let text = String::from_utf8_lossy(&bytes);
             if let Some(id) = brain_note::Note::parse(&rel, &text, brain_note::Place::Kept).id {
                 entry.id = Some(id.to_string());
