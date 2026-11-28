@@ -137,8 +137,11 @@ enum Command {
         action: MemoryAction,
     },
     /// Your kept notes whose review has come, oldest first, then recent ones with something left
-    /// open. `--json` prints `{due, open, open_more, open_unread}`.
+    /// open. `--json` prints `{due, open, open_more, open_unread}`, every due note in it.
     Due {
+        /// Print every due note, not the oldest 20.
+        #[arg(long)]
+        all: bool,
         /// Also list notes due within this many days.
         #[arg(long, default_value_t = 14)]
         within: i64,
@@ -412,7 +415,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             }
         },
         Command::Memory { action } => memory_cmd(dirs, action),
-        Command::Due { within, json } => due(dirs, &*clock, within, json),
+        Command::Due { all, within, json } => due(dirs, &*clock, within, all, json),
         Command::Mcp {
             door,
             hand_over,
@@ -878,7 +881,13 @@ fn list_calls(dirs: &Dirs, last: u32, as_json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Result<()> {
+fn due(
+    dirs: &Dirs,
+    clock: &dyn Clock,
+    within: i64,
+    all: bool,
+    as_json: bool,
+) -> anyhow::Result<()> {
     let config = Config::load(dirs)?;
     let today = clock.today();
     let by = today.checked_add(within.days())?;
@@ -921,11 +930,16 @@ fn due(dirs: &Dirs, clock: &dyn Clock, within: i64, as_json: bool) -> anyhow::Re
     if due.is_empty() {
         println!("nothing of yours is due");
     }
-    for d in &due {
+    let listed = if all { due.len() } else { mcp::DUE_SHOWN };
+    for d in due.iter().take(listed) {
         println!(
             "{}",
             terminal(&format!("{}  {}  {}", d.review, d.path, d.title))
         );
+    }
+    let rest = due.len().saturating_sub(listed);
+    if rest > 0 {
+        println!("{rest} more not listed: `brain due --within {within} --all` prints them all.");
     }
     if !open.notes.is_empty() {
         println!("{}", open::heading());

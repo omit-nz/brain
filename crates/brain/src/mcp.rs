@@ -85,7 +85,7 @@ const MORE_BYTES: usize = 80;
 const ERROR_BYTES: usize = 2_000;
 /// ONNX Runtime threads per server: every AI session runs its own.
 const THREADS: usize = 2;
-const DUE_SHOWN: usize = 20;
+pub(crate) const DUE_SHOWN: usize = 20;
 /// In bytes: a tool result an AI's client takes whole, since a review queue can hold thousands.
 const DUE_BYTES: usize = 9_500;
 
@@ -159,7 +159,7 @@ fn due_reply(due: &[Due], today: Date, within: i64, open: &Open) -> String {
     }
     if listed < due.len() {
         out.push_str(&format!(
-            "\n{} more not listed: `brain due --within {within}` prints them all.",
+            "\n{} more not listed: `brain due --within {within} --all` prints them all.",
             due.len() - listed
         ));
     }

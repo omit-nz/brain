@@ -308,3 +308,34 @@ fn the_command_prints_the_open_notes_too() {
     let empty = built(&[]);
     assert_eq!(empty.run(&["due"]), "nothing of yours is due\n");
 }
+
+/// A queue of thousands would flood the terminal, or the AI reading it there.
+#[test]
+fn the_command_lists_the_oldest_and_counts_the_rest() {
+    let notes: Vec<(String, String)> = (0..22)
+        .map(|n| {
+            let text = format!("---\nowner: robin\nreview: 2020-01-{:02}\n---\nx\n", n + 1);
+            (format!("d{n:02}.md"), text)
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = notes
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let h = indexed(&refs);
+    let said = h.run(&["due"]);
+    assert_eq!(said.lines().count(), 21, "{said}");
+    assert!(
+        said.contains("d19.md") && !said.contains("d20.md"),
+        "{said}"
+    );
+    assert!(
+        said.ends_with("\n2 more not listed: `brain due --within 14 --all` prints them all.\n"),
+        "{said}"
+    );
+    let all = h.run(&["due", "--all"]);
+    assert_eq!(all.lines().count(), 22, "{all}");
+    assert!(!all.contains("not listed"), "{all}");
+    let json = h.json(&["due", "--json"]);
+    assert_eq!(json["due"].as_array().unwrap().len(), 22);
+}
