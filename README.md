@@ -77,6 +77,7 @@ A room lets your AI sessions leave each other messages on this computer, even se
 - `brain index`, `brain search`, `brain show`, `brain gaps`, `brain due`: index now, search, print a note, list unanswered questions and notes due for review.
 - `brain add`, `brain correct`, `brain inbox`, `brain inbox keep`, `brain inbox skip`: write a note into the inbox, correct one, and work through the inbox.
 - `brain connect`, `brain mcp`: connect an AI tool, and serve it.
+- `brain calls`: the last tool calls your AI tools made, with what each asked and never a note's words.
 - `brain memory follow`, `brain memory run`, `brain memory unfollow`: follow Claude Code's auto-memory.
 - `brain import learning-loop`: copy another brain's notes in. A copy gets no review date.
 - `brain import clear-review-dates --imported-on <day>`: take out the review dates 0.2.5 and earlier stamped on what they imported. It only lists them until `--apply`.

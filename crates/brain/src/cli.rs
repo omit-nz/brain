@@ -16,6 +16,7 @@ use serde_json::json;
 
 use brain::update;
 
+use crate::calls;
 use crate::capture::{self, Capture};
 use crate::config::Config;
 use crate::connect;
@@ -68,6 +69,15 @@ enum Command {
     },
     /// Questions no note answered yet, newest first.
     Gaps {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The tool calls AI tools made of brain lately, newest first: what was asked, never the
+    /// notes' words.
+    Calls {
+        /// How many.
+        #[arg(long, default_value_t = 20)]
+        last: usize,
         #[arg(long)]
         json: bool,
     },
@@ -354,6 +364,7 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
         Command::Daemon { from_dir } => daemon::run(dirs, clock.into(), from_dir.as_deref()),
         Command::Search { text, s } => search(dirs, &*clock, &text.join(" "), s),
         Command::Gaps { json } => list_gaps(dirs, &*clock, json),
+        Command::Calls { last, json } => list_calls(dirs, last, json),
         Command::Add { text, title, kind } => {
             let config = Config::load(dirs)?;
             let vault = Vault::open(&config.vault)?;
@@ -831,6 +842,33 @@ fn room_cmd(dirs: &Dirs, clock: &dyn Clock, action: RoomAction) -> anyhow::Resul
                 println!("{}", terminal(&line));
             }
         }
+    }
+    Ok(())
+}
+
+fn list_calls(dirs: &Dirs, last: usize, as_json: bool) -> anyhow::Result<()> {
+    let calls = calls::last(&dirs.data, last)?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&calls)?);
+        return Ok(());
+    }
+    if calls.is_empty() {
+        println!("no calls recorded");
+    }
+    for call in calls {
+        let word = |key: &str| call[key].as_str().unwrap_or_default().to_string();
+        let notes = call["notes"].as_array().map_or(0, Vec::len);
+        let line = format!(
+            "{}  {}  {}  {}  {} bytes, {notes} note{}{}",
+            word("at"),
+            word("door"),
+            word("tool"),
+            call["args"],
+            call["reply_bytes"],
+            if notes == 1 { "" } else { "s" },
+            if call["error"] == true { ", error" } else { "" },
+        );
+        println!("{}", terminal(&line));
     }
     Ok(())
 }

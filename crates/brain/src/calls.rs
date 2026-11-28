@@ -1,0 +1,126 @@
+//! What brain keeps of each tool call an AI makes, in the trace store: what was asked and how much
+//! came back, never a note's words. The notes a reply named are the call's sources, so a note that
+//! is removed takes the calls that named it with it.
+
+use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use brain_reflex::TRACES;
+use brain_reflex::trace::{Call, Kind, Reply, Store};
+use jiff::Timestamp;
+use serde::Serializer;
+use serde_json::{Value, json};
+
+/// The name a tool call's run goes under, among the hooks' and the memory passes'.
+const RUN: &str = "mcp";
+
+/// How long a reply waits for its own record: another writer holding the store is waited on for
+/// five seconds, and a reply is not.
+const WAIT: Duration = Duration::from_secs(1);
+
+/// The most characters an argument is kept with; longer is no question or name.
+const LONGEST: usize = 2_000;
+
+/// What is kept of words that are or become a note: how many there were.
+fn count(text: &str) -> String {
+    format!("{} characters", text.chars().count())
+}
+
+pub fn counted<S: Serializer>(text: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&count(text))
+}
+
+pub fn counted_if_given<S: Serializer>(text: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    match text {
+        Some(text) => counted(text, s),
+        None => s.serialize_none(),
+    }
+}
+
+/// Records one call and the reply it got. What cannot be written is said and never changes the
+/// reply.
+pub fn record(
+    data: &Path,
+    door: &'static str,
+    tool: &'static str,
+    mut args: Value,
+    reply: &str,
+    failed: bool,
+) {
+    for value in args
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|a| a.values_mut())
+    {
+        if let Value::String(text) = value
+            && text.chars().count() > LONGEST
+        {
+            *value = count(text).into();
+        }
+    }
+    let data = data.to_path_buf();
+    let request = json!({ "door": door, "args": args });
+    let response = json!({ "bytes": reply.len(), "error": failed });
+    let sources = named(reply);
+    let (done, waiting) = mpsc::channel();
+    thread::spawn(move || {
+        let mut run = brain_reflex::record(&data, RUN);
+        // A recording run answers with what it was given, so there is nothing to read back.
+        let _ = run.call(Call::new(Kind::Tool, tool, &request), || {
+            let mut reply = Reply::new(response);
+            reply.sources = sources;
+            Ok(reply)
+        });
+        if let Err(e) = run.finish() {
+            eprintln!("brain: this {tool} call was not traced: {e}");
+        }
+        let _ = done.send(());
+    });
+    let _ = waiting.recv_timeout(WAIT);
+}
+
+/// The notes and posts a reply named, as a purge knows them. A note's own text is escaped, so only
+/// brain's own elements read like this.
+fn named(reply: &str) -> Vec<String> {
+    ["<note id=\"", "<post id=\""]
+        .into_iter()
+        .flat_map(|tag| reply.split(tag).skip(1))
+        .filter_map(|rest| rest.get(..36)?.parse::<uuid::Uuid>().ok())
+        .map(|id| format!("note:{id}"))
+        .collect()
+}
+
+/// The last `n` tool calls recorded in `data`, newest first.
+pub fn last(data: &Path, n: usize) -> anyhow::Result<Vec<Value>> {
+    let path = data.join(TRACES);
+    // Opening would make the file.
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let store = Store::open(&path)?;
+    let mut out = Vec::new();
+    for run in store.runs()?.iter().filter(|r| r.name == RUN).take(n) {
+        let at = Timestamp::from_nanosecond(run.started_ns.into())?;
+        for span in store.spans(&run.id)? {
+            let request = span.request.unwrap_or_default();
+            let response = span.response.unwrap_or_default();
+            let notes: Vec<&str> = span
+                .sources
+                .iter()
+                .filter_map(|s| s.strip_prefix("note:"))
+                .collect();
+            out.push(json!({
+                "at": at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "door": request["door"],
+                "tool": span.name,
+                "args": request["args"],
+                "reply_bytes": response["bytes"],
+                "error": response["error"],
+                "notes": notes,
+            }));
+        }
+    }
+    Ok(out)
+}

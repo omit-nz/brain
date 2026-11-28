@@ -1,4 +1,4 @@
-# What brain keeps about its own decisions
+# What brain keeps about its own decisions and the calls made of it
 
 Each time Claude Code calls `brain hook`, brain records what it read and what it decided, so any
 step can be read and replayed later on the same machine.
@@ -7,6 +7,12 @@ step can be read and replayed later on the same machine.
   which holds your prompt, and any note text) and each verdict. Secrets are scrubbed before
   anything is written. A run is dropped after 30 days, the next time brain opens the file, unless it
   is kept.
+- The same file holds a run for each call of a tool an AI tool makes through `brain mcp`, one
+  refused before it reaches its tool left out: the tool, the
+  door it came by, when, what it asked, how long the reply was, whether it failed, and the ids of
+  the notes the reply named. No reply is kept, and text that is or becomes a note (a capture, a
+  correction, a room post and their titles) is kept as its length. A question you ask is kept as
+  asked. `brain calls` reads them back, and they age out and are purged as the other runs are.
 - The same file holds a run for each pass of `brain memory follow` that changed something, with the
   full text of each memory it copied or updated.
 - When a note is removed, or stops being shared, the runs and verdicts holding its text are purged
