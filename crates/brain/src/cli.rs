@@ -7,7 +7,7 @@ use brain_index::{Index, Query, Scope, embed, is_gap};
 use brain_note::{Kind, Vault};
 use brain_platform::clock::{Clock, FixedClock, SystemClock};
 use brain_platform::dirs::Dirs;
-use brain_platform::fs::{Lock, create_dir_private};
+use brain_platform::fs::Lock;
 use brain_platform::service::{self, Launchctl};
 use brain_report::{Door, Event};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
@@ -29,6 +29,7 @@ use crate::offer;
 use crate::open;
 use crate::out::terminal;
 use crate::room;
+use crate::setup::{self, SetupArgs};
 use crate::usage;
 
 #[derive(Parser)]
@@ -106,10 +107,13 @@ enum Command {
         #[command(subcommand)]
         action: Option<UsageAction>,
     },
-    /// Setting brain up.
+    /// Set brain up: the notes folder, the index and the config.
+    #[command(args_conflicts_with_subcommands = true)]
     Setup {
+        #[command(flatten)]
+        args: SetupArgs,
         #[command(subcommand)]
-        action: SetupAction,
+        action: Option<SetupAction>,
     },
     /// Serve brain to an AI tool over MCP on stdin and stdout.
     Mcp {
@@ -120,7 +124,7 @@ enum Command {
         /// extension's bundled copy).
         #[arg(long, hide = true)]
         hand_over: bool,
-        /// The name this session posts and reads rooms under; the name set up with brain init
+        /// The name this session posts and reads rooms under; the name brain was set up with
         /// unless given.
         #[arg(long = "as")]
         name: Option<String>,
@@ -274,7 +278,7 @@ enum RoomAction {
         /// One line; the text's first line unless given.
         #[arg(long)]
         title: Option<String>,
-        /// Who is posting; the name set up with brain init unless given.
+        /// Who is posting; the name brain was set up with unless given.
         #[arg(long = "as")]
         author: Option<String>,
     },
@@ -282,7 +286,7 @@ enum RoomAction {
     New {
         #[arg(long, default_value = room::DEFAULT_ROOM)]
         room: String,
-        /// Who is reading; the name set up with brain init unless given.
+        /// Who is reading; the name brain was set up with unless given.
         #[arg(long = "as")]
         reader: Option<String>,
     },
@@ -307,7 +311,7 @@ enum SetupAction {
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
-enum Switch {
+pub enum Switch {
     On,
     Off,
 }
@@ -423,8 +427,10 @@ pub fn run(cli: Cli, dirs: &Dirs) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Room { action } => room_cmd(dirs, &*clock, action),
+        Command::Setup { args, action: None } => setup::run(dirs, &*clock, args),
         Command::Setup {
-            action: SetupAction::Reminders { state },
+            action: Some(SetupAction::Reminders { state }),
+            ..
         } => {
             let on = matches!(state, Switch::On);
             offer::set_reminders(&dirs.data, &*clock, on)?;
@@ -514,9 +520,8 @@ fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
             return Ok(());
         }
         MemoryAction::Follow { projects } => {
-            // A link is stored as what it points at: the pass follows no link.
-            let found = projects.canonicalize().ok().filter(|p| p.is_dir());
-            let found = found.with_context(|| format!("{}: no such folder", projects.display()))?;
+            let found = setup::followable(&projects)
+                .with_context(|| format!("{}: no such folder", projects.display()))?;
             Config::edit(dirs, |config| config.memory.follow = Some(found))?
         }
         MemoryAction::Run => Config::load(dirs)?,
@@ -549,51 +554,30 @@ fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The installed brain starts its own daemon; a build run from anywhere else leaves it to the
+/// person, so a dev build never registers a launch agent.
+pub(crate) fn start_daemon(dirs: &Dirs) {
+    if service::SUPPORTED && update::runs_from(&update::install_dir(&dirs.bin)) {
+        if let Err(e) = start(dirs) {
+            eprintln!(
+                "{}",
+                terminal(&format!(
+                    "brain's daemon did not start: {e:#}; run `brain start`"
+                ))
+            );
+        }
+    } else {
+        println!("To keep the index up to date as notes change, run `brain daemon` in a terminal.");
+    }
+}
+
 fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
     let named = vault.is_some();
     let root = match vault {
         Some(v) => v,
         None => std::env::current_dir()?,
     };
-    // brain writes an id into every note under its vault, so a folder holding far more than notes
-    // is refused. A git repository is refused only as the folder init happens to run in: a notes
-    // folder synced with git is a vault once its owner names it.
-    let same = |a: &Path, b: &Path| {
-        a.canonicalize()
-            .ok()
-            .is_some_and(|a| Some(a) == b.canonicalize().ok())
-    };
-    let what = if std::env::home_dir().is_some_and(|home| same(&root, &home)) {
-        Some("your home folder")
-    } else if !named && root.join(".git").exists() {
-        Some("a code repository")
-    } else if root.canonicalize().is_ok_and(|r| r.parent().is_none()) {
-        Some("the root of the disk")
-    } else {
-        None
-    };
-    if let Some(what) = what {
-        anyhow::bail!(
-            "{} is {what}; brain writes an id into every note in its vault, so name your notes folder with --vault",
-            root.display()
-        );
-    }
-    if !root.exists() {
-        create_dir_private(&root)?;
-    }
-    let vault = Vault::open(&root)?;
-    let layout = &vault.layout;
-    for folder in [
-        &layout.inbox,
-        &layout.private,
-        &layout.memory,
-        &layout.archive,
-    ] {
-        let path = vault.root.join(folder);
-        if !path.exists() {
-            create_dir_private(&path)?;
-        }
-    }
+    let vault = setup::make_vault(&root, named)?;
     // A second init keeps everything else the person set; an unreadable config fails rather than
     // quietly switching usage sending back on.
     Config::update(dirs, |before| {
@@ -609,20 +593,7 @@ fn init(dirs: &Dirs, me: String, vault: Option<PathBuf>) -> anyhow::Result<()> {
             vault.root.display()
         ))
     );
-    // The installed brain starts its own daemon; a build run from anywhere else leaves it to the
-    // person, so a dev build never registers a launch agent.
-    if service::SUPPORTED && update::runs_from(&update::install_dir(&dirs.bin)) {
-        if let Err(e) = start(dirs) {
-            eprintln!(
-                "{}",
-                terminal(&format!(
-                    "brain's daemon did not start: {e:#}; run `brain start`"
-                ))
-            );
-        }
-    } else {
-        println!("To keep the index up to date as notes change, run `brain daemon` in a terminal.");
-    }
+    start_daemon(dirs);
     Ok(())
 }
 

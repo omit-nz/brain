@@ -63,6 +63,12 @@ fn edit<T>(
     Ok(Some(out))
 }
 
+/// Sets an unreadable state aside, changing nothing in a readable one.
+pub fn tidy(data: &Path, clock: &dyn Clock, held: &Lock) -> anyhow::Result<()> {
+    edit(data, clock, held, |_| ())?;
+    Ok(())
+}
+
 /// `brain setup reminders on|off`.
 pub fn set_reminders(data: &Path, clock: &dyn Clock, on: bool) -> anyhow::Result<()> {
     create_dir_private(data)?;

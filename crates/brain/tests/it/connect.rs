@@ -275,7 +275,7 @@ fn hand_over_without_an_install_says_how_to_install() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr).trim(),
-        format!("brain is not installed on this computer; {HOW_TO_INSTALL}, then run brain init")
+        format!("brain is not installed on this computer; {HOW_TO_INSTALL}, then run brain setup")
     );
 }
 

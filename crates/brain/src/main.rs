@@ -16,6 +16,7 @@ mod open;
 mod plugin;
 mod room;
 mod runtime;
+mod setup;
 mod usage;
 
 use std::process::ExitCode;

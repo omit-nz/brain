@@ -164,7 +164,10 @@ fn existing(before: Option<Config>) -> anyhow::Result<Config> {
     match before {
         Some(config) => Ok(config),
         None => {
-            bail!("brain has no vault yet; in your notes folder, run `brain init --me <your name>`")
+            bail!(
+                "brain is not set up yet; run `brain setup`, or in your notes folder \
+                 `brain init --me <your name>`"
+            )
         }
     }
 }

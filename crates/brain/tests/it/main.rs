@@ -14,6 +14,7 @@ mod mcp;
 mod offer;
 mod room;
 mod service;
+mod setup;
 mod update;
 mod usage;
 mod vault;
@@ -309,7 +310,7 @@ fn two_setup_writes_never_lose_a_key() {
         (&["memory", "follow", followed], "follow = "),
         (&["memory", "unfollow"], "[setup]"),
     ];
-    for (args, change) in writes {
+    for (args, change) in writes.into_iter().chain([(&["setup"][..], "ran = ")]) {
         let h = Home::new();
         h.init();
         let mut args: Vec<&str> = args.to_vec();

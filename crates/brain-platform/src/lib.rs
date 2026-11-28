@@ -1,5 +1,6 @@
 //! The one place brain touches the operating system: folders, file writes and moves, code signatures, and the clock.
 
+pub mod account;
 pub mod clock;
 pub mod codesign;
 pub mod dirs;

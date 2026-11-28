@@ -67,6 +67,13 @@ impl LedgerEntry {
 pub struct Ledger(BTreeMap<String, LedgerEntry>);
 
 impl Ledger {
+    /// Whether any copy of a memory is recorded in `vault`.
+    pub fn holds_memory(&self, vault: &Path) -> bool {
+        self.0
+            .iter()
+            .any(|(key, entry)| key.starts_with("memory/") && entry.of(vault))
+    }
+
     pub fn load(dirs: &Dirs) -> anyhow::Result<Ledger> {
         let path = dirs.data.join(LEDGER);
         match std::fs::read_to_string(&path) {

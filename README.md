@@ -26,7 +26,7 @@ None of these exist yet, and the plans can change.
 
 ## Install
 
-On a Mac (Apple silicon): download `brain.pkg` from the [releases page](https://github.com/omit-nz/brain/releases) and open it. It installs for you alone, with no admin password, and macOS checks its Developer ID signature and notarisation before it runs. macOS names the signer as Robin Lange (team 5BCNYRT23U), the Apple developer account omit releases under. Then run `brain init --me <your name>` in your notes folder, which also starts the daemon.
+On a Mac (Apple silicon): download `brain.pkg` from the [releases page](https://github.com/omit-nz/brain/releases) and open it. It installs for you alone, with no admin password, and macOS checks its Developer ID signature and notarisation before it runs. macOS names the signer as Robin Lange (team 5BCNYRT23U), the Apple developer account omit releases under. Then run `brain setup`, which makes your notes folder and starts the daemon; `brain init --me <your name>` in a folder of notes you already have works too.
 
 On Linux (x86_64), and for CI and scripted installs:
 
@@ -38,7 +38,7 @@ Then `brain update` moves you to each new release once its signature checks. [do
 
 ## Auto-memory
 
-`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source it has seen there and two looks in a row then found gone. A copy you have edited is left as it is, a copy you have removed stays removed, and a followed folder that is missing or empty changes nothing. `brain memory run` makes one pass now, and `brain memory unfollow` stops.
+`brain memory follow ~/.claude/projects` keeps brain's copies of Claude Code's auto-memory in step: the daemon looks every minute, rewrites a copy whose source changed, and archives a copy whose source it has seen there and two looks in a row then found gone. A copy you have edited is left as it is, a copy you have removed stays removed, and a followed folder that is missing or empty changes nothing. `brain memory run` makes one pass now, and `brain memory unfollow` stops. `brain setup --memory on` follows it too; setup does not follow it unasked.
 
 Archiving is undone when the source returns: the same file comes back under the same id. If its words changed while it was away, a new copy is written under that id and the old one stays in `_archive`. An archived memory is out of search, and `brain status` says how many there are. Archiving does not purge it from brain's traces. Deleting the archived file brain would bring back does, once two passes have found it gone, and that memory is not copied again. If it returned with other words it kept its id, so removing the new copy can purge the old words' traces too.
 
@@ -69,10 +69,11 @@ Both reach your notes through the same eight tools: search your brain, search on
 
 ## Rooms
 
-A room lets your AI sessions leave each other messages on this computer, even sessions signed in to different Claude accounts. A room is the folder `rooms/<name>/` in your vault and each post is a private note in it, so search finds posts and nothing leaves the machine. `room_post` writes a post (to `squads` unless a room is named), `room_new` shows the posts a session has not seen yet, and `room_list` lists the rooms. Give each session its own name with `brain connect claude-code --as "<name>"`, or pass `as` on a call; without one, posts carry the name you gave `brain init`. The same works from a terminal: `brain room post <text>`, `brain room new` and `brain room list`.
+A room lets your AI sessions leave each other messages on this computer, even sessions signed in to different Claude accounts. A room is the folder `rooms/<name>/` in your vault and each post is a private note in it, so search finds posts and nothing leaves the machine. `room_post` writes a post (to `squads` unless a room is named), `room_new` shows the posts a session has not seen yet, and `room_list` lists the rooms. Give each session its own name with `brain connect claude-code --as "<name>"`, or pass `as` on a call; without one, posts carry the name brain was set up with. The same works from a terminal: `brain room post <text>`, `brain room new` and `brain room list`.
 
 ## Commands
 
+- `brain setup`: set brain up, taking the defaults, or `--guided` to be asked.
 - `brain init`, `brain status`, `brain update`: set up over a folder of notes, see what the index holds, install the newest signed release.
 - `brain start`, `brain stop`, `brain daemon`: keep the index up to date at every login or in a terminal.
 - `brain index`, `brain search`, `brain show`, `brain gaps`, `brain due`: index now, search, print a note, list unanswered questions, the oldest 20 notes due for review (`--all` for every one) and recent notes with something left open.

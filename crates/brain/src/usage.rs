@@ -304,10 +304,15 @@ fn install_key(dirs: &Dirs) -> anyhow::Result<SigningKey> {
     Ok(SigningKey::from_bytes(&bytes))
 }
 
+/// Marks a day that had sending off for part of it, so it is never sent.
+pub fn mark_switched(dirs: &Dirs, today: Date) -> anyhow::Result<()> {
+    Activity::open(&store(dirs))?.off(today)
+}
+
 /// `brain usage on|off`. Either way today had sending off for part of it, so it is never sent.
 pub fn set(dirs: &Dirs, clock: &dyn Clock, send: bool) -> anyhow::Result<()> {
     Config::edit(dirs, |config| config.usage.send = send)?;
-    Activity::open(&store(dirs))?.off(clock.today())?;
+    mark_switched(dirs, clock.today())?;
     println!("Usage sending: {}", if send { "on" } else { "off" });
     Ok(())
 }
