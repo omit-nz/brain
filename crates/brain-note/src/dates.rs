@@ -21,21 +21,27 @@ const MONTHS: [&str; 12] = [
 ];
 
 /// A note's dates in the order they are tried: its frontmatter's `date` or `created`, the one in
-/// its file name, and the first in its first line of text. A search takes the first that has come.
-pub(crate) fn candidates(frontmatter: Option<&str>, stem: &str, body: &str) -> Vec<Date> {
+/// its file name, and the first in its first line of text; for a copy of an AI tool's memory, then
+/// the first in its second line. A search takes the first that has come.
+pub(crate) fn candidates(
+    frontmatter: Option<&str>,
+    stem: &str,
+    body: &str,
+    memory: bool,
+) -> Vec<Date> {
     let written = frontmatter.and_then(|v| v.get(..10)?.parse::<Date>().ok());
     let named = first_iso(&stem.replace('_', "-"));
-    let said = body
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .and_then(first_date);
+    let mut lines = body.lines().filter(|l| !l.trim().is_empty());
+    let said = lines.next().and_then(first_date);
+    // A copy opens with the memory's description; the memory's own first line comes after it.
+    let own = lines.next().filter(|_| memory).and_then(first_date);
     let bulk = matches!((written, named), (Some(w), Some(n)) if (w - n).get_days() > BULK_DAYS);
     let order = if bulk {
         [named, written, said]
     } else {
         [written, named, said]
     };
-    order.into_iter().flatten().collect()
+    order.into_iter().chain([own]).flatten().collect()
 }
 
 /// The first date of a line, written `2026-11-27` or `27 Nov 2026`.

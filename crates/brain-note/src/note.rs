@@ -9,6 +9,7 @@ use crate::dates::candidates;
 use crate::disclosure::{Disclosure, Place, disclosure};
 use crate::frontmatter::{FmError, Frontmatter, Split, Value, text_of};
 use crate::links::wikilinks;
+use crate::vault::Layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -99,6 +100,7 @@ impl Note {
             get("date").or_else(|| get("created")).as_deref(),
             &stem,
             split.body,
+            Layout::default().is_memory(rel),
         );
         let supersedes = match fm.and_then(|f| f.get("supersedes")) {
             Some(Value::List(v)) => Some(v.join("\n")),
