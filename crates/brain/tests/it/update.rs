@@ -812,3 +812,62 @@ fn a_brain_with_another_identifier_is_refused() {
     );
     assert_eq!(err, "");
 }
+
+/// A download can take minutes on a slow line, and a blank screen reads as a hang.
+#[test]
+fn brain_update_says_what_it_is_waiting_for() {
+    let h = super::Home::new();
+    h.init();
+    let current = PathBuf::from(h.run(&["install-dir"]).trim_end());
+    fs::create_dir_all(current.join("lib")).unwrap();
+    fs::write(current.join(update::exe_name()), "binary old").unwrap();
+    fs::write(
+        current.join("lib").join(update::runtime_name()),
+        "runtime old",
+    )
+    .unwrap();
+    let releases = tempfile::tempdir().unwrap();
+    let hex: String = public(&key(7)).iter().map(|b| format!("{b:02x}")).collect();
+    let command = || {
+        let mut c = h.command();
+        c.env("BRAIN_TEST_RELEASE_KEY", &hex)
+            // The real one would restart the daemon of whoever runs the tests.
+            .env("BRAIN_LAUNCHCTL", "no-launchctl")
+            .args(["update", "--from-dir"])
+            .arg(releases.path());
+        c
+    };
+    let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let update = || {
+        let out = command().output().unwrap();
+        assert!(out.status.success(), "{}", said(&out.stderr));
+        (said(&out.stdout), said(&out.stderr))
+    };
+    let (out, err) = update();
+    assert_eq!(err, "Looking for a newer release...\n");
+    assert!(out.ends_with("is the newest release.\n"), "{out}");
+    let checked = command().arg("--check").output().unwrap();
+    assert_eq!(said(&checked.stderr), "Looking for a newer release...\n");
+    archive(releases.path(), "99.0.0", &[key(7)]);
+    // Another updater holds the lock: that wait is named, and nothing is downloading yet.
+    let lock = brain_platform::fs::Lock::acquire(&current.with_file_name("update.lock")).unwrap();
+    let mut child = command()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut errors = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut next = || {
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut errors, &mut line).unwrap();
+        line
+    };
+    assert_eq!(next(), "Looking for a newer release...\n");
+    assert_eq!(next(), "Waiting for another update to finish...\n");
+    drop(lock);
+    assert_eq!(next(), "Downloading the newer release and checking it...\n");
+    let done = child.wait_with_output().unwrap();
+    assert!(done.status.success());
+    let out = said(&done.stdout);
+    assert!(out.starts_with("brain 99.0.0 installed over "), "{out}");
+}
