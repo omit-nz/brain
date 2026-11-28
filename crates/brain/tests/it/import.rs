@@ -388,10 +388,17 @@ fn a_run_killed_part_way_is_finished_by_the_next() {
     let killed =
         i.h.brain()
             .args(&args)
-            .env("BRAIN_TEST_ABORT_AFTER_NOTES", "1")
+            .env("BRAIN_TEST_ABORT_AFTER_CLEARED", "1")
             .output()
             .unwrap();
     assert!(!killed.status.success());
+    let held =
+        i.h.brain()
+            .args(["--now", NOW, "import", "learning-loop", "--from", i.src()])
+            .output()
+            .unwrap();
+    let why = String::from_utf8_lossy(&held.stderr);
+    assert!(!held.status.success() && why.contains("cut short"), "{why}");
     let said = i.h.run(&args);
     assert!(said.contains("1 review dates cleared"), "{said}");
     both_update(&i);
@@ -405,8 +412,9 @@ fn the_days_that_would_have_written_what_is_left_are_named() {
         NOW,
         "import",
         "clear-review-dates",
+        // Further from every stamp than any seed reaches.
         "--imported-on",
-        "2026-11-20",
+        "2026-08-01",
     ]);
     assert!(said.contains("2026-11-25 (2 notes)"), "{said}");
 }
@@ -421,6 +429,21 @@ fn a_stamped_note_moved_since_is_still_cleared() {
     let said = i.clear(&["--apply"]);
     assert!(said.contains("2 review dates cleared"), "{said}");
     assert_eq!(line(&i.copy("private/moved.md"), "review"), None);
+}
+
+/// A day still to come stamped nothing.
+#[test]
+fn the_named_days_are_never_ahead() {
+    let i = stamped();
+    let said = i.h.run(&[
+        "--now",
+        "2026-11-20T00:00:00Z",
+        "import",
+        "clear-review-dates",
+        "--imported-on",
+        "2026-08-01",
+    ]);
+    assert!(!said.contains("2026-11-25"), "{said}");
 }
 
 #[test]

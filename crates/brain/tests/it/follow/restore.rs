@@ -1060,24 +1060,14 @@ mod linked {
     }
 }
 
-/// A copy stamped by 0.2.5 and archived since comes back without its date once cleared, and is
-/// still brain's.
-#[test]
-fn an_archived_copys_stamped_date_is_cleared_too() {
-    let (h, p) = two();
-    let path = copy_path(h.vault.path(), "one");
+/// Leaves `name`'s followed copy as 0.2.5 wrote it on 2026-11-25: with a review date 1 to 90
+/// days on, chosen by a hash of its id, and recorded so in the ledger.
+fn stamp(h: &Home, name: &str) {
+    let path = copy_path(h.vault.path(), name);
     let text = fs::read_to_string(&path).unwrap();
-    let id = text
-        .lines()
-        .find_map(|l| l.strip_prefix("id: "))
-        .unwrap()
-        .to_string();
-    // As an import on 2026-11-25 chose it: 1 to 90 days on, by a hash of the id.
-    let days = u64::from_le_bytes(
-        <sha2::Sha256 as sha2::Digest>::digest(id.as_bytes())[..8]
-            .try_into()
-            .unwrap(),
-    ) % 90;
+    let id = text.lines().find_map(|l| l.strip_prefix("id: ")).unwrap();
+    let hashed = <sha2::Sha256 as sha2::Digest>::digest(id.as_bytes());
+    let days = u64::from_le_bytes(hashed[..8].try_into().unwrap()) % 90;
     let review = jiff::civil::date(2026, 11, 25)
         .checked_add(jiff::ToSpan::days(days as i64 + 1))
         .unwrap();
@@ -1087,18 +1077,35 @@ fn an_archived_copys_stamped_date_is_cleared_too() {
         1,
     );
     assert_ne!(text, stamped);
-    let ledger_at = h.home.path().join("data/import-ledger.json");
+    let ledger_at = h.home.path().join(LEDGER);
     let recorded = fs::read_to_string(&ledger_at).unwrap();
     let (old, new) = (sha256(text.as_bytes()), sha256(stamped.as_bytes()));
     assert!(recorded.contains(&old));
     fs::write(&ledger_at, recorded.replace(&old, &new)).unwrap();
     fs::write(&path, &stamped).unwrap();
+}
+
+/// A copy stamped by 0.2.5 and archived since comes back without its date once cleared, and is
+/// still brain's.
+#[test]
+fn an_archived_copys_stamped_date_is_cleared_too() {
+    let (h, p) = two();
+    let path = copy_path(h.vault.path(), "one");
+    stamp(&h, "one");
     let source = p.path().join("-proj/memory/one.md");
     let words = fs::read_to_string(&source).unwrap();
     fs::remove_file(&source).unwrap();
     h.run(&["memory", "run"]);
     h.run(&["memory", "run"]);
     assert!(!path.exists(), "archived");
+    // Named by another day, the archived copy's own is still found.
+    let said = h.run(&[
+        "import",
+        "clear-review-dates",
+        "--imported-on",
+        "2026-08-01",
+    ]);
+    assert!(said.contains("2026-11-25 (1 note)"), "{said}");
     h.run(&[
         "import",
         "clear-review-dates",
@@ -1113,4 +1120,44 @@ fn an_archived_copys_stamped_date_is_cleared_too() {
     fs::write(&source, format!("{words}changed\n")).unwrap();
     let said = h.run(&["memory", "run"]);
     assert!(said.contains("1 updated"), "{said}");
+}
+
+/// A pass between a clearing cut short and its finish would take the recorded, unwritten copy
+/// for the person's edit, and drop the record of a memory that has gone.
+#[test]
+fn no_pass_runs_while_a_clearing_is_unfinished() {
+    let (h, p) = two();
+    stamp(&h, "one");
+    stamp(&h, "stays");
+    let clear = |day: &str| {
+        h.brain()
+            .args([
+                "import",
+                "clear-review-dates",
+                "--imported-on",
+                day,
+                "--apply",
+            ])
+            .env(
+                "BRAIN_TEST_ABORT_AFTER_CLEARED",
+                if day == "2026-11-25" { "1" } else { "0" },
+            )
+            .output()
+            .unwrap()
+    };
+    assert!(!clear("2026-11-25").status.success(), "killed");
+    let unwritten = ["one", "stays"]
+        .into_iter()
+        .find(|name| copy(&h, name).unwrap().contains("review:"))
+        .unwrap();
+    p.remove(unwritten);
+    let held = h.brain().args(["memory", "run"]).output().unwrap();
+    let why = String::from_utf8_lossy(&held.stderr);
+    assert!(!held.status.success() && why.contains("cut short"), "{why}");
+    // The finish takes the days it was cut short on, whatever is named now.
+    assert!(clear("2026-08-01").status.success());
+    assert!(!copy(&h, unwritten).unwrap().contains("review:"));
+    pass(&h);
+    let said = pass(&h);
+    assert!(said.contains("1 archived"), "{said}");
 }

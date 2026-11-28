@@ -3,11 +3,12 @@
 //! it ran plus 1 to 90 days chosen by a hash of the note's id, or of its source's key when the
 //! source had none.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use brain_note::{Entry, Split, Vault, rel_key, text_of};
-use brain_platform::fs::{Privacy, replace_unchanged, set_modified};
+use brain_platform::dirs::Dirs;
+use brain_platform::fs::{Privacy, replace_unchanged, set_modified, write_atomic};
 use jiff::ToSpan;
 use jiff::civil::Date;
 use sha2::{Digest, Sha256};
@@ -20,6 +21,43 @@ use crate::config::REVIEW_DAYS;
 const SPREAD: u64 = 90;
 /// Notes recorded in the ledger at a time, ahead of their writing.
 const BATCH: usize = 200;
+/// The days of a clearing under way, `[]` once it is done. While one is cut short, some copies are
+/// recorded as cleared and are not yet written, which anything else reading the ledger would take
+/// for the person's own edits.
+const UNFINISHED: &str = "clearing.json";
+
+/// The days of a clearing that did not finish.
+pub fn unfinished(dirs: &Dirs) -> anyhow::Result<Vec<Date>> {
+    let path = dirs.data.join(UNFINISHED);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(serde_json::from_str(&text)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Records a clearing on `days` as under way, or with none as done.
+pub fn mark(dirs: &Dirs, days: &[Date]) -> anyhow::Result<()> {
+    let text = serde_json::to_string(days)?;
+    write_atomic(
+        &dirs.data,
+        Path::new(UNFINISHED),
+        text.as_bytes(),
+        Privacy::Private,
+    )?;
+    Ok(())
+}
+
+/// Refuses to go on over a ledger a clearing left half recorded.
+pub fn refuse_if_unfinished(dirs: &Dirs) -> anyhow::Result<()> {
+    let days = unfinished(dirs)?;
+    let named: String = days.iter().map(|d| format!(" --imported-on {d}")).collect();
+    anyhow::ensure!(
+        days.is_empty(),
+        "a clearing of review dates was cut short, so nothing is imported until it is finished: run `brain import clear-review-dates{named} --apply`"
+    );
+    Ok(())
+}
 
 /// How many days after an import `seed`'s review fell.
 fn offset(seed: &str) -> i64 {
@@ -100,7 +138,8 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
             .collect();
         if !days.iter().any(|d| would.contains(d)) {
             out.other += 1;
-            for day in would.into_iter().filter(|d| *d <= today) {
+            // Named only for what brain wrote: a day named for a person's own note clears it.
+            for day in would.into_iter().filter(|d| known && *d <= today) {
                 *out.days.entry(day).or_default() += 1;
             }
             continue;
@@ -117,7 +156,7 @@ fn abort_after() -> Option<usize> {
     if !cfg!(debug_assertions) {
         return None;
     }
-    std::env::var("BRAIN_TEST_ABORT_AFTER_NOTES")
+    std::env::var("BRAIN_TEST_ABORT_AFTER_CLEARED")
         .ok()?
         .parse()
         .ok()
@@ -145,7 +184,7 @@ pub fn write(
             record(ledger, archive, &c.raw, &c.text);
         }
         save(ledger, archive)?;
-        let before = failed.len();
+        let (mut unwritten, mut done_from) = (Vec::new(), HashSet::new());
         for c in batch {
             let at = std::fs::metadata(vault.root.join(&c.rel)).and_then(|m| m.modified());
             let done = replace_unchanged(
@@ -156,10 +195,11 @@ pub fn write(
                 Privacy::Normal,
             );
             if done.is_err() {
-                record(ledger, archive, &c.text, &c.raw);
+                unwritten.push(c);
                 failed.push(c.path());
                 continue;
             }
+            done_from.insert(c.raw.as_str());
             if let Ok(at) = at {
                 let _ = set_modified(&vault.root, &c.rel, at);
             }
@@ -168,7 +208,13 @@ pub fn write(
                 std::process::abort();
             }
         }
-        if failed.len() > before {
+        if !unwritten.is_empty() {
+            // Records go by content, so one a written twin shares stays as written.
+            for c in unwritten {
+                if !done_from.contains(c.raw.as_str()) {
+                    record(ledger, archive, &c.text, &c.raw);
+                }
+            }
             save(ledger, archive)?;
         }
     }
@@ -180,6 +226,55 @@ mod tests {
     use brain_platform::fs as platform;
 
     use super::*;
+
+    fn note(dir: &Path, name: &str, text: &str) {
+        platform::write_atomic(dir, Path::new(name), text.as_bytes(), Privacy::Normal).unwrap();
+    }
+
+    /// A day named for a note brain never imported would clear a date set by hand.
+    #[test]
+    fn days_are_named_only_for_what_brain_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        note(
+            dir.path(),
+            "hand.md",
+            "---\nreview: 2026-12-01\n---\nmine\n",
+        );
+        let vault = Vault::open(dir.path()).unwrap();
+        let today = jiff::civil::date(2027, 1, 1);
+        let plan = plan(&vault, &Ledger::default(), &Archive::default(), &[], today);
+        assert_eq!((plan.other, plan.days.len()), (1, 0));
+    }
+
+    #[test]
+    fn a_copy_written_stays_recorded_when_its_twin_cannot_be() {
+        let dir = tempfile::tempdir().unwrap();
+        let (raw, text) = ("---\nreview: 2027-01-01\n---\nsame\n", "---\n---\nsame\n");
+        note(dir.path(), "a.md", raw);
+        // Saved by the person since it was read.
+        note(dir.path(), "b.md", "changed\n");
+        let vault = Vault::open(dir.path()).unwrap();
+        let change = |rel: &str| Change {
+            rel: rel.into(),
+            raw: raw.into(),
+            text: text.into(),
+        };
+        let entry: super::super::LedgerEntry = serde_json::from_value(serde_json::json!({
+            "id": null, "src_hash": "", "dst_hash": hash(raw.as_bytes())
+        }))
+        .unwrap();
+        let mut ledger = Ledger([("vault/a.md".to_string(), entry)].into());
+        let failed = write(
+            &vault,
+            &[change("a.md"), change("b.md")],
+            &mut ledger,
+            &mut Archive::default(),
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(failed, ["b.md"]);
+        assert_eq!(ledger.0["vault/a.md"].dst_hash, hash(text.as_bytes()));
+    }
 
     /// The person may save a note between the reading and the writing of it.
     #[test]

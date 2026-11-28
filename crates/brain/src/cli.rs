@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -1072,6 +1073,9 @@ fn import_learning_loop(
     } else {
         Some(Lock::acquire(&dirs.data.join(import::LOCK))?)
     };
+    if !a.dry_run {
+        import::refuse_if_unfinished(dirs)?;
+    }
     let mut ledger = Ledger::load(dirs)?;
     // Held through the copy too, so a daemon started mid-import waits for it.
     let lock = if a.dry_run {
@@ -1145,6 +1149,22 @@ fn import_learning_loop(
     Ok(())
 }
 
+/// The days most of the dates left point to, newest first among equals, and how many more.
+fn days_line(days: &BTreeMap<jiff::civil::Date, usize>) -> String {
+    const SHOWN: usize = 10;
+    let mut by: Vec<_> = days.iter().collect();
+    by.sort_by_key(|(day, n)| std::cmp::Reverse((**n, **day)));
+    let mut line: Vec<String> = by
+        .iter()
+        .take(SHOWN)
+        .map(|(day, n)| format!("{day} ({})", plural(**n, "note")))
+        .collect();
+    if by.len() > SHOWN {
+        line.push(format!("and {} more days", by.len() - SHOWN));
+    }
+    line.join(", ")
+}
+
 fn clear_review_dates(
     dirs: &Dirs,
     today: jiff::civil::Date,
@@ -1156,14 +1176,22 @@ fn clear_review_dates(
     let writer = Lock::try_acquire(&writer_lock(dirs))?;
     let mut ledger = Ledger::load(dirs)?;
     let mut archive = Archive::load(dirs)?;
-    let plan = import::plan_clearing(&vault, &ledger, &archive, &a.imported_on, today);
+    // A clearing cut short is finished on its own days as well as those named now.
+    let mut days = import::unfinished_clearing(dirs)?;
+    days.extend(&a.imported_on);
+    days.sort();
+    days.dedup();
+    let plan = import::plan_clearing(&vault, &ledger, &archive, &days, today);
     let mut failed = Vec::new();
     if a.apply {
         let save = &mut |ledger: &Ledger, archive: &Archive| {
             ledger.save(dirs)?;
             archive.save(dirs)
         };
-        failed = import::write_clearing(&vault, &plan.changes, &mut ledger, &mut archive, save)?;
+        import::mark_clearing(dirs, &days)?;
+        failed = import::write_clearing(&vault, &plan.changes, &mut ledger, &mut archive, save)
+            .context("the clearing was cut short; run it again to finish it")?;
+        import::mark_clearing(dirs, &[])?;
         if writer.is_some() {
             let r = index(dirs)?.reindex(&vault)?;
             daemon::forget(dirs, &r);
@@ -1188,16 +1216,9 @@ fn clear_review_dates(
             .map(|p| format!("  {p}")),
     );
     if !plan.days.is_empty() {
-        let mut days: Vec<_> = plan.days.iter().collect();
-        days.sort_by_key(|(day, n)| (std::cmp::Reverse(**n), **day));
-        let days: Vec<String> = days
-            .into_iter()
-            .take(10)
-            .map(|(day, n)| format!("{day} ({})", plural(*n, "note")))
-            .collect();
         lines.push(format!(
             "if an import or a follow wrote any of those left, it was on one of: {}",
-            days.join(", ")
+            days_line(&plan.days)
         ));
         lines.push(
             "name such a day with --imported-on; each day named can also take a date set by hand"
@@ -1277,6 +1298,19 @@ mod tests {
         assert_eq!(named(&cli, "brain init --me <you>").unwrap(), "init");
         assert_eq!(named(&cli, "brain memory mend"), None);
         assert_eq!(named(&cli, "brain mend"), None);
+    }
+
+    #[test]
+    fn the_days_left_are_listed_newest_first_and_the_rest_counted() {
+        let days: BTreeMap<jiff::civil::Date, usize> = (1..=12)
+            .map(|d| (jiff::civil::date(2026, 11, d), 1))
+            .collect();
+        let line = days_line(&days);
+        assert!(
+            line.starts_with("2026-11-12 (1 note), 2026-11-11 (1 note)"),
+            "{line}"
+        );
+        assert!(line.ends_with("and 2 more days"), "{line}");
     }
 
     #[test]
