@@ -78,7 +78,7 @@ The release key's public half is `crates/brain/src/keys/release.pub`, 32 bytes, 
 
 To put one machine back on an older release, run `scripts/install.sh <older version>`.
 
-After `brain import clear-review-dates`, before going back past 0.2.7, run `scripts/clearing-rollback-check.py`: it exits 1 and names the copies an older brain would take for the person's edits, and says what to do.
+After `brain import clear-review-dates`, before going back past 0.2.7, run `scripts/clearing-rollback-check.py`: it exits 1 and names the copies an older brain would take for the person's edits, and says what to do. It also refuses when it cannot look at the data folder, the records or the vault, and it needs Python 3.11 or newer.
 
 ## The signing key
 

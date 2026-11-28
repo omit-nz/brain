@@ -6,7 +6,8 @@ clear-review-dates`.
 older brain reads only the first, so it takes a file still holding the old bytes for one the person
 edited: it stops updating it, and drops its record when its source goes. This looks at the file of
 every record carrying the old hash, and exits 1 naming each that still holds those bytes or cannot
-be read. It changes nothing.
+be read. It also exits 1 when it cannot look: a data folder, record file or vault that is not
+there. It changes nothing. It needs Python 3.11 or newer.
 
     scripts/clearing-rollback-check.py [--data <folder>] [--config <config.toml>]
 """
@@ -17,7 +18,11 @@ import json
 import os
 import pathlib
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    sys.exit("this check needs Python 3.11 or newer; nothing was looked at")
 
 SHOWN = 20
 MEMORY = "working-memory"
@@ -35,13 +40,26 @@ def defaults():
     return share / "brain", config / "brain/config.toml"
 
 
-def load(path, missing):
+def shown(text):
+    """`text` as a terminal prints it: a file name is not brain's choosing."""
+    return "".join(c if c.isprintable() else "?" for c in str(text))
+
+
+def load(path, kind, missing=None):
+    """The records in `path`, each an object, held as `kind`: `missing` when the file is not
+    there and that is allowed."""
     try:
-        return json.loads(path.read_text())
+        held = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return missing
+        if missing is not None:
+            return missing
+        sys.exit(f"{shown(path)} is not there: is --data brain's data folder?")
     except (OSError, ValueError) as error:
-        sys.exit(f"{path} cannot be read, so nothing is known: {error}")
+        sys.exit(f"{shown(path)} cannot be read, so nothing is known: {shown(error)}")
+    records = held.values() if isinstance(held, dict) else held
+    if not isinstance(held, kind) or not all(isinstance(r, dict) for r in records):
+        sys.exit(f"{shown(path)} is not brain's record file, so nothing is known")
+    return held
 
 
 def copy_of(key):
@@ -51,27 +69,30 @@ def copy_of(key):
 
 
 def standing_for(data, vault):
-    """Each file a record with an old hash stands for, with that hash."""
-    for key, entry in load(data / "import-ledger.json", {}).items():
+    """Each vault and file a record with an old hash stands for, with the record's two hashes."""
+    for key, entry in load(data / "import-ledger.json", dict).items():
         if entry.get("was"):
-            yield pathlib.Path(entry.get("vault") or vault) / copy_of(key), entry["was"]
-    for record in load(data / "follow-archive.json", []):
+            root = pathlib.Path(entry.get("vault") or vault)
+            yield root, copy_of(key), entry
+    for record in load(data / "follow-archive.json", list, missing=[]):
         if record.get("was"):
             root = pathlib.Path(record["vault"])
-            yield root / record["path"], record["was"]
-            yield root / copy_of(record["key"]), record["was"]
+            yield root, record["path"], record
+            yield root, copy_of(record["key"]), record
 
 
-def in_the_way(path, was):
-    """Why the file at `path` stops a rollback, or None. A file that is not there reads the same
-    to every brain."""
+def in_the_way(path, record):
+    """Why the file at `path` stops a rollback, or None. An older brain accepts only
+    `dst_hash`, and reads a file that is not there the same as a newer one."""
     try:
-        held = path.read_bytes()
+        held = hashlib.sha256(path.read_bytes()).hexdigest()
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError as error:
         return f"cannot be read: {error.strerror}"
-    return "still holds what it did before" if hashlib.sha256(held).hexdigest() == was else None
+    if held == record["was"] and held != record.get("dst_hash"):
+        return "still holds what it did before"
+    return None
 
 
 def main():
@@ -81,21 +102,24 @@ def main():
     args.add_argument("--config", type=pathlib.Path, default=config)
     args = args.parse_args()
     try:
-        vault = tomllib.loads(args.config.read_text())["vault"]
+        vault = tomllib.loads(args.config.read_text(encoding="utf-8"))["vault"]
     except (OSError, ValueError, KeyError) as error:
-        sys.exit(f"{args.config} does not say where the vault is: {error}")
+        sys.exit(f"{shown(args.config)} does not say where the vault is: {shown(error)}")
     found = {}
-    for path, was in standing_for(args.data, vault):
-        why = in_the_way(path, was)
+    for root, rel, record in standing_for(args.data, vault):
+        # A vault out of reach would read as one with nothing in the way.
+        if not root.is_dir():
+            sys.exit(f"the vault {shown(root)} is not there, so nothing is known")
+        why = in_the_way(root / rel, record)
         if why:
-            found[str(path)] = why
+            found[str(root / rel)] = why
     if not found:
         print("no copy is waiting on the newer brain: rolling back is safe")
         return
     names = sorted(found)
     print(f"do not roll back yet: {len(names)} of brain's copies would read as edited by you")
     for name in names[:SHOWN]:
-        print(f"  {name}: {found[name]}")
+        print(f"  {shown(name)}: {found[name]}")
     if len(names) > SHOWN:
         print(f"  and {len(names) - SHOWN} more")
     print(
