@@ -478,6 +478,7 @@ fn memory_cmd(dirs: &Dirs, action: MemoryAction) -> anyhow::Result<()> {
             // A link is stored as what it points at: the pass follows no link.
             let found = projects.canonicalize().ok().filter(|p| p.is_dir());
             let found = found.with_context(|| format!("{}: no such folder", projects.display()))?;
+            import::refuse_if_unfinished(dirs)?;
             config.memory.follow = Some(found);
             config.save(dirs)?;
         }
@@ -1034,6 +1035,12 @@ fn status(dirs: &Dirs, as_json: bool) -> anyhow::Result<()> {
         n => lines.push(format!("{n} copies are behind their source")),
     }
     lines.extend(archived.filter(|n| *n > 0).map(import::archived_line));
+    if import::unfinished_clearing(dirs).is_ok_and(|days| !days.is_empty()) {
+        lines.push(
+            "a clearing of review dates is unfinished, so follow and import hold; run `brain import clear-review-dates` again"
+                .into(),
+        );
+    }
     lines.extend(unread);
     if s.notes == 0 {
         lines.push("the index is empty; run `brain index`".into());
@@ -1160,7 +1167,7 @@ fn days_line(days: &BTreeMap<jiff::civil::Date, usize>) -> String {
         .map(|(day, n)| format!("{day} ({})", plural(**n, "note")))
         .collect();
     if by.len() > SHOWN {
-        line.push(format!("and {} more days", by.len() - SHOWN));
+        line.push(format!("and {}", plural(by.len() - SHOWN, "more day")));
     }
     line.join(", ")
 }
@@ -1177,7 +1184,9 @@ fn clear_review_dates(
     let mut ledger = Ledger::load(dirs)?;
     let mut archive = Archive::load(dirs)?;
     // A clearing cut short is finished on its own days as well as those named now.
-    let mut days = import::unfinished_clearing(dirs)?;
+    let cut_short = import::unfinished_clearing(dirs)?;
+    let finishing = !cut_short.is_empty();
+    let mut days = cut_short.clone();
     days.extend(&a.imported_on);
     days.sort();
     days.dedup();
@@ -1191,7 +1200,9 @@ fn clear_review_dates(
         import::mark_clearing(dirs, &days)?;
         failed = import::write_clearing(&vault, &plan.changes, &mut ledger, &mut archive, save)
             .context("the clearing was cut short; run it again to finish it")?;
-        import::mark_clearing(dirs, &[])?;
+        if failed.is_empty() && !(finishing && !plan.unread.is_empty()) {
+            import::mark_clearing(dirs, &[])?;
+        }
         if writer.is_some() {
             let r = index(dirs)?.reindex(&vault)?;
             daemon::forget(dirs, &r);
@@ -1209,6 +1220,13 @@ fn clear_review_dates(
         plan.other,
         if a.apply { "" } else { " (nothing written)" }
     )];
+    if finishing {
+        let on: Vec<String> = cut_short.iter().map(ToString::to_string).collect();
+        lines.push(format!(
+            "also finishing a run cut short, on {}",
+            on.join(", ")
+        ));
+    }
     let done = plan.changes.iter().map(|c| c.path());
     lines.extend(
         done.filter(|p| !failed.contains(p))
@@ -1226,8 +1244,13 @@ fn clear_review_dates(
         );
     }
     if !failed.is_empty() {
-        lines.push("could not be written, run it again:".into());
+        lines.push("could not be written; follow and import hold until a run writes them:".into());
         lines.extend(failed.iter().map(|p| format!("  {p}")));
+    }
+    let unread = if finishing { plan.unread.len() } else { 0 };
+    if unread > 0 {
+        lines.push("could not be read, so the run cut short is not finished:".into());
+        lines.extend(plan.unread.iter().map(|p| format!("  {p}")));
     }
     if !a.apply {
         lines.push(
@@ -1237,9 +1260,9 @@ fn clear_review_dates(
     }
     println!("{}", terminal(&lines.join("\n")));
     anyhow::ensure!(
-        failed.is_empty(),
-        "{} could not be written",
-        plural(failed.len(), "note")
+        !a.apply || failed.len() + unread == 0,
+        "{} left undone; fix them and run it again",
+        plural(failed.len() + unread, "note")
     );
     Ok(())
 }
@@ -1311,6 +1334,8 @@ mod tests {
             "{line}"
         );
         assert!(line.ends_with("and 2 more days"), "{line}");
+        let eleven = days.into_iter().take(11).collect();
+        assert!(days_line(&eleven).ends_with("and 1 more day"));
     }
 
     #[test]

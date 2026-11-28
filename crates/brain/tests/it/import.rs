@@ -446,6 +446,68 @@ fn the_named_days_are_never_ahead() {
     assert!(!said.contains("2026-11-25"), "{said}");
 }
 
+/// Cut short, and the unwritten note cannot be read by the next run: not finished.
+#[cfg(unix)]
+#[test]
+fn a_finish_that_cannot_read_a_copy_is_not_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let i = stamped();
+    let args = [&CLEAR[..], &["--apply"]].concat();
+    let killed =
+        i.h.brain()
+            .args(&args)
+            .env("BRAIN_TEST_ABORT_AFTER_CLEARED", "1")
+            .output()
+            .unwrap();
+    assert!(!killed.status.success());
+    let left = ["byid", "noid"]
+        .map(|n| i.h.vault.path().join(format!("3-permanent/{n}.md")))
+        .into_iter()
+        .find(|p| fs::read_to_string(p).unwrap().contains("review:"))
+        .unwrap();
+    let mode = |m| fs::set_permissions(&left, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    let out = i.h.brain().args(&args).output().unwrap();
+    mode(0o600);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("also finishing"), "{said}");
+    let status = i.h.run(&["status"]);
+    assert!(status.contains("clearing of review dates"), "{status}");
+    assert!(i.h.run(&args).contains("1 review dates cleared"));
+    assert!(!i.h.run(&["status"]).contains("clearing of review dates"));
+}
+
+/// The ledger is saved, the archive's records cannot be: nothing says it is finished.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_save_that_fails_leaves_the_clearing_unfinished() {
+    let i = stamped();
+    let records = i.h.home.path().join("data/follow-archive.json");
+    fs::write(&records, "[]").unwrap();
+    let flag = |f: &str| {
+        let done = std::process::Command::new("chflags")
+            .args([f.as_ref(), records.as_os_str()])
+            .status()
+            .unwrap();
+        assert!(done.success());
+    };
+    flag("uchg");
+    let out =
+        i.h.brain()
+            .args([&CLEAR[..], &["--apply"]].concat())
+            .output()
+            .unwrap();
+    flag("nouchg");
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && why.contains("run it again"),
+        "{why}"
+    );
+    let held = i.h.brain().args(["memory", "run"]).output().unwrap();
+    assert!(!held.status.success());
+}
+
 #[test]
 fn a_cleared_note_leaves_the_review_queue() {
     let i = stamped();
@@ -478,6 +540,13 @@ fn a_note_that_cannot_be_written_fails_the_run_and_stays_brains() {
     assert!(!out.status.success(), "{said}");
     assert!(said.contains("could not be written"), "{said}");
     assert!(said.contains("0 review dates cleared"), "{said}");
+    let held =
+        i.h.brain()
+            .args(["--now", NOW, "import", "learning-loop", "--from", i.src()])
+            .output()
+            .unwrap();
+    assert!(!held.status.success(), "held until finished");
+    assert!(i.clear(&["--apply"]).contains("2 review dates cleared"));
     both_update(&i);
 }
 

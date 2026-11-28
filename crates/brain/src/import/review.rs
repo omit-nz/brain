@@ -3,9 +3,10 @@
 //! it ran plus 1 to 90 days chosen by a hash of the note's id, or of its source's key when the
 //! source had none.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use brain_note::{Entry, Split, Vault, rel_key, text_of};
 use brain_platform::dirs::Dirs;
 use brain_platform::fs::{Privacy, replace_unchanged, set_modified, write_atomic};
@@ -30,7 +31,9 @@ const UNFINISHED: &str = "clearing.json";
 pub fn unfinished(dirs: &Dirs) -> anyhow::Result<Vec<Date>> {
     let path = dirs.data.join(UNFINISHED);
     match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(serde_json::from_str(&text)?),
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e.into()),
     }
@@ -87,6 +90,8 @@ pub struct Plan {
     pub captured: usize,
     /// Dates no import of the days given wrote.
     pub other: usize,
+    /// Brain's own copies that could not be read, so nothing is known of them.
+    pub unread: Vec<String>,
     /// For the dates left, the other days an import would have written them on, and how many.
     pub days: BTreeMap<Date, usize>,
 }
@@ -95,13 +100,16 @@ pub struct Plan {
 /// Nothing is written.
 pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], today: Date) -> Plan {
     let mut out = Plan::default();
-    let notes = vault.walk().filter_map(|entry| match entry {
-        Entry::Note { rel, .. } => Some(rel),
-        Entry::Skipped { .. } => None,
+    // A note the walk skips is still tried: a copy of brain's that cannot be read is said.
+    let notes = vault.walk().map(|entry| match entry {
+        Entry::Note { rel, .. } | Entry::Skipped { rel, .. } => rel,
     });
     let archived = archive.files(&vault.root).map(Path::to_path_buf);
     for rel in notes.chain(archived) {
         let Ok(raw) = vault.read(&rel) else {
+            if brains(vault, ledger, &rel) {
+                out.unread.push(rel_key(&rel));
+            }
             continue;
         };
         let mut split = Split::parse(&raw);
@@ -132,7 +140,8 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
         let would: BTreeSet<Date> = id
             .as_deref()
             .into_iter()
-            .chain(keys)
+            // 0.2.5 chose a memory copy's date by its id alone.
+            .chain(keys.into_iter().filter(|key| key.starts_with("vault/")))
             .chain([here.as_str()])
             .filter_map(|seed| review.checked_sub(offset(seed).days()).ok())
             .collect();
@@ -151,6 +160,16 @@ pub fn plan(vault: &Vault, ledger: &Ledger, archive: &Archive, days: &[Date], to
     out
 }
 
+/// Whether the file at `rel` is a copy an import wrote, in its place or archived.
+fn brains(vault: &Vault, ledger: &Ledger, rel: &Path) -> bool {
+    let recorded = |key: String| ledger.current(&key, &vault.root).is_some();
+    rel.starts_with(&vault.layout.archive)
+        || recorded(format!("vault/{}", rel_key(rel)))
+        || rel
+            .strip_prefix(&vault.layout.memory)
+            .is_ok_and(|rest| recorded(format!("memory/{}", rel_key(rest))))
+}
+
 /// A test that kills a run part-way sets this; release builds never read it.
 fn abort_after() -> Option<usize> {
     if !cfg!(debug_assertions) {
@@ -164,8 +183,8 @@ fn abort_after() -> Option<usize> {
 
 /// Writes each change that its note still reads as planned, leaving the file's time, and returns
 /// the notes that could not be written. A copy the ledger knows stays known as brain's: it is
-/// recorded and saved before it is written, so a run cut short is finished by the next, which
-/// writes the same bytes.
+/// recorded and saved before it is written, so after a kill or a failure the next run writes the
+/// same bytes. Until one writes them all, the clearing is unfinished.
 pub fn write(
     vault: &Vault,
     changes: &[Change],
@@ -173,18 +192,14 @@ pub fn write(
     archive: &mut Archive,
     save: &mut dyn FnMut(&Ledger, &Archive) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<String>> {
-    let record = |ledger: &mut Ledger, archive: &mut Archive, from: &str, to: &str| {
-        let (from, to) = (hash(from.as_bytes()), hash(to.as_bytes()));
-        ledger.rewritten(&vault.root, &from, &to);
-        archive.rewritten(&vault.root, &from, &to);
-    };
     let (mut failed, mut written) = (Vec::new(), 0);
     for batch in changes.chunks(BATCH) {
         for c in batch {
-            record(ledger, archive, &c.raw, &c.text);
+            let (from, to) = (hash(c.raw.as_bytes()), hash(c.text.as_bytes()));
+            ledger.rewritten(&vault.root, &from, &to);
+            archive.rewritten(&vault.root, &from, &to);
         }
         save(ledger, archive)?;
-        let (mut unwritten, mut done_from) = (Vec::new(), HashSet::new());
         for c in batch {
             let at = std::fs::metadata(vault.root.join(&c.rel)).and_then(|m| m.modified());
             let done = replace_unchanged(
@@ -195,11 +210,9 @@ pub fn write(
                 Privacy::Normal,
             );
             if done.is_err() {
-                unwritten.push(c);
                 failed.push(c.path());
                 continue;
             }
-            done_from.insert(c.raw.as_str());
             if let Ok(at) = at {
                 let _ = set_modified(&vault.root, &c.rel, at);
             }
@@ -207,15 +220,6 @@ pub fn write(
             if abort_after() == Some(written) {
                 std::process::abort();
             }
-        }
-        if !unwritten.is_empty() {
-            // Records go by content, so one a written twin shares stays as written.
-            for c in unwritten {
-                if !done_from.contains(c.raw.as_str()) {
-                    record(ledger, archive, &c.text, &c.raw);
-                }
-            }
-            save(ledger, archive)?;
         }
     }
     Ok(failed)
@@ -244,6 +248,31 @@ mod tests {
         let today = jiff::civil::date(2027, 1, 1);
         let plan = plan(&vault, &Ledger::default(), &Archive::default(), &[], today);
         assert_eq!((plan.other, plan.days.len()), (1, 0));
+    }
+
+    /// A memory copy's date was chosen by its id, never by its source's key.
+    #[test]
+    fn a_memory_key_stamps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = jiff::civil::date(2026, 11, 25);
+        let key = "memory/-proj/one.md";
+        let review = day.checked_add(offset(key).days()).unwrap();
+        let id = "0195f2e0-0000-7000-8000-000000000009";
+        note(
+            dir.path(),
+            "one.md",
+            &format!("---\nid: {id}\nreview: {review}\n---\nmine\n"),
+        );
+        let entry: super::super::LedgerEntry = serde_json::from_value(serde_json::json!({
+            "id": id, "src_hash": "", "dst_hash": ""
+        }))
+        .unwrap();
+        let ledger = Ledger([(key.to_string(), entry)].into());
+        let vault = Vault::open(dir.path()).unwrap();
+        // Unless the id's own offset happens to be the key's.
+        assert_ne!(offset(id), offset(key));
+        let plan = plan(&vault, &ledger, &Archive::default(), &[day], day);
+        assert_eq!(plan.changes.len(), 0);
     }
 
     #[test]

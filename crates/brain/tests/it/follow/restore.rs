@@ -1161,3 +1161,28 @@ fn no_pass_runs_while_a_clearing_is_unfinished() {
     let said = pass(&h);
     assert!(said.contains("1 archived"), "{said}");
 }
+
+/// Refused before anything is written, the folder to follow included.
+#[test]
+fn following_over_an_unfinished_clearing_changes_nothing() {
+    let (h, p) = two();
+    h.run(&["memory", "unfollow"]);
+    fs::write(h.home.path().join("data/clearing.json"), "[\"2026-11-25\"]").unwrap();
+    let config = h.home.path().join("config/config.toml");
+    let before = fs::read_to_string(&config).unwrap();
+    let out = h
+        .brain()
+        .args(["memory", "follow", p.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+    fs::write(h.home.path().join("data/clearing.json"), "not json").unwrap();
+    let out = h
+        .brain()
+        .args(["memory", "follow", p.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("clearing.json"), "{why}");
+}
