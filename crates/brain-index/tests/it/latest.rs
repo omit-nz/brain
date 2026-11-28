@@ -227,6 +227,27 @@ fn supersedes_free_text_a_shared_stem_or_an_older_note_marks_nothing() {
     assert!(!marked(&f), "an older note");
 }
 
+/// A memory copy's date is read from its own words, and a later one there wins over a person's
+/// `supersedes`. `corrects` asks no date, so it still counts.
+#[test]
+fn a_later_date_in_a_memory_copy_outdates_a_supersedes_naming_it() {
+    let f = Fixture::new();
+    f.put(
+        "working-memory/p/gate.md",
+        "gate rule\n\nRevisit the quince gate after 2026-11-20.\n",
+    );
+    f.put(
+        "new.md",
+        "---\ndate: 2026-11-15\nsupersedes: gate\n---\nquince\n",
+    );
+    assert!(marked(&f).is_empty());
+    f.put(
+        "new.md",
+        "---\ndate: 2026-11-15\ncorrects: working-memory/p/gate.md\n---\nquince\n",
+    );
+    assert_eq!(marked(&f), ["working-memory/p/gate.md"]);
+}
+
 #[test]
 fn two_notes_naming_each_other_mark_neither() {
     let f = Fixture::new();

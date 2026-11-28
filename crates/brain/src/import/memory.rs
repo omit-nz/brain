@@ -102,7 +102,7 @@ fn text(v: Option<Value>) -> Option<String> {
 }
 
 /// The memory as a brain note: a new block with its id, title, kind, private visibility and
-/// owner, and its description as the first body line.
+/// owner, then its description, or its name, as the first body line.
 pub fn to_note(s: &Source, id: &str, w: &Written<'_>) -> anyhow::Result<String> {
     let split = Split::parse(&s.raw);
     let fm = split.fm.as_ref().ok().and_then(Option::as_ref);
@@ -116,11 +116,16 @@ pub fn to_note(s: &Source, id: &str, w: &Written<'_>) -> anyhow::Result<String> 
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let title = get("name").unwrap_or(stem);
-    let body = match (&split.fm, get("description")) {
-        (Ok(_), Some(d)) => format!("{d}\n\n{}", split.body.trim_start_matches(['\n', '\r'])),
-        (Ok(_), None) => split.body.to_string(),
-        (Err(_), _) => s.raw.clone(),
-    };
+    // One line about the memory leads every copy, so its own first line is always the next: the
+    // date reader counts on it.
+    let head = fm
+        .and_then(|f| f.words("description"))
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| title.clone());
+    // With frontmatter that never closes, the body is the whole file.
+    let own = split.body.trim_start_matches(['\n', '\r']);
+    let body = format!("{head}\n\n{own}");
     let unsafe_value = |k: &str| anyhow::anyhow!("{}: {k} cannot hold a line break", s.key);
     let mut out = Frontmatter::new_with("id", id, "\n").map_err(|_| unsafe_value("id"))?;
     let fields = [

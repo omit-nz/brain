@@ -3,6 +3,8 @@
 
 use std::ops::Range;
 
+use yaml_rust2::YamlLoader;
+
 const BOM: &str = "\u{feff}";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -222,6 +224,22 @@ impl Frontmatter {
                 Some(parse_value(rest, &self.lines[i + 1..]))
             }
             _ => Some(Value::Conflict),
+        }
+    }
+
+    /// A key's words, on one line. A value written on the key's own line is read as `get` reads
+    /// it; one written over several lines, as YAML reads it. `None` where that is not words: a
+    /// list, a mapping, or lines YAML cannot read.
+    pub fn words(&self, key: &str) -> Option<String> {
+        match self.get(key)? {
+            // `key: # note` is a comment and no value.
+            Value::Text(t) if !t.starts_with('#') => text_of(Some(Value::Text(t))),
+            Value::Conflict => None,
+            _ => {
+                let docs = YamlLoader::load_from_str(&self.lines.concat()).ok()?;
+                let words: Vec<&str> = docs.first()?[key].as_str()?.split_whitespace().collect();
+                Some(words.join(" ")).filter(|t| !t.is_empty())
+            }
         }
     }
 

@@ -778,6 +778,151 @@ fn a_quoted_memory_name_imports_as_written() {
     );
 }
 
+#[test]
+fn a_description_over_several_lines_is_copied_as_one() {
+    let i = Import::new();
+    let shapes = [
+        ("block", "|\n  vents open\n\n  at noon"),
+        ("folded", ">-\n  vents open\n  at noon"),
+        ("plain", "vents open\n  at noon"),
+        ("below", "\n  vents open\n  at noon"),
+        ("quoted", "\"vents open\n  at noon\""),
+    ];
+    for (name, value) in shapes {
+        fs::write(
+            i.mem.path().join(format!("omit/memory/{name}.md")),
+            format!("---\nname: {name}\ndescription: {value}\ntype: project\n---\nown words\n"),
+        )
+        .unwrap();
+    }
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    for (name, _) in shapes {
+        let copy = i.copy(&format!("working-memory/omit/{name}.md"));
+        assert!(
+            copy.ends_with("---\nvents open at noon\n\nown words\n"),
+            "{copy}"
+        );
+    }
+}
+
+/// What YAML does not read as the description's words is not copied as them: a comment, which
+/// could date the memory, or a list or mapping.
+#[test]
+fn only_a_descriptions_own_words_head_the_copy() {
+    let i = Import::new();
+    let shapes = [
+        ("comment-only", "\n  # reviewed 2020-01-01", "comment-only"),
+        ("comment-inline", " # reviewed 2020-01-01", "comment-inline"),
+        (
+            "comment-below",
+            " vents open\n  # checked 3 Mar 2019",
+            "vents open",
+        ),
+        ("comment-block", " | # keep\n  vents open", "vents open"),
+        (
+            "hash-in-block",
+            " |\n  # a heading\n  vents",
+            "# a heading vents",
+        ),
+        (
+            "hash-in-quotes",
+            " \"vents\n  # at noon\"",
+            "vents # at noon",
+        ),
+        ("mapping", "\n  short: vents\n  long: noon", "mapping"),
+        ("list", "\n  - vents\n  - noon", "list"),
+        ("flow-list", " [vents, noon]", "flow-list"),
+        ("flow-map", " {a: b}", "flow-map"),
+        ("bracketed", " [draft] vents", "[draft] vents"),
+        (
+            "quoted-then-comment",
+            " \"vents open\"\n  # checked 3 Mar 2019",
+            "vents open",
+        ),
+        (
+            "block-then-comment",
+            " |\n    vents open\n  # checked 3 Mar 2019",
+            "vents open",
+        ),
+        (
+            "comment-after-line",
+            " vents\n  open # checked 3 Mar 2019",
+            "vents open",
+        ),
+        (
+            "quoted-keys",
+            "\n  \"short\": vents\n  \"checked\": 3 Mar 2019",
+            "quoted-keys",
+        ),
+        (
+            "flow-then-comment",
+            " {a: b} # 2019-03-03",
+            "flow-then-comment",
+        ),
+        ("header-below", "\n  >-\n    vents open", "vents open"),
+        // Several lines that YAML cannot read are left out, as they were before.
+        ("unreadable", " a: b\n  c: d", "unreadable"),
+        // One line is taken as written, a ` #` in it too.
+        ("hash-in-line", " see issue #12", "see issue #12"),
+        ("colon-in-line", " Fix: the vents", "Fix: the vents"),
+    ];
+    for (name, value, _) in shapes {
+        fs::write(
+            i.mem.path().join(format!("omit/memory/{name}.md")),
+            format!("---\nname: {name}\ndescription:{value}\ntype: project\n---\nown words\n"),
+        )
+        .unwrap();
+    }
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    for (name, _, head) in shapes {
+        let copy = i.copy(&format!("working-memory/omit/{name}.md"));
+        assert!(
+            copy.ends_with(&format!("---\n{head}\n\nown words\n")),
+            "{name}: {copy}"
+        );
+    }
+}
+
+/// A copy's date is read from its first two lines, as a line about the memory and then the
+/// memory's own first. One with no description must not offer its second line as its first.
+#[test]
+fn a_copy_with_no_description_is_headed_by_its_name() {
+    let i = Import::new();
+    let own = "Heading\n\nsince 2024-03-01\n";
+    let shapes = [
+        (
+            "bare",
+            format!("---\nname: the bare one\n---\n{own}"),
+            "the bare one",
+        ),
+        (
+            "empty",
+            format!("---\nname: no words\ndescription:\n---\n{own}"),
+            "no words",
+        ),
+        ("plain", own.to_string(), "plain"),
+        (
+            "unclosed",
+            "---\ncreated 2025-05-05\n".to_string(),
+            "unclosed",
+        ),
+    ];
+    for (name, raw, _) in &shapes {
+        fs::write(i.mem.path().join(format!("omit/memory/{name}.md")), raw).unwrap();
+    }
+    let mem = i.mem.path().to_str().unwrap().to_string();
+    i.import(&["--memory", &mem]);
+    for (name, _, head) in &shapes {
+        let path = format!("working-memory/omit/{name}.md");
+        let copy = i.copy(&path);
+        let note = brain_note::Note::parse(Path::new(&path), &copy, brain_note::Place::Kept);
+        assert_eq!(note.body.lines().next(), Some(*head), "{copy}");
+        assert!(note.dates.is_empty(), "{:?} {copy}", note.dates);
+    }
+}
+
 /// An import of a few notes into a large vault once listed the whole vault's gaps, which reads
 /// like data loss.
 #[test]
