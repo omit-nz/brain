@@ -58,7 +58,14 @@ fn parent_dirs(path: &Path) -> io::Result<&Path> {
 /// Stamps the file at `rel` as last changed at `at`.
 pub fn set_modified(root: &Path, rel: &Path, at: SystemTime) -> io::Result<()> {
     let path = checked(root, rel)?;
-    fs::File::options().write(true).open(path)?.set_modified(at)
+    // Unix takes a time through a handle opened to read, so a read-only file keeps its time too.
+    let mut open = fs::File::options();
+    if cfg!(unix) {
+        open.read(true);
+    } else {
+        open.write(true);
+    }
+    open.open(path)?.set_modified(at)
 }
 
 /// `write_atomic`, but only when `unchanged` accepts the file as it is now (`None` when there is

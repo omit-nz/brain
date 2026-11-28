@@ -14,7 +14,7 @@ use brain_platform::fs::{Privacy, archive_name, rename_within, write_atomic};
 use serde::{Deserialize, Serialize};
 
 use super::follow::{Change, Followed, copy_of, source_of};
-use super::{Ledger, LedgerEntry, Source, hash};
+use super::{Hashes, Ledger, LedgerEntry, Source, hash};
 use crate::daemon;
 
 const FILE: &str = "follow-archive.json";
@@ -31,7 +31,8 @@ struct Record {
     // are always known.
     id: Option<String>,
     src_hash: String,
-    dst_hash: String,
+    #[serde(flatten)]
+    copy: Hashes,
     from: PathBuf,
     vault: PathBuf,
 }
@@ -42,7 +43,7 @@ impl Record {
         LedgerEntry {
             id: self.id.clone(),
             src_hash: self.src_hash.clone(),
-            dst_hash: self.dst_hash.clone(),
+            copy: self.copy.clone(),
             from: Some(self.from.clone()),
             vault: Some(self.vault.clone()),
             missing: false,
@@ -51,7 +52,7 @@ impl Record {
 
     /// Whether `entry` records this very copy of this source.
     fn is(&self, entry: &LedgerEntry) -> bool {
-        entry.id == self.id && entry.src_hash == self.src_hash && entry.dst_hash == self.dst_hash
+        entry.id == self.id && entry.src_hash == self.src_hash && self.copy.shares(&entry.copy)
     }
 }
 
@@ -96,6 +97,33 @@ impl Archive {
             Privacy::Private,
         )?;
         Ok(())
+    }
+
+    /// Where `vault`'s archived copies are, relative to it.
+    pub(super) fn files<'a>(&'a self, vault: &'a Path) -> impl Iterator<Item = &'a Path> {
+        let of = self.0.iter().filter(move |r| r.vault == vault);
+        of.map(|r| r.path.as_path())
+    }
+
+    /// The keys of the sources whose archived copy in `vault` is the note `id`.
+    pub(super) fn keys_of<'a>(
+        &'a self,
+        vault: &'a Path,
+        id: &'a str,
+    ) -> impl Iterator<Item = &'a str> {
+        self.0
+            .iter()
+            .filter(move |r| r.vault == vault && r.id.as_deref() == Some(id))
+            .map(|r| r.key.as_str())
+    }
+
+    /// As `Ledger::rewrite`, for the archived records.
+    pub(super) fn rewrite(&mut self, vault: &Path, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for r in self.0.iter_mut().filter(|r| r.vault == vault) {
+            changed |= r.copy.rewrite(from, to);
+        }
+        changed
     }
 
     /// Whether a record names the note `id`.
@@ -143,7 +171,7 @@ impl Archive {
             gone: false,
             id: entry.id.clone(),
             src_hash: entry.src_hash.clone(),
-            dst_hash: entry.dst_hash.clone(),
+            copy: entry.copy.clone(),
             from: followed.to_path_buf(),
             vault: vault.to_path_buf(),
         });
@@ -192,7 +220,8 @@ impl Archive {
                 None => {
                     // While the archived file is still there, only the very bytes are it: a
                     // fresh copy written under the same id is not.
-                    let back = copied.is_some_and(|b| archived.is_none() || hash(&b) == r.dst_hash);
+                    let back =
+                        copied.is_some_and(|b| archived.is_none() || r.copy.accepts(&hash(&b)));
                     if back {
                         ledger.0.insert(r.key.clone(), r.entry());
                         in_ledger = true;
@@ -281,7 +310,7 @@ impl Archive {
             ledger.0.insert(source.key.clone(), r.entry());
             // Only a copy as brain wrote it is settled: settling the person's edit would record
             // their words as brain's, and the next change would write over them.
-            if hash(&archived) == r.dst_hash {
+            if r.copy.accepts(&hash(&archived)) {
                 written.push(source.key.clone());
             }
             out.restored.push(rel_key(&to));
@@ -336,7 +365,7 @@ mod tests {
             gone: !back,
             id: Some(ID.into()),
             src_hash: hash(b"source"),
-            dst_hash: hash(text.as_bytes()),
+            copy: Hashes::of(hash(text.as_bytes())),
             from: home.path().join("projects"),
             vault: vault.root.clone(),
         }]);

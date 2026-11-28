@@ -1,6 +1,8 @@
 //! Frontmatter held as the lines the author wrote. Reading parses only the key asked for, and
 //! writing touches only the key set, so comments, order and unknown keys survive byte for byte.
 
+use std::ops::Range;
+
 const BOM: &str = "\u{feff}";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -267,21 +269,41 @@ impl Frontmatter {
             "\n"
         };
         let line = format!("{key}: {shown}{eol}");
-        match self
-            .lines
-            .iter()
-            .position(|l| value_after(l, key).is_some())
-        {
-            Some(i) => {
-                let n = self.lines[i + 1..]
-                    .iter()
-                    .take_while(|l| continues(l))
-                    .count();
-                self.lines.splice(i..=i + n, [line]);
+        match self.span(key) {
+            Some(at) => {
+                self.lines.splice(at, [line]);
             }
             None => self.lines.push(line),
         }
         Ok(())
+    }
+
+    /// Takes out `key`'s line and the lines that continue it.
+    pub fn remove(&mut self, key: &str) {
+        if let Some(at) = self.span(key) {
+            self.lines.drain(at);
+        }
+    }
+
+    /// Whether `key` is written as the one line `key: value`, with nothing added to it.
+    pub fn holds_only(&self, key: &str, value: &str) -> bool {
+        self.span(key).is_some_and(|at| {
+            at.len() == 1
+                && self.lines[at.start].trim_end_matches(['\r', '\n']) == format!("{key}: {value}")
+        })
+    }
+
+    /// Where `key`'s line and the lines that continue it are.
+    fn span(&self, key: &str) -> Option<Range<usize>> {
+        let start = self
+            .lines
+            .iter()
+            .position(|l| value_after(l, key).is_some())?;
+        let more = self.lines[start + 1..]
+            .iter()
+            .take_while(|l| continues(l))
+            .count();
+        Some(start..start + 1 + more)
     }
 
     fn render(&self) -> String {

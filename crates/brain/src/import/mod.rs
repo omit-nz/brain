@@ -7,8 +7,10 @@
 mod archived;
 mod blocklist;
 mod follow;
+mod hashes;
 mod memory;
 mod report;
+mod review;
 mod vault;
 
 use std::collections::{BTreeMap, HashSet};
@@ -25,7 +27,9 @@ use sha2::{Digest, Sha256};
 pub use archived::{Archive, archived_line};
 pub use blocklist::Blocklist;
 pub use follow::{Followed, sync};
+use hashes::Hashes;
 pub use report::report;
+pub use review::{Left, plan as plan_clearing, write as write_clearing};
 
 pub const LEDGER: &str = "import-ledger.json";
 /// Held by whoever reads, changes and saves the ledger.
@@ -35,7 +39,8 @@ pub const LOCK: &str = "import.lock";
 pub struct LedgerEntry {
     pub id: Option<String>,
     pub src_hash: String,
-    pub dst_hash: String,
+    #[serde(flatten)]
+    pub copy: Hashes,
     /// The folder the source was found in, a memory import's projects folder or the vault imported
     /// from; unknown for a copy made before this was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +121,24 @@ impl Ledger {
                 && e.from.as_deref().is_none_or(|from| from == folder)
                 && vault.root.join(follow::copy_of(vault, key)).is_file()
         })
+    }
+
+    /// The keys of the sources an import wrote the note `id` into `vault` from.
+    fn keys_of<'a>(&'a self, vault: &'a Path, id: &'a str) -> impl Iterator<Item = &'a str> {
+        self.0
+            .iter()
+            .filter(move |(_, e)| e.of(vault) && e.id.as_deref() == Some(id))
+            .map(|(key, _)| key.as_str())
+    }
+
+    /// Records brain's rewrite of the copies in `vault` that read as `from`, and says whether
+    /// any record changed.
+    fn rewrite(&mut self, vault: &Path, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for entry in self.0.values_mut().filter(|e| e.of(vault)) {
+            changed |= entry.copy.rewrite(from, to);
+        }
+        changed
     }
 
     pub fn save(&self, dirs: &Dirs) -> anyhow::Result<()> {
@@ -305,7 +328,7 @@ fn classify_sources(
                 todo.push((s, dst_hash));
             }
             Some(e) if e.src_hash == src_hash => plan.unchanged += 1,
-            Some(e) if dst_hash.as_deref() == Some(e.dst_hash.as_str()) => {
+            Some(e) if dst_hash.as_deref().is_some_and(|now| e.copy.accepts(now)) => {
                 plan.updated.push(rel_key(&s.dst_rel));
                 todo.push((s, dst_hash));
             }
@@ -325,7 +348,7 @@ pub fn plan(
 }
 
 /// Classifies, then writes every new and updated copy, each with its id, and records it in the
-/// ledger. Returns the plan and the keys written, whose `dst_hash` the caller refreshes with
+/// ledger. Returns the plan and the keys written, whose hash the caller refreshes with
 /// `settle` after its own reindex, which can still give a copy a new id when another note holds
 /// its id.
 pub fn apply(
@@ -400,7 +423,7 @@ fn write_one(
         LedgerEntry {
             id,
             src_hash: hash(s.raw.as_bytes()),
-            dst_hash: hash(text.as_bytes()),
+            copy: Hashes::of(hash(text.as_bytes())),
             from: s.from.clone(),
             vault: Some(dst.root.clone()),
             missing: false,
@@ -422,7 +445,12 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
             _ => continue,
         };
         if let Ok(bytes) = std::fs::read(dst.root.join(&rel)) {
-            entry.dst_hash = hash(&bytes);
+            // A copy the record already accepts, as one restored and not yet written, keeps
+            // both its hashes.
+            let now = hash(&bytes);
+            if !entry.copy.accepts(&now) {
+                entry.copy = Hashes::of(now);
+            }
             let text = String::from_utf8_lossy(&bytes);
             if let Some(id) = brain_note::Note::parse(&rel, &text, brain_note::Place::Kept).id {
                 entry.id = Some(id.to_string());
@@ -430,4 +458,54 @@ pub fn settle(ledger: &mut Ledger, dst: &Vault, written: &[String]) -> anyhow::R
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A copy brain has just read from disk is the only thing its record stands for: the hash it
+    /// was rewritten from is no file's any more.
+    #[test]
+    fn settling_a_copy_keeps_only_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        write_atomic(
+            dir.path(),
+            Path::new("a.md"),
+            b"as it is\n",
+            Privacy::Normal,
+        )
+        .unwrap();
+        let mut ledger: Ledger = serde_json::from_value(serde_json::json!({
+            "vault/a.md": { "id": null, "src_hash": "", "dst_hash": "new", "was": "old" }
+        }))
+        .unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        settle(&mut ledger, &vault, &["vault/a.md".into()]).unwrap();
+        let entry = &ledger.0["vault/a.md"];
+        assert!(entry.copy.accepts(&hash(b"as it is\n")));
+        assert!(!entry.copy.accepts("old"));
+    }
+
+    /// A copy restored and not yet written may be put back to either of its two hashes.
+    #[test]
+    fn settling_an_accepted_copy_keeps_both_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_atomic(
+            dir.path(),
+            Path::new("a.md"),
+            b"as it was\n",
+            Privacy::Normal,
+        )
+        .unwrap();
+        let mut ledger: Ledger = serde_json::from_value(serde_json::json!({
+            "vault/a.md": { "id": null, "src_hash": "", "dst_hash": "new",
+                            "was": hash(b"as it was\n") }
+        }))
+        .unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        settle(&mut ledger, &vault, &["vault/a.md".into()]).unwrap();
+        let entry = &ledger.0["vault/a.md"];
+        assert!(entry.copy.accepts("new") && entry.copy.accepts(&hash(b"as it was\n")));
+    }
 }

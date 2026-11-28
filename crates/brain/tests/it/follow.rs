@@ -9,6 +9,8 @@ use brain_platform::fs::Lock;
 
 use super::Home;
 
+mod accepts;
+mod clearing;
 mod restore;
 
 /// Claude Code's projects folder, with one project's memory.

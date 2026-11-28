@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::Home;
 
+mod clear;
+
 const NOW: &str = "2026-11-25T00:00:00Z";
 
 fn fixture(name: &str) -> PathBuf {
@@ -238,22 +240,15 @@ fn an_import_writes_no_review_date() {
     );
 }
 
-/// Brain has no command that edits the notes it imported, and no marker holds an import.
+/// An unreleased build left a marker that held imports; nothing reads it.
 #[test]
-fn nothing_clears_review_dates_or_holds_an_import() {
+fn a_stray_clearing_marker_holds_no_import() {
     let i = Import::new();
     let data = i.h.home.path().join("data");
     fs::create_dir_all(&data).unwrap();
     fs::write(data.join("clearing.json"), "[\"2026-11-25\"]").unwrap();
     let said = i.import(&[]);
     assert!(said.contains("0 conflicts"), "{said}");
-    let out =
-        i.h.brain()
-            .args(["import", "clear-review-dates"])
-            .output()
-            .unwrap();
-    let why = String::from_utf8_lossy(&out.stderr);
-    assert!(why.contains("unrecognized subcommand"), "{why}");
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 Leave a brain at home. brain keeps a folder of your Markdown notes searchable on your own computer, and gives your AI tool the same search, so it answers from what you have written down. A Rust daemon and command line with a local MCP server. Apache-2.0. Built by [omit](https://omit.nz).
 
-## What works today (0.2.6)
+## What works today (0.2.7)
 
 - Search over your notes on your own computer, by words, meaning and links. It returns nothing rather than a weak match, says when each note it finds was written, marks one that another note corrects or supersedes, orders by date when you ask for the latest decision, says for a copy whose source it has recorded whether that file has changed since, and keeps the questions nothing answered (`brain gaps`).
 - Claude Code and Claude Desktop search your notes, capture new ones into an inbox, correct a note and list what is due for review.
@@ -79,6 +79,7 @@ A room lets your AI sessions leave each other messages on this computer, even se
 - `brain connect`, `brain mcp`: connect an AI tool, and serve it.
 - `brain memory follow`, `brain memory run`, `brain memory unfollow`: follow Claude Code's auto-memory.
 - `brain import learning-loop`: copy another brain's notes in. A copy gets no review date.
+- `brain import clear-review-dates --imported-on <day>`: take out the review dates 0.2.5 and earlier stamped on what they imported. It only lists them until `--apply`.
 - `brain room post`, `brain room new`, `brain room list`: leave and read messages between sessions.
 - `brain usage`, `brain usage on`, `brain usage off`: see and set what omit is sent.
 

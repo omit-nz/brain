@@ -205,7 +205,7 @@ fn date_back(vault: &Vault, ledger: &Ledger, dated: &[(String, PathBuf, SystemTi
             .is_ok_and(|has| has > *at);
         let untouched = || {
             ledger.current(key, &vault.root).is_some_and(|entry| {
-                std::fs::read(&copy).is_ok_and(|text| hash(&text) == entry.dst_hash)
+                std::fs::read(&copy).is_ok_and(|text| entry.copy.accepts(&hash(&text)))
             })
         };
         if later && untouched() {
@@ -374,7 +374,7 @@ fn archive_due(
         let rel = copy_of(vault, &key);
         let entry = &ledger.0[&key];
         match std::fs::read(vault.root.join(&rel)) {
-            Ok(copy) if hash(&copy) == entry.dst_hash => {
+            Ok(copy) if entry.copy.accepts(&hash(&copy)) => {
                 let to = archive.name_for(vault, &rel);
                 archive.add(&key, to.clone(), entry, followed, &vault.root);
                 moves.push((key, rel, to));
@@ -442,7 +442,7 @@ mod tests {
     use brain_platform::fs::{Privacy, write_atomic};
 
     use super::*;
-    use crate::import::LedgerEntry;
+    use crate::import::{Hashes, LedgerEntry};
 
     /// The record file cannot be written, so what happened to the copy is what happens before it
     /// is saved.
@@ -466,7 +466,7 @@ mod tests {
             LedgerEntry {
                 id: Some("0195f2e0-0000-7000-8000-000000000001".into()),
                 src_hash: hash(b"source"),
-                dst_hash: hash(b"words\n"),
+                copy: Hashes::of(hash(b"words\n")),
                 from: None,
                 vault: None,
                 missing: false,
