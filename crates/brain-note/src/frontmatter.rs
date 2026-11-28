@@ -226,7 +226,8 @@ impl Frontmatter {
     }
 
     /// A key's words on one line, however many it was written over: a block or folded scalar,
-    /// or a value carried onto indented lines. Every line break becomes a space.
+    /// or a value carried onto indented lines. Every line break becomes a space. `None` for a
+    /// list or a mapping, which are not words.
     pub fn one_line(&self, key: &str) -> Option<String> {
         if self.get(key) == Some(Value::Conflict) {
             return None;
@@ -236,23 +237,44 @@ impl Frontmatter {
             .iter()
             .position(|l| value_after(l, key).is_some())?;
         let first = value_after(&self.lines[start], key)?.trim();
+        let below = self.lines[start + 1..]
+            .iter()
+            .take_while(|l| continues(l) || l.trim().is_empty())
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty());
         // `|` or `>`, with the marks after it, says how the lines below join and is no word.
-        let block = first.strip_prefix(['|', '>']).is_some_and(|marks| {
+        // What is under it is its text as written, `#` and quotes included.
+        let header = first.split(" #").next().unwrap_or(first).trim_end();
+        let block = header.strip_prefix(['|', '>']).is_some_and(|marks| {
             marks
                 .chars()
                 .all(|c| matches!(c, '+' | '-') || c.is_ascii_digit())
         });
-        let below = self.lines[start + 1..]
-            .iter()
-            .take_while(|l| continues(l) || l.trim().is_empty());
-        let words: Vec<&str> = std::iter::once(if block { "" } else { first })
-            .chain(below.map(|l| l.trim()))
-            .filter(|l| !l.is_empty())
-            .collect();
-        let joined = words.join(" ");
-        // A block's quotes are its own words.
         if block {
+            let joined = below.collect::<Vec<_>>().join(" ");
             return Some(joined).filter(|t| !t.is_empty());
+        }
+        let quoted = |l: &str| l.starts_with(['"', '\'']);
+        let mut words: Vec<&str> = std::iter::once(first).chain(below).collect();
+        let in_quotes = words
+            .iter()
+            .find(|l| !l.is_empty())
+            .is_some_and(|l| quoted(l));
+        // Outside quotes a line starting `#` is a comment.
+        words.retain(|l| !l.is_empty() && (in_quotes || !l.starts_with('#')));
+        // Nothing on the key's own line, and a list item or a `name:` below it.
+        let nested = (first.is_empty() || first.starts_with('#'))
+            && words.first().is_some_and(|l| {
+                *l == "-"
+                    || l.starts_with("- ")
+                    || !quoted(l) && (l.contains(": ") || l.ends_with(':'))
+            });
+        let joined = words.join(" ");
+        let flow = [('[', ']'), ('{', '}')]
+            .iter()
+            .any(|&(open, close)| joined.starts_with(open) && joined.ends_with(close));
+        if nested || flow {
+            return None;
         }
         text_of(Some(Value::Text(joined)))
     }
