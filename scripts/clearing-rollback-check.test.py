@@ -55,7 +55,7 @@ def run(ledger, files, archive=(), locked=None, data_at="data", vault_at="vault"
              str(SCRIPT), "--data", str(root / data_at), "--config", str(root / "config.toml")],
             capture_output=True, text=True, encoding="utf-8", timeout=60)
         if locked:
-            (vault / locked).chmod(0o600)
+            (vault / locked).chmod(0o700)
         same = before == {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
         return done.returncode, done.stdout + done.stderr, same
 
@@ -120,7 +120,18 @@ code, said, _ = run(
 check("a vault that is gone is named with the way out, and the rest is still looked at",
       code == 1 and "/nowhere" in said.replace("\\", "/") and "gone for good" in said
       and "a.md: still holds" in said, said)
+code, said, _ = run({"vault/a.md": MOVED_ON}, {".DS_Store": b"x"})
+check("a folder holding only hidden files is as good as empty",
+      code == 1 and "safe" not in said, said)
+record = {"key": "memory/p/one.md", "path": "_archive/working-memory/p/one.md", **MOVED_ON}
+code, said, _ = run({}, {}, archive=[record])
+check("files out of reach are counted as files", code == 1 and "2 recorded files" in said, said)
+if os.name == "posix" and os.geteuid() != 0:
+    code, said, _ = run({"vault/a.md": MOVED_ON}, {"a.md": OLD}, locked=".")
+    check("a vault that cannot be read is said to be that, not gone",
+          code == 1 and "cannot be read" in said and "gone for good" not in said, said)
 for name, ledger in [
+    ("a hash that is no text", {"vault/a.md": {"dst_hash": digest(NEW), "was": 3}}),
     ("a record that is no object", {"vault/a.md": 3}),
     ("a key with no kind", {"a.md": MOVED_ON}),
 ]:

@@ -210,13 +210,20 @@ pub fn write(
             in_ledger |= ledger.rewrite(&vault.root, &from, &to);
             in_archive |= archive.rewrite(&vault.root, &from, &to);
         }
-        if in_ledger {
-            out.stopped = save_ledger(ledger);
+        // One chain, so the second save never answers for a first that failed.
+        out.stopped = if in_ledger {
+            save_ledger(ledger)
+        } else {
+            Ok(())
         }
-        abort_at("BRAIN_TEST_ABORT_BETWEEN_CLEAR_SAVES", 1);
-        if out.stopped.is_ok() && in_archive {
-            out.stopped = save_archive(archive);
-        }
+        .and_then(|()| {
+            abort_at("BRAIN_TEST_ABORT_BETWEEN_CLEAR_SAVES", 1);
+            if in_archive {
+                save_archive(archive)
+            } else {
+                Ok(())
+            }
+        });
         if out.stopped.is_err() {
             break;
         }
@@ -403,9 +410,9 @@ mod tests {
             .map(|n| {
                 let rel = format!("{n}.md");
                 note(dir.path(), &rel, &text(n));
-                // Past the first batch the copies are archived ones, as `plan` orders them.
+                // Every batch holds followed copies and archived ones.
                 let held = hash(text(n).as_bytes());
-                if n < BATCH {
+                if n % 2 == 0 {
                     let key = format!("vault/{rel}");
                     ledger.0.extend(recorded(&key, None, &held).0);
                 } else {
@@ -419,8 +426,10 @@ mod tests {
             .collect();
         let before = (stored(&ledger), serde_json::Value::Array(records));
         let vault = Vault::open(dir.path()).unwrap();
-        // Whole, then with the second batch's archive save failing.
-        for fails in [false, true] {
+        // Whole, then with each of the second batch's saves failing.
+        for (ledger_fails, archive_fails) in [(false, false), (true, false), (false, true)] {
+            let fails = ledger_fails || archive_fails;
+            let (mut ledger_saves, mut archive_saves) = (0, 0);
             for (n, c) in changes.iter().enumerate() {
                 note(dir.path(), &c.path(), &text(n));
             }
@@ -433,11 +442,14 @@ mod tests {
                 &mut ledger,
                 &mut archive,
                 &mut |l| {
+                    ledger_saves += 1;
+                    anyhow::ensure!(!(ledger_fails && ledger_saves == 2), "no room");
                     in_ledger = stored(l);
                     Ok(())
                 },
                 &mut |a| {
-                    anyhow::ensure!(!fails, "no room");
+                    archive_saves += 1;
+                    anyhow::ensure!(!(archive_fails && archive_saves == 2), "no room");
                     in_archive = serde_json::to_value(a).unwrap();
                     Ok(())
                 },
@@ -446,10 +458,10 @@ mod tests {
             assert_eq!(done.done.len(), if fails { BATCH } else { BATCH + 5 });
             for (n, c) in changes.iter().enumerate() {
                 let now = hash(&std::fs::read(dir.path().join(c.path())).unwrap());
-                let record = if n < BATCH {
+                let record = if n % 2 == 0 {
                     in_ledger[format!("vault/{}", c.path())].clone()
                 } else {
-                    in_archive[n - BATCH].clone()
+                    in_archive[n / 2].clone()
                 };
                 let held = [&record["dst_hash"], &record["was"]];
                 assert!(held.iter().any(|h| **h == *now), "{}: {record}", c.path());

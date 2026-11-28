@@ -1270,6 +1270,13 @@ fn clear_review_dates(
     } else if a.apply && writer.is_none() {
         lines.push("brain's daemon will index them".into());
     }
+    // Only one error can end the run, so the index's trouble is said in the report when the
+    // clearing stopped as well.
+    if let (Err(_), Err(e)) = (&stopped, &indexed) {
+        lines.push(format!(
+            "the index could not be updated either; run `brain index`: {e:#}"
+        ));
+    }
     println!("{}", terminal(&lines.join("\n")));
     stopped.context("the clearing stopped; run the same command again")?;
     indexed

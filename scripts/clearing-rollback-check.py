@@ -68,24 +68,40 @@ def copy_of(key):
     return f"{MEMORY}/{rest}" if kind == "memory" else rest
 
 
+def checked(record):
+    """`record`, whose old hash is one a file could be compared with."""
+    if not isinstance(record["was"], str):
+        raise ValueError("a hash that is not text")
+    return record
+
+
 def standing_for(data, vault):
     """Each vault and file a record with an old hash stands for, with the record's two hashes."""
     for key, entry in load(data / "import-ledger.json", dict).items():
         if entry.get("was"):
             root = pathlib.Path(entry.get("vault") or vault)
-            yield root, copy_of(key), entry
+            yield root, copy_of(key), checked(entry)
     for record in load(data / "follow-archive.json", list, missing=[]):
         if record.get("was"):
-            root = pathlib.Path(record["vault"])
+            root = pathlib.Path(checked(record)["vault"])
             yield root, record["path"], record
             yield root, copy_of(record["key"]), record
 
 
-def holds_anything(folder):
+def out_of_reach(vault):
+    """Why nothing in `vault` can be looked at, or None. An empty folder where a drive was
+    mounted holds at most the system's hidden files."""
+    gone = (
+        "is not there or is empty",
+        "Put the folder back and run this again. If it is gone for good, it holds nothing an"
+        " older brain could misread.",
+    )
     try:
-        return any(folder.iterdir())
-    except OSError:
-        return False
+        return None if any(not p.name.startswith(".") for p in vault.iterdir()) else gone
+    except (FileNotFoundError, NotADirectoryError):
+        return gone
+    except OSError as error:
+        return (f"cannot be read: {error.strerror}", "Make it readable and run this again.")
 
 
 def in_the_way(path, record):
@@ -112,20 +128,20 @@ def main():
         vault = tomllib.loads(args.config.read_text(encoding="utf-8"))["vault"]
     except (OSError, ValueError, KeyError) as error:
         sys.exit(f"{shown(args.config)} does not say where the vault is: {shown(error)}")
-    found, gone = {}, {}
+    found, unseen = {}, {}
     try:
         for root, rel, record in standing_for(args.data, vault):
-            # A vault out of reach, or an empty folder where it was mounted, would read as one
-            # with nothing in the way.
-            if not holds_anything(root):
-                gone.setdefault(str(root), set()).add(rel)
+            # A vault out of reach would read as one with nothing in the way.
+            why = out_of_reach(root)
+            if why:
+                unseen.setdefault((str(root), *why), set()).add(rel)
                 continue
             why = in_the_way(root / rel, record)
             if why:
                 found[str(root / rel)] = why
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         sys.exit(f"a record is not one brain wrote, so nothing is known: {shown(repr(error))}")
-    if not found and not gone:
+    if not found and not unseen:
         print("no copy is waiting on the newer brain: rolling back is safe")
         return
     print("do not roll back yet")
@@ -143,11 +159,10 @@ def main():
             " see this: an older brain would take those restored notes for ones you edited."
             " Clearing them again before rolling back removes the restored dates."
         )
-    for root, files in sorted(gone.items()):
+    for (root, why, way_out), files in sorted(unseen.items()):
         print(
-            f"\n{shown(root)} is not there or is empty, so {len(files)} recorded copies in it could"
-            " not be looked at. Put the folder back and run this again. If it is gone for good,"
-            " it holds nothing an older brain could misread."
+            f"\n{shown(root)} {why}, so {len(files)} recorded files in it could not be looked at."
+            f" {way_out}"
         )
     sys.exit(1)
 

@@ -299,6 +299,28 @@ fn a_ledger_that_cannot_be_saved_stops_before_any_note_is_written() {
     assert!(said.contains("0 review dates cleared"), "{said}");
     assert_eq!(i.dated(), 2);
     i.both_update();
+    // With the index in trouble too, both are said.
+    let i = stamped();
+    let data = i.h.home.path().join("data");
+    for name in ["index.db", "index.db-wal", "index.db-shm"] {
+        let _ = fs::remove_file(data.join(name));
+    }
+    fs::create_dir(data.join("index.db")).unwrap();
+    let ledger = data.join("import-ledger.json");
+    let flag = |f: &str| {
+        let done = std::process::Command::new("chflags")
+            .args([f.as_ref(), ledger.as_os_str()])
+            .status()
+            .unwrap();
+        assert!(done.success());
+    };
+    flag("uchg");
+    let out = i.apply_with(None);
+    flag("nouchg");
+    let said = String::from_utf8_lossy(&out.stdout);
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("run the same command again"), "{why}");
+    assert!(said.contains("brain index"), "{said}");
 }
 
 /// A follow pass saving an older copy of the ledger over the run's would undo what it recorded.
