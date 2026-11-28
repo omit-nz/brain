@@ -999,9 +999,12 @@ fn start(dirs: &Dirs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Result<()> {
+fn update(dirs: &Dirs, check: bool, source: impl update::Source + Clone) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
+    // Each wait is named before it starts, so a slow line never reads as a hang.
+    let looking = || eprintln!("Looking for a newer release...");
     if check {
+        looking();
         match update::check(source, version)? {
             Some(newer) => {
                 println!("brain {newer} is out; you have {version}. Run `brain update`.")
@@ -1017,7 +1020,10 @@ fn update(dirs: &Dirs, check: bool, source: impl update::Source) -> anyhow::Resu
         current.display(),
         service::HOW_TO_INSTALL
     );
-    let installed = update::run(source, &update::release_trust(), &current, version)?;
+    looking();
+    let trust = update::release_trust();
+    let newer = update::newer(|| source.clone(), &trust, &current, version)?;
+    let installed = newer.unwrap_or_else(|| version.to_string());
     if installed == version {
         println!("brain {version} is the newest release.");
     } else {

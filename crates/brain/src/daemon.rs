@@ -147,8 +147,16 @@ fn update_self(
     }
     let version = env!("CARGO_PKG_VERSION");
     let installed = match from_dir {
-        Some(dir) => newer(|| update::LocalDir(dir.to_path_buf()), &current, version),
-        None => newer(|| update::GitHub, &current, version),
+        Some(dir) => {
+            let source = || update::LocalDir(dir.to_path_buf());
+            update::newer(source, &update::release_trust(), &current, version)
+        }
+        None => update::newer(
+            || update::GitHub,
+            &update::release_trust(),
+            &current,
+            version,
+        ),
     };
     installed
         .map_err(|e| {
@@ -157,19 +165,6 @@ fn update_self(
         })
         .ok()
         .flatten()
-}
-
-/// The version installed over `current`, when a newer one was out.
-fn newer<S: update::Source>(
-    source: impl Fn() -> S,
-    current: &Path,
-    version: &str,
-) -> anyhow::Result<Option<String>> {
-    if update::check(source(), version)?.is_none() {
-        return Ok(None);
-    }
-    let v = update::run(source(), &update::release_trust(), current, version)?;
-    Ok((v != version).then_some(v))
 }
 
 /// Runs the daemon until it installs a newer release, then runs that release in its place with
