@@ -190,7 +190,7 @@ fn assemble(due: &Due, indexes: &[(String, String)]) -> String {
         }
         if due.all > due.shown.len() {
             out.push_str(&format!(
-                "{} more: `brain due`\n",
+                "{} more: `brain due --all`\n",
                 due.all - due.shown.len()
             ));
         }

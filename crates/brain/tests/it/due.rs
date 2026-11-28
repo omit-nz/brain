@@ -338,4 +338,6 @@ fn the_command_lists_the_oldest_and_counts_the_rest() {
     assert!(!all.contains("not listed"), "{all}");
     let json = h.json(&["due", "--json"]);
     assert_eq!(json["due"].as_array().unwrap().len(), 22);
+    // The hint printed for a window looking back is one the command takes.
+    h.run(&["due", "--within", "-1", "--all"]);
 }
