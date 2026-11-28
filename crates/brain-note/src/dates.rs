@@ -34,6 +34,7 @@ pub(crate) fn candidates(
     let mut lines = body.lines().filter(|l| !l.trim().is_empty());
     let said = lines.next().and_then(first_date);
     // A copy opens with a line about the memory; the memory's own first line comes after it.
+    // One made before 0.2.10 of a memory with no description does not, until the memory changes.
     let own = lines.next().filter(|_| memory).and_then(first_date);
     let bulk = matches!((written, named), (Some(w), Some(n)) if (w - n).get_days() > BULK_DAYS);
     let order = if bulk {
